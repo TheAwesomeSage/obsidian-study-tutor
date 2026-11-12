@@ -92,7 +92,7 @@ npm run build     # writes main.js
 
 ## Limits
 
-- Not yet run inside Obsidian itself. The logic is covered by unit tests, a jsdom run of the view with a stubbed `obsidian` module, and a live CLI test.
+- Used inside Obsidian on Windows only; never tried on macOS or Linux. The logic is covered by unit tests, a jsdom run of the view with a stubbed `obsidian` module, and live CLI tests.
 - Replies are not streamed; a turn appears when it is complete.
 - A model can grade maths wrongly. The tutor is told to check steps before grading, and the topic card ties it to your notes, but treat a surprising verdict with care.
 - The flashcard schedule is a simple SM-2 style scheme, not FSRS.

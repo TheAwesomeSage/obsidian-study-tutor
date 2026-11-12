@@ -262,7 +262,8 @@ export class TutorView extends ItemView {
       bank.disabled = this.busy;
       bank.onclick = () => void this.send("");
     }
-    this.iconButton(bar, "square-pen", "New chat", () => void this.newChat()).disabled = this.busy;
+    // Icon names are ones Obsidian has shipped for years; a newer name would draw nothing on older versions.
+    this.iconButton(bar, "message-square-plus", "New chat", () => void this.newChat()).disabled = this.busy;
     if (this.chatPath) this.iconButton(bar, "file-text", "Open this chat as a note", () => void this.app.workspace.openLinkText(this.chatPath!, "", true));
 
     const list = body.createDiv({ cls: "st-messages" });
@@ -339,8 +340,11 @@ export class TutorView extends ItemView {
 
   private async newChat(): Promise<void> {
     if (!this.dir || !this.topic) return;
-    const path = await this.plugin.store.newChat(this.dir, this.topic.title, this.mode);
-    await this.openChat(path);
+    if (this.chat && this.chatPath && !this.chat.messages.length && !this.chat.summary) {
+      // The current chat is still empty: reuse it instead of leaving an empty file behind.
+      this.chat.fm.mode = this.mode;
+      await this.plugin.store.saveChat(this.chatPath, this.chat);
+    } else await this.openChat(await this.plugin.store.newChat(this.dir, this.topic.title, this.mode));
     this.lastError = "";
     this.lastChanges = [];
     this.render();
@@ -460,7 +464,7 @@ export class TutorView extends ItemView {
     const q = this.queue[0];
     if (!q || !this.state) {
       const done = body.createDiv({ cls: "st-empty st-welcome" });
-      setIcon(done.createDiv({ cls: "st-welcome-icon" }), "check-circle");
+      setIcon(done.createDiv({ cls: "st-welcome-icon" }), "check");
       done.createEl("p", { text: this.reviewed ? `Done. ${this.reviewed} cards reviewed without using any tokens.` : "Nothing is due today." });
       done.createEl("p", { cls: "st-usage", text: "Cards come from this topic's question bank. Due cards and a few new ones appear here each day." });
       return;

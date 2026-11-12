@@ -174,7 +174,15 @@ export class Engine {
     const pending = questions.find((q) => q.id === fmStr(chat.fm, "card"));
     const last = chat.messages[chat.messages.length - 1];
     const answer = text || (last?.role === "you" ? last.text : "");
-    if (!pending || !answer) return say(pending ? formatQuizQuestion(pending, state) : "Send any message to begin.");
+    if (!pending) {
+      // The pending question is gone (the chat was used in another mode, or the bank was
+      // recompiled). Give up on placement instead of asking for an answer to nothing.
+      chat.fm.placement = "done";
+      chat.fm.card = "";
+      await this.store.saveChat(chatPath, chat);
+      return null;
+    }
+    if (!answer) return say(formatQuizQuestion(pending, state));
     if (text) chat.messages.push({ role: "you", text });
 
     const mark = codeMark(pending, answer);

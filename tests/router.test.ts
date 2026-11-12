@@ -213,6 +213,17 @@ test("placement sets starting levels in code and then hands over to the tutor", 
   assert.deepEqual([s2.levels[1], s2.levels[2], s2.focus], [0, 2, 1]);
   const c3 = await other.store.newChat(other.dir, "Linear maps", "tutor", new Date(2026, 10, 12, 9, 5));
   assert.equal(await other.engine.placementTurn(other.dir, c3, ""), null);
+
+  // If the pending question disappears mid-placement (the chat was used in another mode),
+  // placement is abandoned and the normal turn runs, instead of asking for an answer forever.
+  const third = await setup(true);
+  const c4 = await third.store.newChat(third.dir, "Linear maps", "tutor", new Date(2026, 10, 12, 9, 0));
+  await third.engine.placementTurn(third.dir, c4, "");
+  const stuck = await third.store.loadChat(c4);
+  stuck.fm.card = "";
+  await third.store.saveChat(c4, stuck);
+  assert.equal(await third.engine.placementTurn(third.dir, c4, "B"), null);
+  assert.equal((await third.store.loadChat(c4)).fm.placement, "done");
 });
 
 test("the next step follows learn, practise, master", () => {
