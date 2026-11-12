@@ -1,19 +1,23 @@
-import { Component, ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf } from "obsidian";
+import { Component, ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import { Usage, addUsage, usageLine, zeroUsage } from "./claude";
-import { Material } from "./engine";
-import { Chat, Grade, LearnerState, Mode, Question, Topic, answerText, dueCount, fmStr, mcqLetter, progress, reviewQueue, sameShortAnswer, schedule, splitFrontmatter, ymd } from "./formats";
+import { Material, TurnResult } from "./engine";
+import { Chat, Grade, LearnerState, Mode, NextStep, Question, Topic, answerText, dueCount, fmStr, mcqLetter, nextStep, progress, reviewQueue, sameShortAnswer, schedule, splitFrontmatter, ymd } from "./formats";
 import type StudyTutorPlugin from "./main";
 import { TopicRef } from "./store";
 
 export const VIEW_TYPE = "study-tutor-view";
 
 type Tab = "chat" | "review" | "map";
-const MODE_LABEL: Record<Mode, string> = { tutor: "Tutor", quiz: "Quizzer", expert: "Expert" };
-const MODE_HINT: Record<Mode, string> = {
-  tutor: "The tutor teaches by asking one question at a time and only moves you up a level when you have shown it.",
-  quiz: "Rapid, strict questions aimed at your weakest subskills.",
-  expert: "Ask anything about this topic and get a direct explanation grounded in your notes.",
-};
+
+/** The modes in the order of the guided path: learn it, practise it, master it; ask at any time. */
+const PATH: { mode: Mode; label: string; who: string; icon: string; step: string; start: string; hint: string }[] = [
+  { mode: "teach", label: "Learn", who: "Teacher", icon: "book-open", step: "1", start: "Start lesson", hint: "Lessons for material you have not met: why it matters, the idea, a worked example, a diagram where it helps, then a problem to try." },
+  { mode: "quiz", label: "Practise", who: "Quizzer", icon: "zap", step: "2", start: "Start quiz", hint: "Strict questions on your weakest subskills, from the question bank first. The plugin marks most answers itself, so most turns use no tokens." },
+  { mode: "tutor", label: "Master", who: "Tutor", icon: "target", step: "3", start: "Start", hint: "Socratic tutoring: one question at a time, and a level only goes up when you have shown it. The most thorough mode, and the one that uses the most tokens." },
+  { mode: "expert", label: "Ask", who: "Expert", icon: "message-circle", step: "", start: "", hint: "Ask anything about this topic and get a direct explanation grounded in your notes. Short look-up questions are answered by the cheaper model." },
+];
+const byMode = (m: Mode) => PATH.find((p) => p.mode === m) ?? PATH[2];
+const ROUTE_NOTE: Record<string, string> = { simple: "cheaper model", standard: "chat model", complex: "chat model, extra thinking" };
 
 export class TutorView extends ItemView {
   private topics: TopicRef[] = [];
@@ -29,6 +33,7 @@ export class TutorView extends ItemView {
   private attach = false;
   private draft = "";
   private lastUsage: Usage | null = null;
+  private lastRoute = "";
   private sessionUsage = zeroUsage();
   private lastError = "";
   private lastChanges: string[] = [];
@@ -113,6 +118,7 @@ export class TutorView extends ItemView {
     this.chatPath = null;
     this.lastError = "";
     this.lastChanges = [];
+    this.lastRoute = "";
     if (dir) {
       try {
         this.topic = await this.plugin.store.loadTopic(dir);
@@ -137,8 +143,8 @@ export class TutorView extends ItemView {
   private async openChat(path: string): Promise<void> {
     this.chat = await this.plugin.store.loadChat(path);
     this.chatPath = path;
-    const m = fmStr(this.chat.fm, "mode", "tutor");
-    this.mode = m === "quiz" || m === "expert" ? m : "tutor";
+    const m = fmStr(this.chat.fm, "mode", "tutor") as Mode;
+    this.mode = PATH.some((p) => p.mode === m) ? m : "tutor";
     if (this.dir && this.plugin.data.activeChat[this.dir] !== path) {
       this.plugin.data.activeChat[this.dir] = path;
       await this.plugin.save();
@@ -154,7 +160,8 @@ export class TutorView extends ItemView {
     this.renderHead();
     this.bodyEl.empty();
     if (!this.dir || !this.topic) {
-      const empty = this.bodyEl.createDiv({ cls: "st-empty" });
+      const empty = this.bodyEl.createDiv({ cls: "st-empty st-welcome" });
+      setIcon(empty.createDiv({ cls: "st-welcome-icon" }), "graduation-cap");
       empty.createEl("p", { text: "No topics yet. A topic is compiled once from your notes, a spec, or just a subject name. After that, each chat turn loads only the compiled card." });
       empty.createEl("button", { text: "New topic", cls: "mod-cta" }).onclick = () => this.plugin.openNewTopic();
       return;
@@ -164,30 +171,65 @@ export class TutorView extends ItemView {
     else this.renderMap();
   }
 
+  private iconButton(parent: HTMLElement, icon: string, label: string, onClick: () => void): HTMLButtonElement {
+    const b = parent.createEl("button", { cls: "st-icon-btn clickable-icon", attr: { "aria-label": label } });
+    setIcon(b, icon);
+    b.onclick = onClick;
+    return b;
+  }
+
   private renderHead(): void {
     const h = this.headEl;
     h.empty();
     const row = h.createDiv({ cls: "st-row" });
-    const sel = row.createEl("select", { cls: "dropdown st-grow" });
+    const sel = row.createEl("select", { cls: "dropdown st-grow st-topic-select", attr: { "aria-label": "Topic" } });
     if (!this.topics.length) sel.createEl("option", { text: "No topics", value: "" });
     for (const t of this.topics) sel.createEl("option", { text: t.title, value: t.dir });
     if (this.dir) sel.value = this.dir;
     sel.disabled = this.busy;
     sel.onchange = () => void this.selectTopic(sel.value || null);
-    row.createEl("button", { text: "New topic" }).onclick = () => this.plugin.openNewTopic();
+    this.iconButton(row, "plus", "New topic", () => this.plugin.openNewTopic());
 
     if (!this.dir || !this.state) return;
+    const s = this.state;
+    const pct = progress(s);
+    const due = dueCount(s, this.today);
+
+    // Progress ring and the suggested next step.
+    const hero = h.createDiv({ cls: "st-hero" });
+    const ring = hero.createDiv({ cls: "st-ring", attr: { style: `--st-p:${pct}`, "aria-label": `${pct}% of the way to target level ${s.target}` } });
+    ring.createDiv({ cls: "st-ring-num", text: `${pct}` });
+    const next = nextStep(s, this.today);
+    const info = hero.createDiv({ cls: "st-grow st-hero-info" });
+    info.createDiv({ cls: "st-hero-kicker", text: `Next step · ${next.title}` });
+    info.createDiv({ cls: "st-hero-detail", text: next.detail });
+    if (next.action !== "done") {
+      const go = hero.createEl("button", { text: "Do this", cls: "mod-cta st-go" });
+      go.disabled = this.busy;
+      go.onclick = () => void this.follow(next);
+    }
+
     const tabs = h.createDiv({ cls: "st-tabs" });
-    const due = dueCount(this.state, this.today);
     const labels: [Tab, string][] = [
       ["chat", "Chat"],
       ["review", due ? `Review (${due} due)` : "Review"],
-      ["map", `Skill map ${progress(this.state)}%`],
+      ["map", `Skill map ${pct}%`],
     ];
     for (const [tab, label] of labels) {
       const b = tabs.createEl("button", { text: label, cls: "st-tab" + (this.tab === tab ? " is-active" : "") });
       b.onclick = () => void this.showTab(tab);
     }
+  }
+
+  /** Acts on the suggested next step: opens the right tab, or a fresh chat in the right mode. */
+  private async follow(step: NextStep): Promise<void> {
+    if (step.action === "review") return this.showTab("review");
+    if (step.action === "done") return;
+    this.tab = "chat";
+    const sameMode = this.chat && this.mode === step.action;
+    this.mode = step.action;
+    if (!sameMode) await this.newChat();
+    else this.render();
   }
 
   private md(el: HTMLElement, text: string): void {
@@ -198,39 +240,57 @@ export class TutorView extends ItemView {
 
   private renderChat(): void {
     const body = this.bodyEl;
-    const bar = body.createDiv({ cls: "st-row" });
-    const modeSel = bar.createEl("select", { cls: "dropdown" });
-    for (const m of ["tutor", "quiz", "expert"] as Mode[]) modeSel.createEl("option", { text: MODE_LABEL[m], value: m });
-    modeSel.value = this.mode;
-    modeSel.disabled = this.busy;
-    modeSel.onchange = () => void this.setMode(modeSel.value as Mode);
-    const newBtn = bar.createEl("button", { text: "New chat" });
-    newBtn.disabled = this.busy;
-    newBtn.onclick = () => void this.newChat();
-    if (this.chatPath) {
-      const open = bar.createEl("button", { text: "Open file", attr: { "aria-label": "Open this chat as a note" } });
-      open.onclick = () => void this.app.workspace.openLinkText(this.chatPath!, "", true);
+    const here = byMode(this.mode);
+
+    // The guided path doubles as the mode switch.
+    const path = body.createDiv({ cls: "st-path" });
+    for (const p of PATH) {
+      const b = path.createEl("button", { cls: "st-step" + (p.mode === this.mode ? " is-active" : "") + (p.step ? "" : " is-side"), attr: { "aria-label": p.hint } });
+      setIcon(b.createSpan({ cls: "st-step-icon" }), p.icon);
+      b.createSpan({ cls: "st-step-label", text: p.label });
+      b.disabled = this.busy;
+      b.onclick = () => void this.setMode(p.mode);
     }
 
-    const list = body.createDiv({ cls: "st-messages" });
+    const bar = body.createDiv({ cls: "st-row st-toolbar" });
+    bar.createDiv({ cls: "st-grow st-mode-name", text: here.who });
+    const bankQuiz = this.mode === "quiz" && this.plugin.opts.bankQuiz;
     const chat = this.chat;
+    const last = chat?.messages[chat.messages.length - 1];
+    if (bankQuiz && chat && last?.role === "tutor" && !fmStr(chat.fm, "card")) {
+      const bank = bar.createEl("button", { text: "Bank question", attr: { "aria-label": "Ask the next question from the bank, marked without tokens" } });
+      bank.disabled = this.busy;
+      bank.onclick = () => void this.send("");
+    }
+    this.iconButton(bar, "square-pen", "New chat", () => void this.newChat()).disabled = this.busy;
+    if (this.chatPath) this.iconButton(bar, "file-text", "Open this chat as a note", () => void this.app.workspace.openLinkText(this.chatPath!, "", true));
+
+    const list = body.createDiv({ cls: "st-messages" });
     if (chat && chat.summary) {
-      const s = list.createEl("details", { cls: "st-summary" });
-      s.createEl("summary", { text: `Summary of earlier parts (part ${fmStr(chat.fm, "part", "1")})` });
-      this.md(s.createDiv(), chat.summary);
+      const sum = list.createEl("details", { cls: "st-summary" });
+      sum.createEl("summary", { text: `Summary of earlier parts (part ${fmStr(chat.fm, "part", "1")})` });
+      this.md(sum.createDiv(), chat.summary);
     }
     if (!chat || !chat.messages.length) {
-      const hint = list.createDiv({ cls: "st-empty" });
-      hint.createEl("p", { text: MODE_HINT[this.mode] });
-      if (this.mode !== "expert" && !this.busy) hint.createEl("button", { text: this.mode === "tutor" ? "Start" : "Start quiz", cls: "mod-cta" }).onclick = () => void this.send("");
+      const hint = list.createDiv({ cls: "st-empty st-welcome" });
+      setIcon(hint.createDiv({ cls: "st-welcome-icon" }), here.icon);
+      hint.createEl("p", { text: here.hint });
+      if (here.start && !this.busy) hint.createEl("button", { text: here.start, cls: "mod-cta" }).onclick = () => void this.send("");
     }
     for (const m of chat?.messages ?? []) {
       const el = list.createDiv({ cls: `st-msg st-${m.role}` });
-      el.createDiv({ cls: "st-who", text: m.role === "you" ? "You" : MODE_LABEL[this.mode] });
+      el.createDiv({ cls: "st-who", text: m.role === "you" ? "You" : here.who });
       this.md(el.createDiv({ cls: "st-text" }), m.text);
     }
-    if (this.lastChanges.length) list.createDiv({ cls: "st-note", text: "Skill map updated: " + this.lastChanges.join("; ") });
-    if (this.busy) list.createDiv({ cls: "st-note st-thinking", text: "Thinking…" });
+    if (chat && last?.role === "tutor" && fmStr(chat.fm, "placement") === "done" && last.text.startsWith("**Placement done") && !this.busy) {
+      list.createEl("button", { text: "Continue", cls: "mod-cta st-continue" }).onclick = () => void this.send("");
+    }
+    if (this.lastChanges.length) list.createDiv({ cls: "st-note st-chip", text: "Skill map updated: " + this.lastChanges.join("; ") });
+    if (this.busy) {
+      const t = list.createDiv({ cls: "st-note st-thinking" });
+      t.createSpan({ cls: "st-dots" });
+      t.createSpan({ text: "Thinking…" });
+    }
     if (this.lastError) {
       const err = list.createDiv({ cls: "st-error" });
       err.createSpan({ text: this.lastError + " " });
@@ -248,19 +308,22 @@ export class TutorView extends ItemView {
         if (!this.busy && input.value.trim()) void this.send(input.value);
       }
     };
-    const row = composer.createDiv({ cls: "st-row" });
+    const row = composer.createDiv({ cls: "st-row st-composer-row" });
     const label = row.createEl("label", { cls: "st-grow st-attach" });
     const box = label.createEl("input", { type: "checkbox" });
     box.checked = this.attach;
     box.onchange = () => (this.attach = box.checked);
-    label.appendText(" Attach the open note to my next message");
-    const sendBtn = row.createEl("button", { text: this.busy ? "Stop" : "Send", cls: this.busy ? "mod-warning" : "mod-cta" });
+    label.appendText(" Attach the open note");
+    const sendBtn = row.createEl("button", { text: this.busy ? "Stop" : "Send", cls: this.busy ? "mod-warning st-send" : "mod-cta st-send" });
     sendBtn.onclick = () => {
       if (this.busy) this.kill?.();
       else if (input.value.trim()) void this.send(input.value);
     };
-    const usage = body.createDiv({ cls: "st-usage" });
-    if (this.lastUsage) usage.setText(`Last turn: ${usageLine(this.lastUsage)}. This session: ${usageLine(this.sessionUsage)} over ${this.sessionUsage.calls} calls.`);
+
+    const usage = body.createDiv({ cls: "st-usage st-meter" });
+    const session = `Session: ${usageLine(this.sessionUsage)} over ${this.sessionUsage.calls} calls.`;
+    if (this.lastUsage && this.lastUsage.calls === 0) usage.setText(`Last turn: marked by the plugin, no tokens used. ${session}`);
+    else if (this.lastUsage) usage.setText(`Last turn: ${usageLine(this.lastUsage)}${this.lastRoute ? ` · ${this.lastRoute}` : ""}. ${session}`);
     else usage.setText("Token use appears here after each turn.");
     if (!this.busy) input.focus();
   }
@@ -291,6 +354,20 @@ export class TutorView extends ItemView {
     return text ? { name: f.basename, text: text.split(/\s+/).slice(0, 3000).join(" ") } : undefined;
   }
 
+  /** Runs one turn through the cheapest path that can handle it: plain code first, then the model. */
+  private async runTurn(dir: string, chatPath: string, message: string, attached: Material | undefined): Promise<TurnResult> {
+    const engine = this.plugin.engine;
+    const opts = { attached, onSpawn: (kill: () => void) => (this.kill = kill) };
+    const chat = this.chat;
+    // Placement can only begin on an empty chat, and continues while the chat is marked as placing.
+    if (this.mode === "tutor" && this.plugin.opts.codePlacement && chat && (!chat.messages.length || fmStr(chat.fm, "placement") === "on")) {
+      const placed = await engine.placementTurn(dir, chatPath, message);
+      if (placed) return placed;
+    }
+    if (this.mode === "quiz" && this.plugin.opts.bankQuiz) return engine.quizTurn(dir, chatPath, message, opts);
+    return engine.turn(dir, chatPath, message, opts);
+  }
+
   /** Sends a message. An empty message starts a chat or retries the last turn. */
   private async send(message: string): Promise<void> {
     if (this.busy || !this.dir || !this.topic) return;
@@ -301,16 +378,19 @@ export class TutorView extends ItemView {
     try {
       if (!this.chatPath || !this.chat) await this.openChat(await this.plugin.store.newChat(dir, this.topic.title, this.mode));
       const chatPath = this.chatPath!;
+      const attached = await this.attachedNote();
+      this.attach = false;
+      // Start the turn first: it decides its path from the chat as it stood before this message.
+      const turn = this.runTurn(dir, chatPath, message, attached);
       if (message.trim()) {
         this.chat!.messages.push({ role: "you", text: message.trim() });
         this.draft = "";
       }
-      const attached = await this.attachedNote();
-      this.attach = false;
       this.render();
-      const r = await this.plugin.engine.turn(dir, chatPath, message, { attached, onSpawn: (kill) => (this.kill = kill) });
+      const r = await turn;
       const used = r.rotationUsage ? addUsage(r.usage, r.rotationUsage) : r.usage;
       this.lastUsage = used;
+      this.lastRoute = r.route && this.plugin.opts.smartRouting ? ROUTE_NOTE[r.route.route] : "";
       this.sessionUsage = addUsage(this.sessionUsage, used);
       this.lastChanges = r.changes;
       if (this.dir === dir) {
@@ -379,29 +459,33 @@ export class TutorView extends ItemView {
     const body = this.bodyEl;
     const q = this.queue[0];
     if (!q || !this.state) {
-      const done = body.createDiv({ cls: "st-empty" });
+      const done = body.createDiv({ cls: "st-empty st-welcome" });
+      setIcon(done.createDiv({ cls: "st-welcome-icon" }), "check-circle");
       done.createEl("p", { text: this.reviewed ? `Done. ${this.reviewed} cards reviewed without using any tokens.` : "Nothing is due today." });
       done.createEl("p", { cls: "st-usage", text: "Cards come from this topic's question bank. Due cards and a few new ones appear here each day." });
       return;
     }
-    const card = body.createDiv({ cls: "st-card" });
+    const total = this.reviewed + this.queue.length;
+    const bar = body.createDiv({ cls: "st-bar st-review-bar" });
+    bar.createDiv({ cls: "st-bar-fill", attr: { style: `width:${total ? Math.round((100 * this.reviewed) / total) : 0}%` } });
+    const card = body.createDiv({ cls: "st-card st-question" });
     card.createDiv({ cls: "st-who", text: `${this.queue.length} left · ${this.state.names[q.subskill] ?? "General"}` });
     this.md(card.createDiv({ cls: "st-text" }), q.question);
     const answerArea = body.createDiv({ cls: "st-answer" });
 
     const reveal = (verdict: string, typed: string, auto?: Grade) => {
       answerArea.empty();
-      if (verdict) answerArea.createDiv({ cls: "st-note", text: verdict });
-      const a = answerArea.createDiv({ cls: "st-card" });
+      if (verdict) answerArea.createDiv({ cls: "st-note st-chip" + (/^Correct/.test(verdict) ? " is-good" : /^Incorrect/.test(verdict) ? " is-bad" : ""), text: verdict });
+      const a = answerArea.createDiv({ cls: "st-card st-reveal" });
       a.createDiv({ cls: "st-who", text: "Answer" });
       this.md(a.createDiv({ cls: "st-text" }), answerText(q) + (q.explanation ? `\n\n${q.explanation}` : ""));
-      const row = answerArea.createDiv({ cls: "st-row" });
+      const row = answerArea.createDiv({ cls: "st-row st-grades" });
       if (auto) {
         row.createEl("button", { text: "Next", cls: "mod-cta" }).onclick = () => void this.recordGrade(q, auto);
         return;
       }
       for (const g of ["again", "hard", "good", "easy"] as Grade[]) {
-        row.createEl("button", { text: g[0].toUpperCase() + g.slice(1), cls: g === "good" ? "mod-cta" : "" }).onclick = () => void this.recordGrade(q, g);
+        row.createEl("button", { text: g[0].toUpperCase() + g.slice(1), cls: `st-grade st-grade-${g}` + (g === "good" ? " mod-cta" : "") }).onclick = () => void this.recordGrade(q, g);
       }
       if (typed.trim()) {
         const ask = answerArea.createEl("button", { text: "Ask Claude to grade (uses tokens)", cls: "st-linkish" });
@@ -451,25 +535,21 @@ export class TutorView extends ItemView {
     const s = this.state;
     if (!s || !this.topic || !this.dir) return;
     const dir = this.dir;
-    const pct = progress(s);
-    const head = body.createDiv({ cls: "st-card" });
-    head.createDiv({ cls: "st-who", text: `Overall ${pct}% of target level ${s.target}` });
-    head.createDiv({ cls: "st-bar" }).createDiv({ cls: "st-bar-fill", attr: { style: `width:${pct}%` } });
 
     const table = body.createEl("table", { cls: "st-table" });
     const hr = table.createEl("tr");
     for (const t of ["", "Subskill", "Level", "Cards"]) hr.createEl("th", { text: t });
     for (const n of Object.keys(s.names).map(Number).sort((a, b) => a - b)) {
       const tr = table.createEl("tr", { cls: s.focus === n ? "st-focus" : "" });
-      tr.createEl("td", { text: String(n) });
+      tr.createEl("td", { text: String(n), cls: "st-num" });
       tr.createEl("td", { text: s.names[n] + (s.focus === n ? "  (current focus)" : "") });
       const lvl = s.levels[n];
-      const td = tr.createEl("td");
+      const td = tr.createEl("td", { cls: "st-level" });
       const pips = td.createSpan({ cls: "st-pips", attr: { "aria-label": lvl === null ? "Not placed yet" : `Level ${lvl} of 5` } });
       for (let i = 1; i <= 5; i++) pips.createSpan({ cls: "st-pip" + (lvl !== null && i <= lvl ? " is-on" : "") + (i === s.target ? " is-target" : "") });
-      td.createSpan({ text: lvl === null ? " –" : ` ${lvl}` });
+      td.createSpan({ cls: "st-level-num", text: lvl === null ? " –" : ` ${lvl}` });
       const b = s.bank[n] ?? { right: 0, total: 0 };
-      tr.createEl("td", { text: b.total ? `${b.right}/${b.total}` : "–" });
+      tr.createEl("td", { text: b.total ? `${b.right}/${b.total}` : "–", cls: "st-num" });
     }
 
     const mis = body.createDiv({ cls: "st-card" });
@@ -479,7 +559,7 @@ export class TutorView extends ItemView {
       for (const m of s.misconceptions) ul.createEl("li", { text: m });
     } else mis.createDiv({ cls: "st-usage", text: "None recorded." });
 
-    const row = body.createDiv({ cls: "st-row st-wrap" });
+    const row = body.createDiv({ cls: "st-row st-wrap st-actions" });
     const targetSel = row.createEl("select", { cls: "dropdown" });
     for (const t of [3, 4, 5]) targetSel.createEl("option", { text: `Target level ${t}`, value: String(t) });
     targetSel.value = String(s.target);
@@ -490,6 +570,21 @@ export class TutorView extends ItemView {
     };
     row.createEl("button", { text: "Topic card" }).onclick = () => void this.app.workspace.openLinkText(`${dir}/topic.md`, "", true);
     row.createEl("button", { text: "Question bank" }).onclick = () => void this.app.workspace.openLinkText(`${dir}/questions.md`, "", true);
+    const sumBtn = row.createEl("button", { text: "Write summary note", attr: { "aria-label": "One model call: writes a revision summary with a concept map into the topic folder" } });
+    sumBtn.onclick = async () => {
+      sumBtn.disabled = true;
+      sumBtn.setText("Writing…");
+      try {
+        const r = await this.plugin.engine.summarySheet(dir);
+        this.sessionUsage = addUsage(this.sessionUsage, r.usage);
+        new Notice(`Summary written to ${r.path}.\n${usageLine(r.usage)}`, 8000);
+        void this.app.workspace.openLinkText(r.path, "", true);
+      } catch (e) {
+        new Notice(`Summary failed: ${(e as Error).message}`, 10000);
+      }
+      sumBtn.disabled = false;
+      sumBtn.setText("Write summary note");
+    };
     row.createEl("button", { text: "Export flashcards" }).onclick = async () => {
       const p = await this.plugin.store.exportFlashcards(dir);
       new Notice(`Flashcards written to ${p} in the Spaced Repetition plugin's format.`);
@@ -497,6 +592,6 @@ export class TutorView extends ItemView {
     row.createEl("button", { text: "Recompile from notes" }).onclick = () => {
       if (window.confirm("Recompile this topic from its sources? Levels are kept where subskill names still match. The flashcard schedule starts again.")) void this.plugin.recompile(dir);
     };
-    body.createDiv({ cls: "st-usage", text: `Source: ${fmStr(this.topic.fm, "source", "subject")}. Compiled ${fmStr(this.topic.fm, "compiled", "?")}. Subject card: ${fmStr(this.topic.fm, "subject", "none")}.` });
+    body.createDiv({ cls: "st-usage", text: `Source: ${fmStr(this.topic.fm, "source", "subject")}. Compiled ${fmStr(this.topic.fm, "compiled", "?")}. Subject card: ${fmStr(this.topic.fm, "subject", "none")}. Web research: ${fmStr(this.topic.fm, "research", "no")}.` });
   }
 }

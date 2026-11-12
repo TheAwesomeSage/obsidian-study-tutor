@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as F from "../src/formats";
 import { BUNDLED, buildSystem, buildTurnInput, topicForPrompt, utilityPrompt } from "../src/prompts";
 import { Store } from "../src/store";
-import { batchMaterial } from "../src/engine";
+import { Engine, batchMaterial } from "../src/engine";
 import { findClaude } from "../src/claude";
 import { MemFS } from "./memfs";
 
@@ -229,7 +229,7 @@ test("chat round trip keeps maths, code and multi-paragraph messages", () => {
 });
 
 test("bundled skills include every mode, the utilities and the subject cards", () => {
-  for (const k of ["core.md", "mode-tutor.md", "mode-quiz.md", "mode-expert.md", "compile.md", "utility.md", "subjects/linear-algebra.md", "subjects/architecture-compilers.md", "subjects/neural-networks-ai.md", "subjects/discrete-maths.md"]) {
+  for (const k of ["core.md", "mode-tutor.md", "mode-teach.md", "summary.md", "mode-quiz.md", "mode-expert.md", "compile.md", "utility.md", "subjects/linear-algebra.md", "subjects/architecture-compilers.md", "subjects/neural-networks-ai.md", "subjects/discrete-maths.md"]) {
     assert.ok(BUNDLED[k] && BUNDLED[k].length > 100, k);
   }
   assert.equal(Object.keys(BUNDLED).filter((k) => k.startsWith("subjects/")).length, 9);
@@ -266,9 +266,19 @@ test("large material is batched and long notes are split", () => {
 test("store installs skills once, saves a compiled topic, rotates chats and exports flashcards", async () => {
   const fs = new MemFS();
   const store = new Store(fs, "Tutor", () => "2026-11-12");
-  assert.equal(await store.installSkills(), Object.keys(BUNDLED).length);
+  const first = await store.installSkills();
+  assert.equal(first.written, Object.keys(BUNDLED).length);
+  assert.equal(first.record["core.md"], F.textHash(BUNDLED["core.md"]));
+  // A file left as an older version of the plugin wrote it is refreshed on upgrade...
+  fs.files.set("Tutor/_skills/mode-quiz.md", "OLD VERSION\r\n");
+  const upgraded = await store.installSkills({ ...first.record, "mode-quiz.md": F.textHash("OLD VERSION\n") });
+  assert.equal(upgraded.updated, 1);
+  assert.equal(await fs.read("Tutor/_skills/mode-quiz.md"), BUNDLED["mode-quiz.md"]);
+  // ...but a file the user has edited is never overwritten.
   fs.files.set("Tutor/_skills/core.md", "EDITED");
-  assert.equal(await store.installSkills(), 0, "user edits are not overwritten");
+  const kept = await store.installSkills(upgraded.record);
+  assert.deepEqual([kept.written, kept.updated], [0, 0], "user edits are not overwritten");
+  assert.equal(kept.record["core.md"], first.record["core.md"]);
   assert.equal(await store.skill("core.md"), "EDITED");
   assert.ok((await store.subjectNames()).includes("linear-algebra"));
 
@@ -313,6 +323,97 @@ test("store installs skills once, saves a compiled topic, rotates chats and expo
   assert.equal(cards.split("\n?\n").length, 4);
   await store.writeDashboard();
   assert.match(await fs.read("Tutor/Dashboard.base"), /tutor == "state"/);
+});
+
+test("quiz replies are read as letters, give-ups or questions to the tutor", () => {
+  assert.equal(F.parseMcqReply("b", 4), "B");
+  assert.equal(F.parseMcqReply(" (C) ", 4), "C");
+  assert.equal(F.parseMcqReply("B. because it scales", 4), "B");
+  assert.equal(F.parseMcqReply("A matrix is linear", 4), null);
+  assert.equal(F.parseMcqReply("E", 4), null, "there is no fifth option");
+  assert.ok(F.givesUp("idk") && F.givesUp("I don't know.") && F.givesUp("skip") && !F.givesUp("skip the proof and use rank"));
+  assert.ok(F.looksLikeQuestion("why is that?") && F.looksLikeQuestion("explain the kernel") && !F.looksLikeQuestion("the kernel is zero"));
+});
+
+test("a bank quiz is marked by code and calls the model only when judgement is needed", async () => {
+  const fs = new MemFS();
+  const store = new Store(fs, "Tutor", () => "2026-11-12");
+  const settings = { claudePath: "", chatModel: "sonnet", compileModel: "sonnet", utilityModel: "haiku", effort: "low", targetLevel: 4, maxChatWords: 1200, maxTopicWords: 2000, singlePassWords: 6000, smartRouting: false, hardEffort: "high" };
+  const engine = new Engine(store, () => settings, () => "2026-11-12");
+  const out = F.parseCompileOutput(COMPILED);
+  const dir = await store.saveCompiled({ title: "Linear maps", fm: { subject: "none" }, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
+  const calls: any[] = [];
+  const usage = { input: 5, cacheRead: 0, cacheWrite: 0, output: 5, costUsd: 0, calls: 1 };
+  (engine as any).call = async (o: any) => {
+    calls.push(o);
+    return o.jsonSchema ? { text: "", structured: { grade: "hard", feedback: "Scaling is missing." }, usage } : { text: "Here is a fresh question?", usage };
+  };
+  const chat = await store.newChat(dir, "Linear maps", "quiz", new Date(2026, 10, 12, 9, 0));
+
+  let r = await engine.quizTurn(dir, chat, "");
+  assert.match(r.reply, /Which map is linear\?[\s\S]*- B\. \$f\(x\)=3x\$[\s\S]*Reply with a letter/);
+  assert.equal(r.local, true);
+  r = await engine.quizTurn(dir, chat, "A matrix is linear");
+  assert.match(r.reply, /Reply with one letter/);
+  r = await engine.quizTurn(dir, chat, "b");
+  assert.match(r.reply, /^\*\*Correct\.\*\*[\s\S]*dim\\ker T/);
+  assert.equal(calls.length, 0, "three turns so far, no model calls");
+  assert.equal(r.usage.calls, 0);
+
+  r = await engine.quizTurn(dir, chat, "why is that?");
+  assert.equal(calls.length, 1, "a question to the tutor goes to the model");
+  assert.match(calls[0].system, /# Mode: Quizzer/);
+  assert.equal((await store.loadChat(chat)).fm.card, "Q2", "the pending bank question is kept");
+
+  r = await engine.quizTurn(dir, chat, " $0$ ");
+  assert.match(r.reply, /^\*\*Correct\.\*\*[\s\S]*Why is the kernel a subspace\?/);
+  assert.equal(calls.length, 1, "an exact short answer is marked by code");
+
+  r = await engine.quizTurn(dir, chat, "because it is closed under addition");
+  assert.equal(calls.length, 2, "an open answer needs one grading call");
+  assert.equal(calls[1].model, "haiku");
+  assert.match(r.reply, /^\*\*Partly right\.\*\* Scaling is missing\.[\s\S]*Answer: It contains 0[\s\S]*last question in the bank \(3\/3\)/);
+  assert.equal(r.local, false);
+
+  const state = await store.loadState(dir, 4);
+  assert.deepEqual(Object.keys(state.cards).sort(), ["Q1", "Q2", "Q3"]);
+  assert.deepEqual(state.bank[1], { right: 1, total: 1 });
+  assert.deepEqual(state.bank[2], { right: 2, total: 2 });
+  assert.equal(state.levels[1], null, "code never changes levels; only the tutor's judgement does");
+
+  r = await engine.quizTurn(dir, chat, "another one please");
+  assert.equal(calls.length, 3, "with the bank used up, the model-run quizzer takes over");
+  assert.equal(r.reply, "Here is a fresh question?");
+  const saved = await store.loadChat(chat);
+  assert.deepEqual(saved.fm.asked, ["Q1", "Q2", "Q3"]);
+  assert.equal(saved.messages.filter((m) => m.role === "you").length, 6);
+});
+
+test("web research is passed to the compile call only when asked for", async () => {
+  const fs = new MemFS();
+  const store = new Store(fs, "Tutor", () => "2026-11-12");
+  const settings = { claudePath: "", chatModel: "sonnet", compileModel: "sonnet", utilityModel: "haiku", effort: "low", targetLevel: 4, maxChatWords: 1200, maxTopicWords: 2000, singlePassWords: 6000, smartRouting: false, hardEffort: "high" };
+  const engine = new Engine(store, () => settings, () => "2026-11-12");
+  const calls: any[] = [];
+  (engine as any).call = async (o: any) => {
+    calls.push(o);
+    return { text: COMPILED.replace("=====QUESTIONS=====", "## Sources\n- [MIT 18.06](https://ocw.mit.edu)\n\n=====QUESTIONS====="), usage: { input: 1, cacheRead: 0, cacheWrite: 0, output: 1, costUsd: 0, calls: 1 } };
+  };
+  const a = await engine.compile({ title: "Linear maps", mode: "spec", goal: "first-year university", material: [{ name: "Spec", text: "Cover linear maps and kernels." }], fm: {}, research: true });
+  assert.deepEqual(calls[0].tools, ["WebSearch", "WebFetch"]);
+  assert.match(calls[0].input, /RESEARCH: on/);
+  assert.match(calls[0].system, /at most 6 searches/);
+  const topic = await store.loadTopic(a.dir);
+  assert.equal(topic.fm.research, "yes");
+  assert.equal(topic.subskills.length, 2, "the Sources section is not read as a subskill");
+  assert.match(topic.body, /## Sources/);
+  assert.ok(!topic.subskills[1].section.includes("Sources"));
+  await engine.compile({ title: "Other", mode: "subject", goal: "", material: [], fm: {} });
+  assert.equal(calls[1].tools, undefined);
+  assert.match(calls[1].input, /RESEARCH: off/);
+
+  const sheet = await ((engine as any).call = async () => ({ text: "# Linear maps summary\n\n## Map\n```mermaid\ngraph TD\n```", usage: { input: 1, cacheRead: 0, cacheWrite: 0, output: 1, costUsd: 0, calls: 1 } }), engine.summarySheet(a.dir));
+  assert.match(await fs.read(sheet.path), /tutor: summary[\s\S]*```mermaid/);
 });
 
 test("the Claude CLI is found on this machine", () => {

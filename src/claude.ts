@@ -43,6 +43,8 @@ export interface CallOptions {
   input: string;
   effort?: string;
   jsonSchema?: object;
+  /** Built-in tools to allow, such as WebSearch. Leave unset for none, which is far cheaper. */
+  tools?: string[];
   timeoutMs?: number;
   /** Receives a function that kills the running process. */
   onSpawn?: (kill: () => void) => void;
@@ -116,7 +118,8 @@ export function callClaude(opts: CallOptions): Promise<CallResult> {
       reject(new ClaudeError(`Could not write the prompt file: ${(e as Error).message}`));
       return;
     }
-    const args = ["-p", "--output-format", "json", "--no-session-persistence", "--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--setting-sources", "", "--system-prompt-file", sysFile, "--model", opts.model];
+    const tools = (opts.tools ?? []).join(",");
+    const args = ["-p", "--output-format", "json", "--no-session-persistence", "--tools", tools, ...(tools ? ["--allowedTools", tools] : []), "--strict-mcp-config", "--disable-slash-commands", "--setting-sources", "", "--system-prompt-file", sysFile, "--model", opts.model];
     if (opts.effort) args.push("--effort", opts.effort);
     if (opts.jsonSchema) args.push("--json-schema", JSON.stringify(opts.jsonSchema));
 

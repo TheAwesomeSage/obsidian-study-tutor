@@ -8,9 +8,9 @@ const common = { bundle: true, format: "cjs", target: "es2020", loader: { ".md":
 
 if (mode === "test") {
   const t = { ...common, platform: "node", outdir: "tests/out", outExtension: { ".js": ".cjs" } };
-  await esbuild.build({ ...t, entryPoints: ["tests/unit.test.ts", "tests/live.test.ts"] });
+  await esbuild.build({ ...t, entryPoints: ["tests/unit.test.ts", "tests/router.test.ts", "tests/live.test.ts", "tests/live-features.test.ts"] });
   // The UI test swaps the real "obsidian" module for a stub and runs under jsdom.
-  await esbuild.build({ ...t, entryPoints: ["tests/ui.test.ts"], external: [...external.filter((e) => e !== "obsidian"), "jsdom"], alias: { obsidian: "./tests/obsidian-stub.ts" } });
+  await esbuild.build({ ...t, entryPoints: ["tests/ui.test.ts", "tests/preview.ts"], external: [...external.filter((e) => e !== "obsidian"), "jsdom"], alias: { obsidian: "./tests/obsidian-stub.ts" } });
 } else {
   await esbuild.build({ ...common, entryPoints: ["src/main.ts"], outfile: "main.js", minify: mode === "production", sourcemap: mode === "production" ? false : "inline" });
   if (mode === "production") {

@@ -1,11 +1,23 @@
 // Parsing and serialising of the plugin's markdown files. Pure functions, no Obsidian imports.
 
-export type Mode = "tutor" | "quiz" | "expert";
+export type Mode = "tutor" | "teach" | "quiz" | "expert";
+export const MODES: Mode[] = ["tutor", "teach", "quiz", "expert"];
 export type SourceMode = "notes" | "spec" | "subject";
 export type FmValue = string | number | string[];
 export type Frontmatter = Record<string, FmValue>;
 
 export const words = (s: string): number => (s.trim() ? s.trim().split(/\s+/).length : 0);
+
+/** A short fingerprint of a text (FNV-1a), used to tell an unedited skill file from an edited one. */
+export function textHash(s: string): string {
+  s = s.split("\r\n").join("\n");
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
 
 export function ymd(d: Date = new Date()): string {
   const p = (n: number) => String(n).padStart(2, "0");
@@ -468,6 +480,91 @@ export function reviewQueue(questions: Question[], s: LearnerState, today: strin
   const used = s.newDate === today ? s.newCount : 0;
   const fresh = questions.filter((q) => !s.cards[q.id]).slice(0, Math.max(0, newPerDay - used));
   return [...due, ...fresh];
+}
+
+// ---------- quiz from the question bank, marked by plain code ----------
+
+/** The next bank question for a quiz: weakest subskill first, skipping ones already asked in this chat. */
+export function pickQuizQuestion(questions: Question[], s: LearnerState, asked: string[]): Question | null {
+  const left = questions.filter((q) => !asked.includes(q.id));
+  if (!left.length) return null;
+  const level = (q: Question) => s.levels[q.subskill] ?? 0;
+  const seen = (q: Question) => (s.cards[q.id] ? 1 : 0);
+  return [...left].sort((a, b) => level(a) - level(b) || seen(a) - seen(b))[0];
+}
+
+export function formatQuizQuestion(q: Question, s: LearnerState): string {
+  const head = `**${s.names[q.subskill] ?? "Question"}**\n\n${q.question}`;
+  if (q.type === "mcq") return `${head}\n\n${q.options.map((o) => `- ${o}`).join("\n")}\n\n*Reply with a letter.*`;
+  return head;
+}
+
+/** A reply such as "b", "(B)" or "B. because..." read as a multiple-choice letter; null if it is not one. */
+export function parseMcqReply(reply: string, optionCount: number): string | null {
+  const m = /^\s*\(?([A-Za-z])\)?(?:[.):,]|\s|$)/.exec(reply);
+  if (!m) return null;
+  const letter = m[1].toUpperCase();
+  const idx = letter.charCodeAt(0) - 65;
+  // "A matrix is..." starts with a letter too; only accept a bare letter or a letter with punctuation.
+  if (idx < 0 || idx >= optionCount) return null;
+  if (!/^\s*\(?[A-Za-z]\)?[.):,]?\s*$/.test(reply) && !/^\s*\(?[A-Za-z]\)?[.):,]/.test(reply)) return null;
+  return letter;
+}
+
+export const givesUp = (reply: string): boolean => /^\s*(idk|i don'?t know|no idea|skip|pass|\?+)\s*[.!]?\s*$/i.test(reply);
+
+/** True when the learner is asking the tutor something instead of answering the pending question. */
+export const looksLikeQuestion = (reply: string): boolean => /\?\s*$/.test(reply.trim()) || /^\s*(why|how|what|when|where|which|can you|could you|explain|hint|help)\b/i.test(reply);
+
+/** One code-markable question per subskill, for placing a new learner without a model. */
+export function placementQuestions(questions: Question[], s: LearnerState): Question[] {
+  const out: Question[] = [];
+  for (const n of Object.keys(s.names).map(Number).sort((a, b) => a - b)) {
+    const mine = questions.filter((q) => q.subskill === n);
+    const q = mine.find((x) => x.type === "mcq") ?? mine.find((x) => x.type === "short");
+    if (q) out.push(q);
+  }
+  return out;
+}
+
+/** Marks an answer without a model where that is possible. "letter" means: ask for a letter again. */
+export function codeMark(q: Question, answer: string): Grade | "letter" | "model" {
+  if (givesUp(answer)) return "again";
+  if (q.type === "mcq") {
+    const letter = parseMcqReply(answer, q.options.length);
+    if (!letter) return "letter";
+    return letter === mcqLetter(q.answer) ? "good" : "again";
+  }
+  if (q.type === "short" && sameShortAnswer(answer, q.answer)) return "good";
+  return "model";
+}
+
+// ---------- the guided path: learn, practise, master ----------
+
+export interface NextStep {
+  action: Mode | "review" | "done";
+  title: string;
+  detail: string;
+}
+
+/**
+ * The cheapest sensible next thing to do on a topic. Lessons and code-marked practice come
+ * before Socratic tutoring, which is the most thorough mode and also the most expensive.
+ */
+export function nextStep(s: LearnerState, today: string): NextStep {
+  const ns = Object.keys(s.names).map(Number).sort((a, b) => a - b);
+  if (!ns.length) return { action: "done", title: "Nothing to study yet", detail: "This topic has no subskills." };
+  const lvl = (n: number) => s.levels[n];
+  const due = dueCount(s, today);
+  const untaught = ns.filter((n) => lvl(n) === null || (lvl(n) as number) <= 1);
+  if (ns.every((n) => lvl(n) === null)) return { action: "teach", title: "Learn", detail: `Start with a lesson on ${s.names[ns[0]]}.` };
+  if (due > 0) return { action: "review", title: "Review", detail: `${due} flashcard${due === 1 ? " is" : "s are"} due. Reviewing uses no tokens.` };
+  if (untaught.length) return { action: "teach", title: "Learn", detail: `Take a lesson on ${s.names[untaught[0]]}.` };
+  const unpractised = ns.filter((n) => (s.bank[n]?.total ?? 0) < 2);
+  if (unpractised.length) return { action: "quiz", title: "Practise", detail: `Quiz yourself on ${s.names[unpractised[0]]}. Most answers are marked without tokens.` };
+  const below = ns.filter((n) => (lvl(n) ?? 0) < s.target).sort((a, b) => (lvl(a) ?? 0) - (lvl(b) ?? 0));
+  if (below.length) return { action: "tutor", title: "Master", detail: `Work with the tutor on ${s.names[below[0]]} (level ${lvl(below[0])} of ${s.target}).` };
+  return { action: "done", title: "At target", detail: "Every subskill is at your target level. Come back when flashcards are due." };
 }
 
 // ---------- chat files ----------

@@ -1,14 +1,22 @@
+/* Study Tutor. Every colour comes from Obsidian's own theme variables, so the view follows
+   whatever theme and accent the vault uses, in light and dark. */
+
 .study-tutor {
+  --st-accent: var(--interactive-accent);
+  --st-accent-soft: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
+  --st-accent-line: color-mix(in srgb, var(--interactive-accent) 45%, var(--background-modifier-border));
+  --st-surface: color-mix(in srgb, var(--background-secondary) 70%, var(--background-primary));
+  --st-radius: 12px;
   display: flex;
   flex-direction: column;
   height: 100%;
-  padding: 8px 10px;
-  gap: 8px;
+  padding: 10px 12px 8px;
+  gap: 10px;
 }
 .study-tutor .st-head {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   flex: 0 0 auto;
 }
 .study-tutor .st-body {
@@ -31,24 +39,192 @@
   flex: 1 1 auto;
   min-width: 0;
 }
+.study-tutor button,
+.study-tutor select,
+.study-tutor textarea {
+  transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease, color 120ms ease;
+}
+.study-tutor .st-icon-btn {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+}
+.study-tutor .st-icon-btn:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+.study-tutor .st-topic-select {
+  font-weight: var(--font-semibold);
+  border-radius: 8px;
+}
+
+/* ----- progress ring and next step ----- */
+
+.study-tutor .st-hero {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--st-radius);
+  border: 1px solid var(--st-accent-line);
+  background: linear-gradient(135deg, var(--st-accent-soft), transparent 70%), var(--st-surface);
+}
+.study-tutor .st-ring {
+  --st-p: 0;
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: conic-gradient(var(--st-accent) calc(var(--st-p) * 1%), var(--background-modifier-border) 0);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--interactive-accent) 28%, transparent);
+}
+.study-tutor .st-ring-num {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  line-height: 36px;
+  background: var(--background-primary);
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-normal);
+}
+.study-tutor .st-ring-num::after {
+  content: "%";
+  font-size: 0.7em;
+  color: var(--text-muted);
+  margin-left: 1px;
+}
+.study-tutor .st-hero-kicker {
+  font-size: var(--font-ui-smaller);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-accent);
+  font-weight: var(--font-semibold);
+}
+.study-tutor .st-hero-detail {
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  line-height: 1.35;
+}
+.study-tutor .st-go {
+  flex: 0 0 auto;
+  border-radius: 999px;
+}
+
+/* ----- tabs ----- */
+
 .study-tutor .st-tabs {
   display: flex;
-  gap: 4px;
-  border-bottom: 1px solid var(--background-modifier-border);
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--background-modifier-form-field);
+  border: 1px solid var(--background-modifier-border);
 }
 .study-tutor .st-tab {
-  background: none;
+  flex: 1 1 0;
+  background: transparent;
   box-shadow: none;
   border: none;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
+  border-radius: 7px;
   color: var(--text-muted);
-  padding: 4px 8px;
+  padding: 4px 6px;
+  font-size: var(--font-ui-small);
+  white-space: nowrap;
+}
+.study-tutor .st-tab:hover {
+  color: var(--text-normal);
 }
 .study-tutor .st-tab.is-active {
   color: var(--text-normal);
-  border-bottom-color: var(--interactive-accent);
+  background: var(--background-primary);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--background-modifier-box-shadow) 60%, transparent), inset 0 -2px 0 var(--st-accent);
 }
+
+/* ----- the guided path (mode switch) ----- */
+
+.study-tutor .st-path {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.study-tutor .st-step {
+  flex: 1 1 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  height: auto;
+  padding: 6px 4px 5px;
+  border-radius: 10px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--st-surface);
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+.study-tutor .st-step:not(.is-side):not(:nth-last-child(2))::after {
+  content: "";
+  position: absolute;
+  right: -5px;
+  top: 50%;
+  width: 5px;
+  height: 1px;
+  background: var(--st-accent-line);
+}
+.study-tutor .st-step.is-side {
+  margin-left: 6px;
+  border-style: dashed;
+}
+.study-tutor .st-step:hover {
+  color: var(--text-normal);
+  border-color: var(--st-accent-line);
+}
+.study-tutor .st-step.is-active {
+  color: var(--text-normal);
+  border-color: var(--st-accent);
+  background: linear-gradient(180deg, var(--st-accent-soft), transparent), var(--st-surface);
+  box-shadow: 0 0 0 1px var(--st-accent-soft), 0 0 12px color-mix(in srgb, var(--interactive-accent) 22%, transparent);
+}
+.study-tutor .st-step.is-active .st-step-icon {
+  color: var(--text-accent);
+}
+.study-tutor .st-step-icon {
+  display: inline-flex;
+}
+.study-tutor .st-step-icon svg {
+  width: 16px;
+  height: 16px;
+}
+.study-tutor .st-toolbar {
+  flex: 0 0 auto;
+}
+.study-tutor .st-mode-name {
+  font-size: var(--font-ui-smaller);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: var(--font-semibold);
+}
+
+/* ----- messages ----- */
+
 .study-tutor .st-messages {
   flex: 1 1 auto;
   min-height: 120px;
@@ -56,29 +232,47 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding: 2px;
   user-select: text;
 }
 .study-tutor .st-msg,
 .study-tutor .st-card {
   border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
-  padding: 6px 10px;
-  background: var(--background-primary);
+  border-radius: var(--st-radius);
+  padding: 8px 12px;
+  background: var(--st-surface);
+}
+.study-tutor .st-msg.st-tutor {
+  border-left: 2px solid var(--st-accent);
+  border-top-left-radius: 4px;
+  margin-right: 12px;
 }
 .study-tutor .st-msg.st-you {
-  background: var(--background-secondary-alt);
-  margin-left: 24px;
+  background: var(--st-accent-soft);
+  border-color: var(--st-accent-line);
+  border-bottom-right-radius: 4px;
+  margin-left: 28px;
 }
 .study-tutor .st-who {
   font-size: var(--font-ui-smaller);
   color: var(--text-muted);
-  font-weight: 600;
+  font-weight: var(--font-semibold);
+  letter-spacing: 0.03em;
+}
+.study-tutor .st-msg.st-tutor .st-who {
+  color: var(--text-accent);
+}
+.study-tutor .st-text {
+  line-height: 1.5;
 }
 .study-tutor .st-text > :first-child {
   margin-top: 4px;
 }
 .study-tutor .st-text > :last-child {
   margin-bottom: 4px;
+}
+.study-tutor .st-text table {
+  font-size: var(--font-ui-small);
 }
 .study-tutor .st-note,
 .study-tutor .st-usage,
@@ -87,41 +281,174 @@
   font-size: var(--font-ui-smaller);
   color: var(--text-muted);
 }
+.study-tutor .st-chip {
+  align-self: flex-start;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+}
+.study-tutor .st-chip.is-good {
+  color: var(--text-success);
+  border-color: color-mix(in srgb, var(--text-success) 45%, transparent);
+}
+.study-tutor .st-chip.is-bad {
+  color: var(--text-error);
+  border-color: color-mix(in srgb, var(--text-error) 45%, transparent);
+}
+.study-tutor .st-summary {
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px dashed var(--background-modifier-border);
+}
+.study-tutor .st-continue {
+  align-self: flex-start;
+  border-radius: 999px;
+}
 .study-tutor .st-thinking {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-style: italic;
+}
+.study-tutor .st-dots {
+  width: 28px;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--background-modifier-border) 0%, var(--st-accent) 50%, var(--background-modifier-border) 100%);
+  background-size: 200% 100%;
+  animation: st-sweep 1.2s linear infinite;
+}
+@keyframes st-sweep {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .study-tutor .st-dots {
+    animation: none;
+  }
+  .study-tutor button,
+  .study-tutor select,
+  .study-tutor textarea {
+    transition: none;
+  }
 }
 .study-tutor .st-error {
   color: var(--text-error);
   font-size: var(--font-ui-small);
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--text-error) 40%, transparent);
 }
 .study-tutor .st-empty {
   color: var(--text-muted);
   padding: 12px 4px;
 }
+.study-tutor .st-welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 4px;
+  margin: auto 0;
+  padding: 18px 14px;
+}
+.study-tutor .st-welcome p {
+  margin: 4px 0 8px;
+  font-size: var(--font-ui-small);
+  line-height: 1.45;
+}
+.study-tutor .st-welcome-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: var(--text-accent);
+  background: var(--st-accent-soft);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--interactive-accent) 25%, transparent);
+}
+.study-tutor .st-welcome-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* ----- composer ----- */
+
 .study-tutor .st-composer {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  padding: 8px;
+  border-radius: var(--st-radius);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--st-surface);
+}
+.study-tutor .st-composer:focus-within {
+  border-color: var(--st-accent);
+  box-shadow: 0 0 0 2px var(--st-accent-soft);
 }
 .study-tutor textarea {
   width: 100%;
   resize: vertical;
+  border-radius: 8px;
 }
+.study-tutor .st-composer textarea {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  padding: 2px 4px;
+}
+.study-tutor .st-composer textarea:focus {
+  box-shadow: none;
+}
+.study-tutor .st-send {
+  border-radius: 999px;
+  padding: 4px 16px;
+}
+.study-tutor .st-meter {
+  font-family: var(--font-monospace);
+  font-size: calc(var(--font-ui-smaller) * 0.92);
+  color: var(--text-faint);
+  flex: 0 0 auto;
+}
+
+/* ----- review ----- */
+
 .study-tutor .st-answer {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.study-tutor .st-question {
+  border-left: 2px solid var(--st-accent);
 }
 .study-tutor .st-option {
   height: auto;
   white-space: normal;
   text-align: left;
   justify-content: flex-start;
-  padding: 6px 10px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--st-surface);
+  box-shadow: none;
+}
+.study-tutor .st-option:hover {
+  border-color: var(--st-accent);
+  background: var(--st-accent-soft);
 }
 .study-tutor .st-option p {
   margin: 0;
+}
+.study-tutor .st-grades button {
+  flex: 1 1 0;
+  border-radius: 999px;
 }
 .study-tutor .st-linkish {
   background: none;
@@ -130,19 +457,38 @@
   align-self: flex-start;
   padding: 0;
 }
+
+/* ----- skill map ----- */
+
 .study-tutor .st-table {
   width: 100%;
   border-collapse: collapse;
   font-size: var(--font-ui-small);
 }
+.study-tutor .st-table th {
+  font-size: var(--font-ui-smaller);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: var(--font-semibold);
+}
 .study-tutor .st-table th,
 .study-tutor .st-table td {
   text-align: left;
-  padding: 4px 6px;
+  padding: 6px;
   border-bottom: 1px solid var(--background-modifier-border);
 }
 .study-tutor .st-table tr.st-focus td {
-  font-weight: 600;
+  font-weight: var(--font-semibold);
+  background: var(--st-accent-soft);
+}
+.study-tutor .st-num,
+.study-tutor .st-level-num {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+.study-tutor .st-level {
+  white-space: nowrap;
 }
 .study-tutor .st-pips {
   display: inline-flex;
@@ -150,26 +496,32 @@
   vertical-align: middle;
 }
 .study-tutor .st-pip {
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
-  background: var(--background-modifier-border);
-}
-.study-tutor .st-pip.is-on {
-  background: var(--interactive-accent);
-}
-.study-tutor .st-pip.is-target {
-  outline: 1px solid var(--text-muted);
-  outline-offset: 1px;
-}
-.study-tutor .st-bar {
+  width: 12px;
   height: 6px;
   border-radius: 3px;
   background: var(--background-modifier-border);
-  margin-top: 6px;
+}
+.study-tutor .st-pip.is-on {
+  background: var(--st-accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--interactive-accent) 45%, transparent);
+}
+.study-tutor .st-pip.is-target {
+  outline: 1px solid var(--text-faint);
+  outline-offset: 1px;
+}
+.study-tutor .st-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--background-modifier-border);
   overflow: hidden;
+  flex: 0 0 auto;
 }
 .study-tutor .st-bar-fill {
   height: 100%;
-  background: var(--interactive-accent);
+  background: var(--st-accent);
+  transition: width 200ms ease;
+}
+.study-tutor .st-actions button,
+.study-tutor .st-actions select {
+  border-radius: 8px;
 }

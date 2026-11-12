@@ -8,12 +8,20 @@ import { TutorView, VIEW_TYPE } from "./view";
 export interface TutorSettings extends EngineSettings {
   root: string;
   newCardsPerDay: number;
+  /** Quiz mode asks from the question bank and marks with plain code before using the model. */
+  bankQuiz: boolean;
+  /** Tutor mode places a new learner with bank questions marked by code, not model turns. */
+  codePlacement: boolean;
 }
 
 interface PluginData {
   settings: TutorSettings;
   activeTopic: string;
   activeChat: Record<string, string>;
+  /** Fingerprint of each skill file as this plugin last wrote it, to spot the user's edits. */
+  skills: Record<string, string>;
+  /** Bumped when a default changes, so the old default can be moved forward once. */
+  settingsVersion: number;
 }
 
 const DEFAULTS: TutorSettings = {
@@ -24,10 +32,14 @@ const DEFAULTS: TutorSettings = {
   utilityModel: "haiku",
   effort: "low",
   targetLevel: 4,
-  maxChatWords: 1200,
+  maxChatWords: 600,
   maxTopicWords: 2000,
   singlePassWords: 6000,
   newCardsPerDay: 10,
+  bankQuiz: true,
+  codePlacement: true,
+  smartRouting: true,
+  hardEffort: "high",
 };
 
 export type SourceKind = "links" | "active" | "folder" | "spec" | "subject";
@@ -46,7 +58,13 @@ export default class StudyTutorPlugin extends Plugin {
 
   async onload(): Promise<void> {
     const saved = ((await this.loadData()) ?? {}) as Partial<PluginData>;
-    this.data = { settings: { ...DEFAULTS, ...(saved.settings ?? {}) }, activeTopic: saved.activeTopic ?? "", activeChat: saved.activeChat ?? {} };
+    this.data = { settings: { ...DEFAULTS, ...(saved.settings ?? {}) }, activeTopic: saved.activeTopic ?? "", activeChat: saved.activeChat ?? {}, skills: saved.skills ?? {}, settingsVersion: saved.settingsVersion ?? 1 };
+    if (this.data.settingsVersion < 2) {
+      // 0.1 shipped with 1,200-word chat parts. Move anyone still on that default to 600.
+      if (this.data.settings.maxChatWords === 1200) this.data.settings.maxChatWords = 600;
+      this.data.settingsVersion = 2;
+      if (saved.settings) await this.saveData(this.data);
+    }
     this.buildStore();
 
     this.registerView(VIEW_TYPE, (leaf: WorkspaceLeaf) => new TutorView(leaf, this));
@@ -58,7 +76,12 @@ export default class StudyTutorPlugin extends Plugin {
 
     this.app.workspace.onLayoutReady(async () => {
       try {
-        await this.store.installSkills();
+        const r = await this.store.installSkills(this.data.skills);
+        if (JSON.stringify(r.record) !== JSON.stringify(this.data.skills)) {
+          this.data.skills = r.record;
+          await this.save();
+        }
+        if (r.updated) new Notice(`Study Tutor: ${r.updated} teaching rule file(s) updated to the new version. Files you have edited were left alone.`, 8000);
         await this.store.writeDashboard();
       } catch (e) {
         console.error("Study Tutor: could not set up its folder", e);
@@ -141,11 +164,11 @@ export default class StudyTutorPlugin extends Plugin {
     return { mode, material, fm, truncated };
   }
 
-  async compileTopic(p: { title: string; kind: SourceKind; folder: string; goal: string; existingDir?: string; sources?: string[] }): Promise<CompileResult | null> {
+  async compileTopic(p: { title: string; kind: SourceKind; folder: string; goal: string; research?: boolean; existingDir?: string; sources?: string[] }): Promise<CompileResult | null> {
     const notice = new Notice("Study Tutor: gathering notes…", 0);
     try {
       const g = await this.gather(p.kind, p.folder, p.sources);
-      const res = await this.engine.compile({ title: p.title, mode: g.mode, goal: p.goal, material: g.material, fm: g.fm, existingDir: p.existingDir }, (msg) => notice.setMessage(`Study Tutor: ${msg}`));
+      const res = await this.engine.compile({ title: p.title, mode: g.mode, goal: p.goal, material: g.material, fm: g.fm, existingDir: p.existingDir, research: p.research }, (msg) => notice.setMessage(`Study Tutor: ${msg}`));
       notice.hide();
       new Notice(`Topic ready: ${res.subskills} subskills, ${res.questions} questions.${g.truncated ? " Some notes were left out (size limit)." : ""}\n${usageLine(res.usage)} in ${res.usage.calls} call(s)`, 10000);
       this.data.activeTopic = res.dir;
@@ -163,7 +186,7 @@ export default class StudyTutorPlugin extends Plugin {
   async recompile(dir: string): Promise<void> {
     const topic = await this.store.loadTopic(dir);
     const kind = (fmStr(topic.fm, "kind", "subject") as SourceKind) || "subject";
-    await this.compileTopic({ title: topic.title, kind, folder: fmStr(topic.fm, "folder"), goal: fmStr(topic.fm, "goal"), existingDir: dir, sources: fmList(topic.fm, "sources") });
+    await this.compileTopic({ title: topic.title, kind, folder: fmStr(topic.fm, "folder"), goal: fmStr(topic.fm, "goal"), research: fmStr(topic.fm, "research") === "yes", existingDir: dir, sources: fmList(topic.fm, "sources") });
   }
 }
 
@@ -181,6 +204,10 @@ class NewTopicModal extends Modal {
     let kind: SourceKind = active ? "links" : "subject";
     let folder = active?.parent && active.parent.path !== "/" ? active.parent.path : "";
     let goal = "";
+    // Web research is offered by default only when there are no notes to teach from.
+    const noNotes = (k: SourceKind) => k === "spec" || k === "subject";
+    let research = noNotes(kind);
+    let researchToggle: { setValue(v: boolean): unknown } | null = null;
     this.titleEl.setText("New topic");
     const { contentEl } = this;
 
@@ -196,6 +223,8 @@ class NewTopicModal extends Modal {
           .onChange((v) => {
             kind = v as SourceKind;
             folderSetting?.settingEl.toggle(kind === "folder");
+            research = noNotes(kind);
+            researchToggle?.setValue(research);
           }),
       );
     folderSetting = new Setting(contentEl).setName("Folder").addText((t) => t.setPlaceholder("Maths/Linear algebra").setValue(folder).onChange((v) => (folder = v)));
@@ -204,6 +233,13 @@ class NewTopicModal extends Modal {
       .setName("Goal (optional)")
       .setDesc("Level or purpose, for example: first-year university course, exam in June.")
       .addText((t) => t.onChange((v) => (goal = v)));
+    new Setting(contentEl)
+      .setName("Research on the web")
+      .setDesc("Lets the compile step search the web for what a course at this level covers, and cite its sources. Uses several times more tokens for that one step. Chat turns are unaffected.")
+      .addToggle((t) => {
+        researchToggle = t;
+        t.setValue(research).onChange((v) => (research = v));
+      });
     new Setting(contentEl).setDesc("Compiling reads the notes once and writes a topic card and question bank. Chat turns then load only that card.").addButton((b) =>
       b
         .setButtonText("Compile")
@@ -214,7 +250,7 @@ class NewTopicModal extends Modal {
             return;
           }
           this.close();
-          void this.plugin.compileTopic({ title: title.trim(), kind, folder, goal });
+          void this.plugin.compileTopic({ title: title.trim(), kind, folder, goal, research });
         }),
     );
   }
@@ -298,8 +334,30 @@ class TutorSettingTab extends PluginSettingTab {
     num("Target level", "Level (3 to 5) each subskill must reach for a new topic to count as mastered.", "targetLevel", 3, 5);
     num("New flashcards per day", "Unseen cards added to each day's review, per topic.", "newCardsPerDay", 0);
 
-    new Setting(containerEl).setName("Usage limits").setHeading();
-    num("Chat part size (words)", "When a chat file passes this size it is summarised and continued in a new file. Smaller means cheaper turns.", "maxChatWords", 200);
+    new Setting(containerEl).setName("Token saving").setHeading();
+    const toggle = (name: string, desc: string, key: "bankQuiz" | "codePlacement" | "smartRouting") =>
+      new Setting(containerEl).setName(name).setDesc(desc).addToggle((t) =>
+        t.setValue(s[key]).onChange(async (v) => {
+          s[key] = v;
+          await this.plugin.save();
+        }),
+      );
+    toggle("Placement without the model", "When you start the tutor on a new topic, the plugin asks one question per subskill from the question bank and marks them itself to set your starting levels. Off: the tutor runs its own diagnostic, one model turn per question.", "codePlacement");
+    toggle("Quiz from the question bank first", "Quiz mode asks bank questions and marks multiple-choice and exact answers itself, using no tokens. The model is called only for answers that need judgement, or once the bank runs out.", "bankQuiz");
+    toggle("Smart model routing", "The plugin reads each message and picks the model: the utility model for short look-up questions to the expert, the chat model for everything else, and the chat model with extra thinking for proofs, derivations, code and answers containing maths. Anything doubtful goes to the stronger option.", "smartRouting");
+    new Setting(containerEl)
+      .setName("Effort for hard turns")
+      .setDesc("Thinking effort when the router marks a turn as complex. Higher is more reliable on proofs and maths, and uses more output tokens.")
+      .addDropdown((d) =>
+        d
+          .addOptions({ medium: "Medium", high: "High" })
+          .setValue(s.hardEffort)
+          .onChange(async (v) => {
+            s.hardEffort = v;
+            await this.plugin.save();
+          }),
+      );
+    num("Chat part size (words)", "When a chat passes this size it is summarised, and the chat continues in a new file that starts from the summary. Smaller means cheaper turns.", "maxChatWords", 200);
     num("Topic card size (words)", "Cards above this size are sent as an outline plus the current subskill only.", "maxTopicWords", 300);
     num("Single-pass compile size (words)", "Note sets above this size are first read in parallel batches by the utility model.", "singlePassWords", 1000);
   }

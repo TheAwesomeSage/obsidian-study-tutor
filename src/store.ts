@@ -2,7 +2,7 @@
 // interface (Obsidian's DataAdapter satisfies it), so it can be tested outside Obsidian.
 
 import { BUNDLED } from "./prompts";
-import { Chat, Frontmatter, LearnerState, Mode, Question, Topic, answerText, fmNum, fmStr, newState, parseChat, parseQuestions, parseState, parseTopic, serializeChat, serializeState, withFrontmatter, ymd } from "./formats";
+import { Chat, Frontmatter, LearnerState, Mode, Question, Topic, answerText, fmNum, fmStr, newState, parseChat, parseQuestions, parseState, parseTopic, serializeChat, serializeState, textHash, withFrontmatter, ymd } from "./formats";
 
 export interface FS {
   read(path: string): Promise<string>;
@@ -16,6 +16,9 @@ export interface TopicRef {
   dir: string;
   title: string;
 }
+
+/** Fingerprints of the skill files shipped in 0.1.0 that later changed, from before fingerprints were recorded. */
+const FIRST_RELEASE: Record<string, string> = { "core.md": "c8e78aa5", "mode-tutor.md": "bd93508", "mode-quiz.md": "29a50213", "compile.md": "4c586797" };
 
 const base = (p: string): string => p.split("/").pop() ?? p;
 const safeName = (s: string): string => s.replace(/[\\/:*?"<>|#^[\]]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "Topic";
@@ -49,15 +52,35 @@ export class Store {
 
   // ----- skills: bundled defaults are copied into the vault once, then the vault copy wins -----
 
-  async installSkills(): Promise<number> {
+  /**
+   * Copies missing skill files into the vault and refreshes ones the user has not edited.
+   * `installed` maps each file to the fingerprint of the version this plugin last wrote; a vault
+   * file that still matches it is untouched by the user and safe to replace with a newer bundle.
+   * A file the user has edited is never overwritten.
+   */
+  async installSkills(installed: Record<string, string> = {}): Promise<{ written: number; updated: number; record: Record<string, string> }> {
     let written = 0;
+    let updated = 0;
+    const record: Record<string, string> = {};
     for (const [rel, text] of Object.entries(BUNDLED)) {
       const p = `${this.skillsDir}/${rel}`;
-      if (await this.fs.exists(p)) continue;
-      await this.writeFile(p, text);
-      written++;
+      const bundled = textHash(text);
+      if (!(await this.fs.exists(p))) {
+        await this.writeFile(p, text);
+        written++;
+        record[rel] = bundled;
+        continue;
+      }
+      const current = textHash(await this.fs.read(p));
+      const lastWritten = installed[rel] ?? FIRST_RELEASE[rel];
+      if (current === bundled) record[rel] = bundled;
+      else if (lastWritten && current === lastWritten) {
+        await this.writeFile(p, text);
+        updated++;
+        record[rel] = bundled;
+      } else if (lastWritten) record[rel] = lastWritten;
     }
-    return written;
+    return { written, updated, record };
   }
 
   async skill(rel: string): Promise<string> {
@@ -201,6 +224,12 @@ export class Store {
     await this.saveChat(next, { fm: { ...chat.fm, part, previous: link(path), next: "", created: fmStr(chat.fm, "created") || this.today() }, summary, messages: carried });
     await this.saveChat(path, { ...chat, fm: { ...chat.fm, next: link(next) } });
     return next;
+  }
+
+  async saveSummary(dir: string, title: string, body: string): Promise<string> {
+    const p = `${dir}/summary.md`;
+    await this.writeFile(p, withFrontmatter({ tutor: "summary", topic: title, written: this.today() }, body + "\n"));
+    return p;
   }
 
   // ----- extras that other plugins can read -----

@@ -196,6 +196,21 @@ export class Setting {
     cb(new Control(this.settingEl, "select"));
     return this;
   }
+  addToggle(cb: (c: any) => void) {
+    const el = this.settingEl.createEl("input", { type: "checkbox" });
+    const t: any = {
+      setValue(v: boolean) {
+        el.checked = v;
+        return t;
+      },
+      onChange(f: (v: boolean) => void) {
+        el.onchange = () => f(el.checked);
+        return t;
+      },
+    };
+    cb(t);
+    return this;
+  }
   addButton(cb: (c: Control) => void) {
     cb(new Control(this.settingEl, "button"));
     return this;
@@ -218,3 +233,7 @@ export const MarkdownRenderer = {
 
 export type App = any;
 export type WorkspaceLeaf = any;
+
+export function setIcon(el: any, icon: string) {
+  el.setAttribute("data-icon", icon);
+}

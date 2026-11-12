@@ -107,8 +107,10 @@ test("plugin loads, chats, reviews and shows the skill map", async () => {
     calls.push(o);
     return { text: replies[calls.length - 1] ?? "ok", usage: { input: 10, cacheRead: calls.length > 1 ? 3000 : 0, cacheWrite: 1000, output: 50, costUsd: 0.01, calls: 1 } };
   };
+  plugin.opts.codePlacement = false; // placement has its own test; here the tutor's first turn is the model's
   await view.reload();
   const root = view.contentEl;
+  assert.match(root.textContent, /Next step · Learn/);
   assert.equal($(root, ".st-head select").value, dir);
   assert.match(root.textContent, /Skill map 0%/);
 
@@ -138,9 +140,7 @@ test("plugin loads, chats, reviews and shows the skill map", async () => {
   assert.match(await fs.read(chats[0]), /%%msg:you%%\n###### You\nYes, it is linear\./);
 
   // Switching mode keeps the chat and changes the mode skill.
-  const modeSel = $$(root, ".st-body select")[0];
-  modeSel.value = "expert";
-  modeSel.onchange();
+  button(root, "Ask").click();
   await tick();
   input.value = "";
   const input2 = $(root, ".st-composer textarea");

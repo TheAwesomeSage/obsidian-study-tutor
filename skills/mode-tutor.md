@@ -8,6 +8,8 @@ If every level in the learner state is unset, run a diagnostic first. Say that y
 
 Otherwise carry on from the current focus and the chat summary.
 
+Whenever a new chat opens and levels are already set, begin with a plan of one or two lines: which subskills this session will work on, in what order, and which earlier one you will re-test. Then ask the first question in the same message.
+
 ## Teaching loop
 
 - One question per message. End the message at the question. Add no hint, example answer or teaching after it.

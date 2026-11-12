@@ -6,7 +6,7 @@ import { Store } from "../src/store";
 import { usageLine, Usage } from "../src/claude";
 import { MemFS } from "./memfs";
 
-const settings: EngineSettings = { claudePath: "", chatModel: "sonnet", compileModel: "sonnet", utilityModel: "haiku", effort: "low", targetLevel: 4, maxChatWords: 60, maxTopicWords: 2000, singlePassWords: 400 };
+const settings: EngineSettings = { claudePath: "", chatModel: "sonnet", compileModel: "sonnet", utilityModel: "haiku", effort: "low", targetLevel: 4, maxChatWords: 60, maxTopicWords: 2000, singlePassWords: 400, smartRouting: true, hardEffort: "high" };
 
 const show = (label: string, u: Usage) => console.log(`  ${label}: ${usageLine(u)} · ${u.calls} call(s) · $${u.costUsd.toFixed(4)}`);
 

@@ -2,6 +2,8 @@
 
 import coreMd from "../skills/core.md";
 import tutorMd from "../skills/mode-tutor.md";
+import teachMd from "../skills/mode-teach.md";
+import summaryMd from "../skills/summary.md";
 import quizMd from "../skills/mode-quiz.md";
 import expertMd from "../skills/mode-expert.md";
 import compileMd from "../skills/compile.md";
@@ -23,6 +25,8 @@ export function splitSubjects(md: string): Record<string, string> {
 export const BUNDLED: Record<string, string> = {
   "core.md": coreMd,
   "mode-tutor.md": tutorMd,
+  "mode-teach.md": teachMd,
+  "summary.md": summaryMd,
   "mode-quiz.md": quizMd,
   "mode-expert.md": expertMd,
   "compile.md": compileMd,
@@ -64,8 +68,8 @@ export function buildTurnInput(p: { state: LearnerState; today: string; chat: Ch
   return out.join("\n");
 }
 
-export function buildCompileInput(p: { title: string; mode: SourceMode; goal: string; subjects: string[]; material: string }): string {
-  return [`TITLE: ${p.title}`, `SOURCE MODE: ${p.mode}`, `GOAL: ${p.goal.trim() || "(none given)"}`, `SUBJECT CARDS: ${p.subjects.join(", ") || "none"}`, "", "MATERIAL:", p.material.trim() || "(none)"].join("\n");
+export function buildCompileInput(p: { title: string; mode: SourceMode; goal: string; subjects: string[]; material: string; research?: boolean }): string {
+  return [`TITLE: ${p.title}`, `SOURCE MODE: ${p.mode}`, `GOAL: ${p.goal.trim() || "(none given)"}`, `SUBJECT CARDS: ${p.subjects.join(", ") || "none"}`, `RESEARCH: ${p.research ? "on" : "off"}`, "", "MATERIAL:", p.material.trim() || "(none)"].join("\n");
 }
 
 export const modeFile = (m: Mode): string => `mode-${m}.md`;
