@@ -1,0 +1,175 @@
+.study-tutor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 8px 10px;
+  gap: 8px;
+}
+.study-tutor .st-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.study-tutor .st-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.study-tutor .st-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.study-tutor .st-wrap {
+  flex-wrap: wrap;
+}
+.study-tutor .st-grow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.study-tutor .st-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.study-tutor .st-tab {
+  background: none;
+  box-shadow: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--text-muted);
+  padding: 4px 8px;
+}
+.study-tutor .st-tab.is-active {
+  color: var(--text-normal);
+  border-bottom-color: var(--interactive-accent);
+}
+.study-tutor .st-messages {
+  flex: 1 1 auto;
+  min-height: 120px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  user-select: text;
+}
+.study-tutor .st-msg,
+.study-tutor .st-card {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--background-primary);
+}
+.study-tutor .st-msg.st-you {
+  background: var(--background-secondary-alt);
+  margin-left: 24px;
+}
+.study-tutor .st-who {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.study-tutor .st-text > :first-child {
+  margin-top: 4px;
+}
+.study-tutor .st-text > :last-child {
+  margin-bottom: 4px;
+}
+.study-tutor .st-note,
+.study-tutor .st-usage,
+.study-tutor .st-attach,
+.study-tutor .st-summary {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+.study-tutor .st-thinking {
+  font-style: italic;
+}
+.study-tutor .st-error {
+  color: var(--text-error);
+  font-size: var(--font-ui-small);
+}
+.study-tutor .st-empty {
+  color: var(--text-muted);
+  padding: 12px 4px;
+}
+.study-tutor .st-composer {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.study-tutor textarea {
+  width: 100%;
+  resize: vertical;
+}
+.study-tutor .st-answer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.study-tutor .st-option {
+  height: auto;
+  white-space: normal;
+  text-align: left;
+  justify-content: flex-start;
+  padding: 6px 10px;
+}
+.study-tutor .st-option p {
+  margin: 0;
+}
+.study-tutor .st-linkish {
+  background: none;
+  box-shadow: none;
+  color: var(--text-accent);
+  align-self: flex-start;
+  padding: 0;
+}
+.study-tutor .st-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-ui-small);
+}
+.study-tutor .st-table th,
+.study-tutor .st-table td {
+  text-align: left;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.study-tutor .st-table tr.st-focus td {
+  font-weight: 600;
+}
+.study-tutor .st-pips {
+  display: inline-flex;
+  gap: 2px;
+  vertical-align: middle;
+}
+.study-tutor .st-pip {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--background-modifier-border);
+}
+.study-tutor .st-pip.is-on {
+  background: var(--interactive-accent);
+}
+.study-tutor .st-pip.is-target {
+  outline: 1px solid var(--text-muted);
+  outline-offset: 1px;
+}
+.study-tutor .st-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--background-modifier-border);
+  margin-top: 6px;
+  overflow: hidden;
+}
+.study-tutor .st-bar-fill {
+  height: 100%;
+  background: var(--interactive-accent);
+}

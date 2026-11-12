@@ -1,0 +1,22 @@
+{
+  "name": "study-tutor",
+  "version": "0.1.0",
+  "description": "Obsidian plugin: a Socratic tutor, quizzer and subject expert that runs on the Claude CLI with minimal token overhead.",
+  "main": "main.js",
+  "scripts": {
+    "build": "tsc --noEmit && node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs",
+    "test": "node esbuild.config.mjs test && node --test tests/out/unit.test.cjs tests/out/ui.test.cjs",
+    "test:live": "node esbuild.config.mjs test && node tests/out/live.test.cjs"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/jsdom": "^30.0.0",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "jsdom": "^31.0.0",
+    "obsidian": "latest",
+    "typescript": "^5.6.0"
+  },
+  "author": "Ojas"
+}
