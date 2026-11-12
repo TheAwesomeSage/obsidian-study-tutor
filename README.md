@@ -7,7 +7,7 @@ Desktop only: it starts the `claude` program, which mobile Obsidian cannot do.
 ## Install
 
 1. Install [Claude Code](https://claude.com/claude-code) and sign in once by running `claude` in a terminal.
-2. Build the plugin: run `npm install` and then `npm run build` in this folder. Copy the three files it writes to `release/study-tutor/` (`main.js`, `manifest.json`, `styles.css`) into `<your vault>/.obsidian/plugins/study-tutor/`.
+2. Download `main.js`, `manifest.json` and `styles.css` from the [latest release](https://github.com/TheAwesomeSage/obsidian-study-tutor/releases/latest) and put them in `<your vault>/.obsidian/plugins/study-tutor/`. To build them yourself instead, run `npm install` and then `npm run build`; the files are written to `release/study-tutor/`.
 3. In Obsidian: Settings → Community plugins → enable **Study Tutor**.
 4. Settings → Study Tutor → **Test** checks that the CLI is found and shows the overhead of one call.
 
