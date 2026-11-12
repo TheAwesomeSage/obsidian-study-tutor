@@ -20,6 +20,8 @@ export interface EngineSettings {
   maxTopicWords: number;
   singlePassWords: number;
   /** Pick the model and thinking effort per turn from the message (see router.ts). */
+  /** True when another plugin keeps the flashcard schedule; this one then records no schedule of its own. */
+  externalFlashcards?: boolean;
   smartRouting: boolean;
   /** Thinking effort for turns the router calls complex. */
   hardEffort: string;
@@ -196,7 +198,7 @@ export class Engine {
       b.total += 1;
       if (level === 2) b.right += 1;
     }
-    state.cards[pending.id] = schedule(state.cards[pending.id], level === 2 ? "good" : "again", this.today());
+    if (!s.externalFlashcards) state.cards[pending.id] = schedule(state.cards[pending.id], level === 2 ? "good" : "again", this.today());
 
     const next = questions.find((q) => q.id === queue[queue.indexOf(pending.id) + 1]);
     if (next) {
@@ -336,7 +338,7 @@ export class Engine {
           note = g.feedback;
           usage = g.usage;
         }
-        state.cards[pending.id] = schedule(state.cards[pending.id], grade, today);
+        if (!s.externalFlashcards) state.cards[pending.id] = schedule(state.cards[pending.id], grade, today);
         if (pending.subskill in state.names) {
           const b = state.bank[pending.subskill] ?? (state.bank[pending.subskill] = { right: 0, total: 0 });
           b.total += 1;

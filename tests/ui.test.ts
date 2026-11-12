@@ -217,4 +217,27 @@ test("plugin loads, chats, reviews and shows the skill map", async () => {
   // The modal and settings tab build without errors.
   plugin.openNewTopic();
   assert.ok(notices.every((n) => !/could not/i.test(n)), notices.join(" | "));
+
+  // With the Spaced Repetition plugin enabled, review is handed to it.
+  assert.equal(plugin.usesSr(), false, "without that plugin the built-in review is used");
+  const ran: string[] = [];
+  app.plugins = { enabledPlugins: new Set(["obsidian-spaced-repetition"]) };
+  app.commands = { executeCommandById: (id: string) => (ran.push(id), true) };
+  assert.equal(plugin.usesSr(), true);
+  // Pretend that plugin has already reviewed the first card and scheduled it for a past date.
+  const note = await fs.read(`${dir}/flashcards.md`);
+  fs.files.set(`${dir}/flashcards.md`, note.replace("\n\nWhat is $\\dim", "\n<!--SR:!2020-01-01,3,250-->\n\nWhat is $\\dim"));
+  await view.showTab("review");
+  assert.match(root.textContent, /Flashcards · Spaced Repetition/);
+  assert.deepEqual($$(root, ".st-count-num").map((e: any) => e.textContent), ["1", "2", "3"], "one due, two new, three cards");
+  assert.match(root.textContent, /Review \(1 due\)/);
+  assert.match(root.textContent, /Next step · Review/);
+  opened.length = 0;
+  button(root, "Review this topic").click();
+  await tick(450);
+  assert.deepEqual(opened, [`${dir}/flashcards.md`]);
+  assert.deepEqual(ran, ["obsidian-spaced-repetition:srs-review-flashcards-in-note"]);
+  assert.match(await fs.read(`${dir}/flashcards.md`), /<!--SR:!2020-01-01,3,250-->/, "syncing the note keeps the review history");
+  plugin.opts.useSpacedRepetition = false;
+  assert.equal(plugin.usesSr(), false, "the setting switches back to the built-in review");
 });

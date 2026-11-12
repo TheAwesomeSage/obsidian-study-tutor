@@ -10,6 +10,8 @@ export interface TutorSettings extends EngineSettings {
   newCardsPerDay: number;
   /** Quiz mode asks from the question bank and marks with plain code before using the model. */
   bankQuiz: boolean;
+  /** Hand flashcard review and scheduling to the Spaced Repetition community plugin when it is enabled. */
+  useSpacedRepetition: boolean;
   /** Tutor mode places a new learner with bank questions marked by code, not model turns. */
   codePlacement: boolean;
 }
@@ -37,10 +39,13 @@ const DEFAULTS: TutorSettings = {
   singlePassWords: 6000,
   newCardsPerDay: 10,
   bankQuiz: true,
+  useSpacedRepetition: true,
   codePlacement: true,
   smartRouting: true,
   hardEffort: "high",
 };
+
+const SR_PLUGIN = "obsidian-spaced-repetition";
 
 export type SourceKind = "links" | "active" | "folder" | "spec" | "subject";
 
@@ -92,7 +97,37 @@ export default class StudyTutorPlugin extends Plugin {
   buildStore(): void {
     const root = this.opts.root.replace(/^\/+|\/+$/g, "") || "Tutor";
     this.store = new Store(this.app.vault.adapter as FS, root);
-    this.engine = new Engine(this.store, () => this.opts);
+    this.engine = new Engine(this.store, () => ({ ...this.opts, externalFlashcards: this.usesSr() }));
+  }
+
+  /** Whether the Spaced Repetition community plugin is installed and switched on in this vault. */
+  srAvailable(): boolean {
+    // `plugins` and `commands` are not in Obsidian's typed API, so every use is guarded.
+    try {
+      return !!(this.app as unknown as { plugins?: { enabledPlugins?: Set<string> } }).plugins?.enabledPlugins?.has(SR_PLUGIN);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Flashcards are handed to Spaced Repetition when the setting is on and that plugin is there. */
+  usesSr(): boolean {
+    return this.opts.useSpacedRepetition && this.srAvailable();
+  }
+
+  /** Brings the topic's flashcard note up to date, opens it, and starts that plugin's review on it. */
+  async reviewInSr(dir: string): Promise<void> {
+    const path = await this.store.exportFlashcards(dir);
+    await this.app.workspace.openLinkText(path, "", false);
+    // Give Obsidian a moment to make the note the active one before the command reads it.
+    window.setTimeout(() => {
+      try {
+        const ok = (this.app as unknown as { commands?: { executeCommandById?: (id: string) => boolean } }).commands?.executeCommandById?.(`${SR_PLUGIN}:srs-review-flashcards-in-note`);
+        if (!ok) new Notice('The flashcard note is open. Run "Spaced Repetition: Review flashcards in this note" from the command palette.', 9000);
+      } catch {
+        new Notice('The flashcard note is open. Run "Spaced Repetition: Review flashcards in this note" from the command palette.', 9000);
+      }
+    }, 300);
   }
 
   async save(): Promise<void> {
@@ -173,6 +208,8 @@ export default class StudyTutorPlugin extends Plugin {
       new Notice(`Topic ready: ${res.subskills} subskills, ${res.questions} questions.${g.truncated ? " Some notes were left out (size limit)." : ""}\n${usageLine(res.usage)} in ${res.usage.calls} call(s)`, 10000);
       this.data.activeTopic = res.dir;
       await this.save();
+      // Keep the flashcard note in step with the new question bank; existing schedules are kept.
+      if (this.usesSr()) await this.store.exportFlashcards(res.dir);
       const view = await this.activateView();
       await view?.reload();
       return res;
@@ -332,7 +369,19 @@ class TutorSettingTab extends PluginSettingTab {
 
     new Setting(containerEl).setName("Teaching").setHeading();
     num("Target level", "Level (3 to 5) each subskill must reach for a new topic to count as mastered.", "targetLevel", 3, 5);
-    num("New flashcards per day", "Unseen cards added to each day's review, per topic.", "newCardsPerDay", 0);
+    new Setting(containerEl)
+      .setName("Review flashcards in the Spaced Repetition plugin")
+      .setDesc(
+        (this.plugin.srAvailable() ? "Spaced Repetition is enabled in this vault. " : "Spaced Repetition is not enabled in this vault, so the built-in review is used. ") +
+          "When on, each topic's question bank is kept as a flashcard note that Spaced Repetition schedules and reviews, alongside your other decks and on mobile. Off: this plugin's own review tab and schedule are used.",
+      )
+      .addToggle((t) =>
+        t.setValue(s.useSpacedRepetition).onChange(async (v) => {
+          s.useSpacedRepetition = v;
+          await this.plugin.save();
+        }),
+      );
+    num("New flashcards per day", "Built-in review only: unseen cards added to each day's review, per topic.", "newCardsPerDay", 0);
 
     new Setting(containerEl).setName("Token saving").setHeading();
     const toggle = (name: string, desc: string, key: "bankQuiz" | "codePlacement" | "smartRouting") =>

@@ -29,7 +29,7 @@ The plugin works in any vault. On first load it creates one folder (default `Tut
   - *Teacher* explains one subskill at a time: why it matters, the idea, a worked example, a diagram where it helps, the common pitfall, then a problem for you. It opens with a short plan and closes with a summary.
   - *Quizzer* asks from the question bank first, weakest subskills first. Multiple-choice and exact short answers are marked by the plugin with no tokens. Only an answer that needs judgement costs a small grading call, and when the bank runs out the model writes fresh questions.
   - *Expert* answers questions directly, grounded in your notes.
-- **Review** tab: spaced flashcards from the question bank. Multiple choice and exact short answers are marked by the plugin. For anything else you grade yourself, or ask Claude to grade one answer.
+- **Review** tab: with the Spaced Repetition plugin enabled, a launcher for its review of this topic. Otherwise, built-in spaced flashcards from the question bank. Multiple choice and exact short answers are marked by the plugin. For anything else you grade yourself, or ask Claude to grade one answer.
 - **Skill map** tab: levels 0 to 5 per subskill, tracked misconceptions, recompile, flashcard export, and "Write summary note", which saves a revision summary with a concept map into the topic folder.
 
 ## How usage is kept low
@@ -75,7 +75,7 @@ Everything is markdown, so you can read, edit, link and search it. Edits to `_sk
 ## Working with other plugins
 
 - **Bases** (core): `Tutor/Dashboard.base` lists topics with progress and cards due.
-- **Spaced Repetition** (community): "Export flashcards" writes the bank in its format, tagged `#flashcards/<topic>`.
+- **Spaced Repetition** (community): when it is enabled, flashcards are handed to it. Each topic's question bank is kept as a note tagged `#flashcards/<topic>`, Spaced Repetition schedules and reviews it with your other decks (including on mobile), and the Review tab shows its due and new counts and starts its review on the topic. Regenerating the note keeps the review history. Without that plugin, or with the setting off, the built-in review is used. Checked against Spaced Repetition 1.15.4, including its own card parser.
 - **Execute Code** (community): chat files are notes, so code blocks the tutor writes can be run from the chat file.
 - Maths is written in LaTeX and renders in the chat and in every file.
 

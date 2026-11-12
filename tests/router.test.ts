@@ -226,6 +226,39 @@ test("placement sets starting levels in code and then hands over to the tutor", 
   assert.equal((await third.store.loadChat(c4)).fm.placement, "done");
 });
 
+test("flashcard notes for Spaced Repetition keep review history and avoid its separators", () => {
+  const q = (id: string, question: string, answer: string, extra: Partial<F.Question> = {}): F.Question => ({ id, subskill: 1, type: "short", question, options: [], answer, explanation: "", ...extra });
+  const bank = [
+    q("Q1", "What does `std::vector` store?\n\nAlso: is std::map ordered?", "Elements\n?\nYes", { explanation: "Use ==highlight== freely." }),
+    q("Q2", "Pick one", "B", { type: "mcq", options: ["A. left", "B. right"] }),
+    q("Q3", "What prints?\n```cpp\nstd::cout << 1;\n\nreturn 0;\n```", "1"),
+  ];
+  assert.ok(!F.srSafe("a:::b and c::::d").includes("::"), "runs of three or more colons are broken up too");
+  const first = F.buildSrNote(bank, "cpp");
+  assert.match(first, /^#flashcards\/cpp\n\n/);
+  const blocks = first.trim().split(/\n\s*\n/).slice(1);
+  assert.equal(blocks.length, 3, "no card contains a blank line, so the plugin sees exactly three cards");
+  // "::" outside inline code is broken up, so the line is not read as a one-line card...
+  assert.ok(blocks[0].includes("`std::vector`"), "inline code is left alone");
+  assert.ok(!/is std::map/.test(blocks[0]) && /is std:​:map/.test(blocks[0]));
+  // ...a stray "?" line in the answer cannot split the card, and fenced code is untouched.
+  assert.equal(blocks[0].split("\n").filter((l) => l === "?").length, 1);
+  assert.ok(blocks[2].includes("std::cout << 1;"));
+  assert.match(blocks[1], /Pick one\n- A\. left\n- B\. right\n\?\nB\. right$/);
+  assert.deepEqual(F.srStats(first, "2026-11-12"), { total: 3, due: 0, fresh: 3 });
+
+  // The plugin writes its schedule after a card, plainly or inside its callout. Regenerating
+  // the note (here with a reworded third card) keeps both, and drops nothing else.
+  const reviewed = first.replace(blocks[0], blocks[0] + "\n<!--SR:!2026-11-10,3,250-->").replace(blocks[1], blocks[1] + "\n> [!sr|card-metadata]\n> <!--SR:!2026-12-01,20,270-->");
+  assert.deepEqual(F.srStats(reviewed, "2026-11-12"), { total: 3, due: 1, fresh: 1 });
+  bank[2] = q("Q3", "What does this print?", "1");
+  const second = F.buildSrNote(bank, "cpp", reviewed.replace(/\n/g, "\r\n"));
+  assert.match(second, /Yes\nUse ==highlight== freely\.\n<!--SR:!2026-11-10,3,250-->\n\nPick one/);
+  assert.match(second, /B\. right\n> \[!sr\|card-metadata\]\n> <!--SR:!2026-12-01,20,270-->\n\nWhat does this print\?\n\?\n1\n$/);
+  assert.deepEqual(F.srStats(second, "2026-12-01"), { total: 3, due: 2, fresh: 1 });
+  assert.equal(F.buildSrNote(bank, "cpp", second), second, "regenerating an up-to-date note changes nothing");
+});
+
 test("the next step follows learn, practise, master", () => {
   const topic = F.parseTopic(F.parseCompileOutput(COMPILED).topicBody);
   const s = F.newState(topic, 4);

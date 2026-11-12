@@ -75,7 +75,7 @@
   padding: 10px 12px;
   border-radius: var(--st-radius);
   border: 1px solid var(--st-accent-line);
-  background: linear-gradient(135deg, var(--st-accent-soft), transparent 70%), var(--st-surface);
+  background: var(--st-surface);
 }
 .study-tutor .st-ring {
   --st-p: 0;
@@ -199,8 +199,8 @@
 .study-tutor .st-step.is-active {
   color: var(--text-normal);
   border-color: var(--st-accent);
-  background: linear-gradient(180deg, var(--st-accent-soft), transparent), var(--st-surface);
-  box-shadow: 0 0 0 1px var(--st-accent-soft), 0 0 12px color-mix(in srgb, var(--interactive-accent) 22%, transparent);
+  background: var(--st-surface);
+  box-shadow: 0 0 0 1px var(--st-accent-soft);
 }
 .study-tutor .st-step.is-active .st-step-icon {
   color: var(--text-accent);
@@ -456,6 +456,35 @@
   color: var(--text-accent);
   align-self: flex-start;
   padding: 0;
+}
+
+.study-tutor .st-counts {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+.study-tutor .st-count {
+  flex: 1 1 0;
+  padding: 8px 4px;
+  text-align: center;
+  border-radius: 10px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+}
+.study-tutor .st-count-num {
+  font-size: var(--font-ui-large, 20px);
+  font-weight: var(--font-semibold);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-normal);
+}
+.study-tutor .st-count:first-child .st-count-num {
+  color: var(--text-accent);
+}
+.study-tutor .st-count-label {
+  font-size: var(--font-ui-smaller);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
 }
 
 /* ----- skill map ----- */

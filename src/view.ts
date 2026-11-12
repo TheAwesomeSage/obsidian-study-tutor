@@ -1,7 +1,7 @@
 import { Component, ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import { Usage, addUsage, usageLine, zeroUsage } from "./claude";
 import { Material, TurnResult } from "./engine";
-import { Chat, Grade, LearnerState, Mode, NextStep, Question, Topic, answerText, dueCount, fmStr, mcqLetter, nextStep, progress, reviewQueue, sameShortAnswer, schedule, splitFrontmatter, ymd } from "./formats";
+import { Chat, Grade, LearnerState, Mode, NextStep, Question, SrStats, Topic, answerText, dueCount, fmStr, mcqLetter, nextStep, progress, reviewQueue, sameShortAnswer, schedule, splitFrontmatter, ymd } from "./formats";
 import type StudyTutorPlugin from "./main";
 import { TopicRef } from "./store";
 
@@ -41,6 +41,8 @@ export class TutorView extends ItemView {
   private headEl!: HTMLElement;
   /** Owns everything the markdown renderer creates for the current render, so it can be released. */
   private rendered: Component | null = null;
+  /** Flashcard counts from the Spaced Repetition plugin's note, when that plugin does the reviewing. */
+  private sr: SrStats | null = null;
   // review session
   private queue: Question[] = [];
   private requeued = new Set<string>();
@@ -107,7 +109,18 @@ export class TutorView extends ItemView {
   }
 
   private async loadState(): Promise<void> {
-    if (this.dir) this.state = await this.plugin.store.loadState(this.dir, this.plugin.opts.targetLevel);
+    if (!this.dir) return;
+    this.state = await this.plugin.store.loadState(this.dir, this.plugin.opts.targetLevel);
+    this.sr = null;
+    if (this.plugin.usesSr()) {
+      // The schedule lives in the flashcard note that Spaced Repetition maintains. Create the
+      // note the first time; after that only read it, so its review history is never disturbed.
+      try {
+        this.sr = (await this.plugin.store.flashcardStats(this.dir)) ?? (await this.plugin.store.exportFlashcards(this.dir), await this.plugin.store.flashcardStats(this.dir));
+      } catch {
+        this.sr = null;
+      }
+    }
   }
 
   private async selectTopic(dir: string | null): Promise<void> {
@@ -193,13 +206,13 @@ export class TutorView extends ItemView {
     if (!this.dir || !this.state) return;
     const s = this.state;
     const pct = progress(s);
-    const due = dueCount(s, this.today);
+    const due = this.sr ? this.sr.due : dueCount(s, this.today);
 
     // Progress ring and the suggested next step.
     const hero = h.createDiv({ cls: "st-hero" });
     const ring = hero.createDiv({ cls: "st-ring", attr: { style: `--st-p:${pct}`, "aria-label": `${pct}% of the way to target level ${s.target}` } });
     ring.createDiv({ cls: "st-ring-num", text: `${pct}` });
-    const next = nextStep(s, this.today);
+    const next = nextStep(s, this.today, this.sr ? this.sr.due : undefined);
     const info = hero.createDiv({ cls: "st-grow st-hero-info" });
     info.createDiv({ cls: "st-hero-kicker", text: `Next step · ${next.title}` });
     info.createDiv({ cls: "st-hero-detail", text: next.detail });
@@ -459,7 +472,38 @@ export class TutorView extends ItemView {
     this.render();
   }
 
+  /** Review handed to the Spaced Repetition plugin: show its counts and start its review on this topic's note. */
+  private renderSrReview(): void {
+    const body = this.bodyEl;
+    const dir = this.dir;
+    if (!dir) return;
+    const sr = this.sr ?? { total: 0, due: 0, fresh: 0 };
+    const card = body.createDiv({ cls: "st-card st-question" });
+    card.createDiv({ cls: "st-who", text: "Flashcards · Spaced Repetition" });
+    const counts = card.createDiv({ cls: "st-counts" });
+    for (const [n, label] of [
+      [sr.due, "due"],
+      [sr.fresh, "new"],
+      [sr.total, "cards"],
+    ] as [number, string][]) {
+      const c = counts.createDiv({ cls: "st-count" });
+      c.createDiv({ cls: "st-count-num", text: String(n) });
+      c.createDiv({ cls: "st-count-label", text: label });
+    }
+    card.createEl("p", { cls: "st-usage", text: "This topic's question bank is kept as a flashcard note. Spaced Repetition schedules it alongside your other decks, and reviewing there uses no tokens." });
+    const row = body.createDiv({ cls: "st-row st-wrap" });
+    const go = row.createEl("button", { text: "Review this topic", cls: "mod-cta" });
+    go.disabled = !sr.total;
+    go.onclick = () => void this.plugin.reviewInSr(dir);
+    row.createEl("button", { text: "Open flashcard note" }).onclick = async () => {
+      void this.app.workspace.openLinkText(await this.plugin.store.exportFlashcards(dir), "", true);
+    };
+    row.createEl("button", { text: "Refresh counts" }).onclick = () => void this.showTab("review");
+    if (!sr.total) body.createDiv({ cls: "st-usage", text: "The question bank is empty. Recompile the topic from the Skill map tab." });
+  }
+
   private renderReview(): void {
+    if (this.plugin.usesSr()) return this.renderSrReview();
     const body = this.bodyEl;
     const q = this.queue[0];
     if (!q || !this.state) {
@@ -591,7 +635,7 @@ export class TutorView extends ItemView {
     };
     row.createEl("button", { text: "Export flashcards" }).onclick = async () => {
       const p = await this.plugin.store.exportFlashcards(dir);
-      new Notice(`Flashcards written to ${p} in the Spaced Repetition plugin's format.`);
+      new Notice(`Flashcards are up to date in ${p}, in the Spaced Repetition plugin's format. Existing review history was kept.`);
     };
     row.createEl("button", { text: "Recompile from notes" }).onclick = () => {
       if (window.confirm("Recompile this topic from its sources? Levels are kept where subskill names still match. The flashcard schedule starts again.")) void this.plugin.recompile(dir);

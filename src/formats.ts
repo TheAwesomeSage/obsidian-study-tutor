@@ -539,6 +539,84 @@ export function codeMark(q: Question, answer: string): Grade | "letter" | "model
   return "model";
 }
 
+// ---------- flashcards for the Spaced Repetition community plugin ----------
+//
+// That plugin reads cards from tagged notes: question lines, a line holding only "?", answer
+// lines, then a blank line. It writes its schedule back into the note on the line after the
+// card, as <!--SR:!2026-11-15,3,250--> (due date, interval, ease), optionally inside a
+// "> [!sr|card-metadata]" callout. Checked against version 1.15.4 of the plugin.
+
+export interface SrStats {
+  total: number;
+  due: number;
+  fresh: number;
+}
+
+const SR_TAIL = /^(<!--SR:|> \[!sr\|card-metadata\])/;
+const ZWSP = "​";
+
+/** Makes text safe inside a card: no blank lines, and nothing the plugin would read as a card separator. */
+export function srSafe(text: string): string {
+  let fenced = false;
+  return text
+    .split(/\r?\n/)
+    .filter((l) => l.trim() !== "")
+    .map((line) => {
+      if (/^(```|~~~)/.test(line)) {
+        fenced = !fenced;
+        return line;
+      }
+      if (fenced) return line;
+      // A line that is only "?" or "??" would split the card in two.
+      if (/^\s*\?{1,2}\s*$/.test(line)) return ZWSP + line;
+      // "::" outside inline code would turn the line into a card of its own (think std::vector).
+      return line.split(/(`[^`]*`)/).map((part, i) => (i % 2 ? part : part.replace(/:(?=:)/g, `:${ZWSP}`))).join("");
+    })
+    .join("\n");
+}
+
+const srKey = (front: string): string => front.replace(/​/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+
+/** Splits a flashcard note into cards, each with the front text and whatever schedule lines follow it. */
+function srBlocks(md: string): { front: string; tail: string }[] {
+  const out: { front: string; tail: string }[] = [];
+  for (const block of md.replace(/\r\n/g, "\n").split(/\n\s*\n/)) {
+    const lines = block.split("\n");
+    const sep = lines.findIndex((l) => l.trim() === "?");
+    if (sep < 1) continue;
+    const tailAt = lines.findIndex((l, i) => i > sep && SR_TAIL.test(l));
+    out.push({ front: lines.slice(0, sep).join("\n"), tail: tailAt < 0 ? "" : lines.slice(tailAt).join("\n") });
+  }
+  return out;
+}
+
+/**
+ * Writes the question bank as a flashcard note. Cards already in `existing` keep the schedule
+ * the plugin wrote for them, so the note can be regenerated without losing review history.
+ */
+export function buildSrNote(questions: Question[], tag: string, existing = ""): string {
+  const kept = new Map(srBlocks(existing).map((b) => [srKey(b.front), b.tail]));
+  const cards = questions.map((q) => {
+    const front = srSafe(q.question) + (q.options.length ? "\n" + q.options.map((o) => `- ${srSafe(o)}`).join("\n") : "");
+    const back = srSafe(answerText(q)) + (q.explanation ? "\n" + srSafe(q.explanation) : "");
+    const tail = kept.get(srKey(front));
+    return `${front}\n?\n${back}${tail ? "\n" + tail : ""}`;
+  });
+  return `#flashcards/${tag}\n\n${cards.join("\n\n")}\n`;
+}
+
+/** Counts cards in a flashcard note: how many are due today and how many have never been reviewed. */
+export function srStats(md: string, today: string): SrStats {
+  const stats: SrStats = { total: 0, due: 0, fresh: 0 };
+  for (const b of srBlocks(md)) {
+    stats.total += 1;
+    const dates = [...b.tail.matchAll(/!(\d{4}-\d{2}-\d{2}),/g)].map((m) => m[1]);
+    if (!dates.length) stats.fresh += 1;
+    else if (dates.some((d) => d <= today)) stats.due += 1;
+  }
+  return stats;
+}
+
 // ---------- the guided path: learn, practise, master ----------
 
 export interface NextStep {
@@ -551,11 +629,12 @@ export interface NextStep {
  * The cheapest sensible next thing to do on a topic. Lessons and code-marked practice come
  * before Socratic tutoring, which is the most thorough mode and also the most expensive.
  */
-export function nextStep(s: LearnerState, today: string): NextStep {
+export function nextStep(s: LearnerState, today: string, dueOverride?: number): NextStep {
   const ns = Object.keys(s.names).map(Number).sort((a, b) => a - b);
   if (!ns.length) return { action: "done", title: "Nothing to study yet", detail: "This topic has no subskills." };
   const lvl = (n: number) => s.levels[n];
-  const due = dueCount(s, today);
+  // When another plugin keeps the flashcard schedule, its count of due cards is passed in.
+  const due = dueOverride ?? dueCount(s, today);
   const untaught = ns.filter((n) => lvl(n) === null || (lvl(n) as number) <= 1);
   if (ns.every((n) => lvl(n) === null)) return { action: "teach", title: "Learn", detail: `Start with a lesson on ${s.names[ns[0]]}.` };
   if (due > 0) return { action: "review", title: "Review", detail: `${due} flashcard${due === 1 ? " is" : "s are"} due. Reviewing uses no tokens.` };

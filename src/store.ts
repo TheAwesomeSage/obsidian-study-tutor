@@ -2,7 +2,8 @@
 // interface (Obsidian's DataAdapter satisfies it), so it can be tested outside Obsidian.
 
 import { BUNDLED } from "./prompts";
-import { Chat, Frontmatter, LearnerState, Mode, Question, Topic, answerText, fmNum, fmStr, newState, parseChat, parseQuestions, parseState, parseTopic, serializeChat, serializeState, textHash, withFrontmatter, ymd } from "./formats";
+import { SrStats, buildSrNote, srStats } from "./formats";
+import { Chat, Frontmatter, LearnerState, Mode, Question, Topic, fmNum, fmStr, newState, parseChat, parseQuestions, parseState, parseTopic, serializeChat, serializeState, textHash, withFrontmatter, ymd } from "./formats";
 
 export interface FS {
   read(path: string): Promise<string>;
@@ -242,19 +243,30 @@ export class Store {
     await this.writeFile(p, yaml.join("\n"));
   }
 
-  /** Writes the question bank as flashcards in the format the Spaced Repetition community plugin reads. */
+  flashcardPath(dir: string): string {
+    return `${dir}/flashcards.md`;
+  }
+
+  /**
+   * Writes the question bank as a flashcard note for the Spaced Repetition community plugin.
+   * Safe to call again at any time: schedules that plugin has written into the note are kept,
+   * and the file is only rewritten when its content would change.
+   */
   async exportFlashcards(dir: string): Promise<string> {
     const topic = await this.loadTopic(dir);
     const qs = await this.loadQuestions(dir);
     const tag = topic.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "topic";
-    const flat = (s: string) => s.replace(/\n\s*\n/g, "\n").trim();
-    const cards = qs.map((q) => {
-      const front = flat(q.question) + (q.options.length ? "\n" + q.options.map((o) => `- ${o}`).join("\n") : "");
-      const back = flat(answerText(q)) + (q.explanation ? "\n" + flat(q.explanation) : "");
-      return `${front}\n?\n${back}`;
-    });
-    const p = `${dir}/flashcards.md`;
-    await this.writeFile(p, `#flashcards/${tag}\n\n${cards.join("\n\n")}\n`);
+    const p = this.flashcardPath(dir);
+    const existing = (await this.fs.exists(p)) ? await this.fs.read(p) : "";
+    const next = buildSrNote(qs, tag, existing);
+    if (next !== existing.replace(/\r\n/g, "\n")) await this.writeFile(p, next);
     return p;
+  }
+
+  /** Due and new counts read from the schedule the Spaced Repetition plugin keeps in the flashcard note. */
+  async flashcardStats(dir: string): Promise<SrStats | null> {
+    const p = this.flashcardPath(dir);
+    if (!(await this.fs.exists(p))) return null;
+    return srStats(await this.fs.read(p), this.today());
   }
 }
