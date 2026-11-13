@@ -13,7 +13,6 @@ import * as F from "../src/formats";
 import { Store } from "../src/store";
 import { Engine, looksMathematical } from "../src/engine";
 import { buildTurnInput } from "../src/prompts";
-import { layers, layoutGraph } from "../src/graph";
 import { Claim, ClaimResult, MathBackend, PYTHON, checkReport, cleanClaims, computeBlock, extractCompute, extractVerify, plainMaths, safeExpr } from "../src/sympy";
 import { CASES, CHAINS, PLAIN, UNSAFE } from "./sympy-cases";
 import { MemFS } from "./memfs";
@@ -345,53 +344,6 @@ test("maths checking stays out of the way where it does not apply", async () => 
   r = await down.engine.turn(down.dir, chat4, "Please integrate x for me, I keep getting it wrong somehow?");
   assert.match(down.calls[1].input, /SymPy was not available/);
   assert.equal(r.reply, "It is $x^2/2$.");
-});
-
-// ---------- the concept graph ----------
-
-test("subskills are layered by what they depend on, and loops do not hang", () => {
-  assert.deepEqual(layers({ 1: [], 2: [1], 3: [1], 4: [2, 3] }), { 1: 0, 2: 1, 3: 1, 4: 2 });
-  assert.deepEqual(layers({ 1: [], 2: [1], 3: [1, 2] }), { 1: 0, 2: 1, 3: 2 }, "depth follows the longest chain");
-  const loop = layers({ 1: [2], 2: [1], 3: [] });
-  assert.deepEqual(Object.keys(loop).sort(), ["1", "2", "3"]);
-});
-
-test("the graph puts prerequisites above, keeps boxes apart and marks gaps", () => {
-  const topic = F.parseTopic(F.parseCompileOutput(COMPILED).topicBody);
-  assert.deepEqual(F.prereqMap(topic), { 1: [], 2: [1], 3: [1], 4: [2, 3] });
-  const s = F.newState(topic, 4);
-  s.levels = { 1: 4, 2: 1, 3: 3, 4: 2 };
-  s.focus = 2;
-  for (const width of [240, 340, 520, 760]) {
-    const g = layoutGraph(topic, s, { width });
-    const at = Object.fromEntries(g.nodes.map((n) => [n.n, n]));
-    assert.equal(g.nodes.length, 4);
-    assert.ok(at[1].y < at[2].y && at[2].y === at[3].y && at[3].y < at[4].y, "three rows, prerequisites first");
-    for (const n of g.nodes) assert.ok(n.x >= 0 && n.x + n.w <= g.width && n.y + n.h <= g.height, `box ${n.n} is inside a ${width}px graph`);
-    assert.ok(at[2].x + at[2].w <= at[3].x || at[3].x + at[3].w <= at[2].x, "boxes in a row do not overlap");
-    assert.equal(g.edges.length, 4);
-    assert.ok(g.edges.every((e) => /^M[\d.]+ [\d.]+ C/.test(e.d)));
-  }
-  const g = layoutGraph(topic, s);
-  const at = Object.fromEntries(g.nodes.map((n) => [n.n, n]));
-  assert.deepEqual(g.edges.filter((e) => e.lagging).map((e) => [e.from, e.to]), [[2, 4]], "chain rule (1) is behind integration by parts (2)");
-  assert.deepEqual(at[4].blockedBy, [2]);
-  assert.equal(at[4].locked, false, "already started, so not locked");
-  assert.equal(at[1].atTarget, true);
-  assert.equal(at[2].focus, true);
-  assert.deepEqual(at[1].unlocks, [2, 3]);
-
-  // Nothing placed yet: everything past the first row waits for what it builds on.
-  const fresh = layoutGraph(topic, F.newState(topic, 4));
-  assert.deepEqual(fresh.nodes.map((n) => n.locked), [false, true, true, true]);
-  assert.equal(fresh.edges.filter((e) => e.lagging).length, 0);
-
-  // A long name is wrapped to three lines at most; six boxes in one layer wrap onto two rows.
-  const wide = F.parseTopic(["# T", "", "## Subskills", "", "### 1. Root", "prerequisites: none", ...[2, 3, 4, 5, 6, 7].flatMap((n) => ["", `### ${n}. A subskill with a very long descriptive name that cannot fit on one line number ${n}`, "prerequisites: 1"])].join("\n"));
-  const w = layoutGraph(wide, F.newState(wide, 4), { width: 340 });
-  assert.ok(w.nodes.every((n) => n.lines.length <= 3 && n.x + n.w <= w.width));
-  assert.equal(new Set(w.nodes.filter((n) => n.layer === 1).map((n) => n.y)).size, 2);
-  assert.match(w.nodes[1].lines[2], /…$/);
 });
 
 test("the next step starts from the foundation, and the tutor is told about gaps", () => {

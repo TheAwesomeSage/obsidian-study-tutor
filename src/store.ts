@@ -2,8 +2,12 @@
 // interface (Obsidian's DataAdapter satisfies it), so it can be tested outside Obsidian.
 
 import { BUNDLED } from "./prompts";
+import { Course, CourseEdge, EdgeStatus, Relation, TopicGraph, effectivePrereqs, joinCourse, parseTopicGraph, serializeTopicGraph, syncTopicGraph, wouldCycle } from "./course";
+import { Attempt, LevelChange, normaliseAttempt } from "./evidence";
 import { SrStats, buildSrNote, srStats } from "./formats";
-import { Chat, Frontmatter, LearnerState, Mode, Question, Topic, fmNum, fmStr, newState, parseChat, parseQuestions, parseState, parseTopic, serializeChat, serializeState, textHash, withFrontmatter, ymd } from "./formats";
+import { Chat, Frontmatter, LearnerState, Mode, Prereqs, Question, Topic, fmNum, fmStr, newState, parseChat, parseQuestions, parseState, parseTopic, serializeChat, serializeState, textHash, withFrontmatter, ymd } from "./formats";
+import type { PolicyCase } from "./policy";
+import { SessionRecord, sessionMarkdown } from "./session";
 
 export interface FS {
   read(path: string): Promise<string>;
@@ -18,11 +22,67 @@ export interface TopicRef {
   title: string;
 }
 
+/** One saved chat, as the home screen lists it. */
+export interface ChatRef {
+  path: string;
+  dir: string;
+  topic: string;
+  mode: Mode;
+  /** yyyy-mm-dd hhmm, from the file name. */
+  stamp: string;
+  part: number;
+  messages: number;
+  /** A question is still open, or the last word was the learner's. */
+  unfinished: boolean;
+  /** Where it was left: the open question, or the start of the last message. */
+  snippet: string;
+  action: string;
+}
+
+export interface ExternalPrereq {
+  /** The subskill of this topic that has the prerequisite. */
+  skill: number;
+  /** The prerequisite: its name, topic title, topic folder and number there. */
+  name: string;
+  topic: string;
+  dir: string;
+  n: number;
+  level: number | null;
+  section: string;
+}
+
 /** Fingerprints of the skill files shipped in 0.1.0 that later changed, from before fingerprints were recorded. */
 const FIRST_RELEASE: Record<string, string> = { "core.md": "c8e78aa5", "mode-tutor.md": "bd93508", "mode-quiz.md": "29a50213", "compile.md": "4c586797" };
 
 const base = (p: string): string => p.split("/").pop() ?? p;
 const safeName = (s: string): string => s.replace(/[\\/:*?"<>|#^[\]]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "Topic";
+
+const EVIDENCE_HEAD = "Every answer Study Tutor has marked on this topic and every change of level, one record per line.\nThis is the evidence behind the levels in state.md. Edit it only if you know what you are changing.";
+const FENCE = "```";
+
+function parseEvidence(md: string): { attempts: Attempt[]; changes: LevelChange[] } {
+  const attempts: Attempt[] = [];
+  const changes: LevelChange[] = [];
+  for (const line of md.split(/\r?\n/)) {
+    if (!line.startsWith("{")) continue;
+    try {
+      const r = JSON.parse(line);
+      if (r.kind === "change" && typeof r.t === "string" && Number.isInteger(r.skill)) changes.push({ t: r.t, skill: r.skill, concept: String(r.concept ?? ""), from: r.from ?? null, to: r.to ?? null, cause: String(r.cause ?? ""), note: String(r.note ?? "") });
+      else {
+        const a = normaliseAttempt(r);
+        if (a) attempts.push(a);
+      }
+    } catch {
+      /* one damaged line does not cost the rest */
+    }
+  }
+  return { attempts, changes };
+}
+
+function serializeEvidence(title: string, s: LearnerState): string {
+  const lines = [...s.attempts.map((a) => JSON.stringify({ kind: "attempt", ...a })), ...s.changes.map((c) => JSON.stringify({ kind: "change", ...c }))];
+  return withFrontmatter({ tutor: "evidence", topic: title, attempts: s.attempts.length }, `${EVIDENCE_HEAD}\n\n${FENCE}jsonl\n${lines.join("\n")}\n${FENCE}\n`);
+}
 
 export class Store {
   constructor(
@@ -125,48 +185,151 @@ export class Store {
     return parseTopic(await this.fs.read(`${dir}/topic.md`));
   }
 
-  async addPrerequisite(dir: string, state: LearnerState, link: { skill: number; topic: string; prerequisite: number }): Promise<void> {
-    const topics = await this.listTopics();
-    const edges = new Map<string, string[]>();
-    const key = (topic: string, skill: number) => `${topic}#${skill}`;
-    for (const ref of topics) {
-      const topic = await this.loadTopic(ref.dir);
-      const saved = ref.dir === dir ? state : await this.loadState(ref.dir, state.target);
-      for (const sub of topic.subskills) edges.set(key(ref.dir, sub.n), sub.prerequisites.map(n => key(ref.dir, n)));
-      for (const edge of saved.links ?? []) {
-        const source = key(ref.dir, edge.skill);
-        edges.set(source, [...(edges.get(source) ?? []), key(edge.topic, edge.prerequisite)]);
-      }
-    }
-    const source = key(dir, link.skill);
-    const destination = key(link.topic, link.prerequisite);
-    if (!edges.has(source) || !edges.has(destination)) throw new Error("Choose an existing topic and skill.");
-    const visited = new Set<string>();
-    const reaches = (node: string): boolean => {
-      if (node === source) return true;
-      if (visited.has(node)) return false;
-      visited.add(node);
-      return (edges.get(node) ?? []).some(reaches);
-    };
-    if (reaches(destination)) throw new Error("This prerequisite would create a circular dependency.");
-    state.links = [...(state.links ?? []), link];
-    await this.saveState(dir, state);
+  // ----- the course graph: concepts and relations, separate from anything about the learner -----
+
+  private graphPath(dir: string): string {
+    return `${dir}/graph.md`;
   }
 
-  async linkedContext(state: LearnerState): Promise<string> {
-    const topics = await this.listTopics();
-    const sections: string[] = [];
-    for (const link of state.links ?? []) {
-      if (link.skill !== state.focus) continue;
-      const ref = topics.find(t => t.dir === link.topic);
-      if (!ref) continue;
-      const topic = await this.loadTopic(ref.dir);
-      const prerequisite = topic.subskills.find(s => s.n === link.prerequisite);
-      if (!prerequisite) continue;
-      const other = await this.loadState(ref.dir, state.target);
-      sections.push(`External prerequisite [[${ref.dir}/topic]]: ${prerequisite.name}, level ${other.levels[prerequisite.n] ?? "unknown"}.\n${prerequisite.section}`);
+  /**
+   * The topic's course graph, brought into line with its topic card. The file is rewritten only
+   * when something changed, so reading the graph is safe to do often.
+   */
+  async loadGraph(dir: string, topic?: Topic): Promise<TopicGraph> {
+    const t = topic ?? (await this.loadTopic(dir));
+    const p = this.graphPath(dir);
+    let prev: TopicGraph | null = null;
+    let text = "";
+    try {
+      if (await this.fs.exists(p)) {
+        text = await this.fs.read(p);
+        prev = parseTopicGraph(text);
+      }
+    } catch {
+      prev = null;
     }
-    return sections.join("\n\n");
+    const { graph } = syncTopicGraph(base(dir), t, prev);
+    const next = serializeTopicGraph(t.title, graph);
+    if (next !== text.replace(/\r\n/g, "\n")) await this.writeFile(p, next);
+    return graph;
+  }
+
+  async saveGraph(dir: string, graph: TopicGraph): Promise<void> {
+    const topic = await this.loadTopic(dir);
+    await this.writeFile(this.graphPath(dir), serializeTopicGraph(topic.title, graph));
+  }
+
+  /** Prerequisites inside one topic, by subskill number, as the course graph has them now. */
+  async prereqs(dir: string, topic?: Topic): Promise<Prereqs> {
+    return effectivePrereqs(await this.loadGraph(dir, topic));
+  }
+
+  /** Every topic's graph joined into one. */
+  async loadCourse(): Promise<Course> {
+    const parts: { dir: string; title: string; graph: TopicGraph }[] = [];
+    for (const ref of await this.listTopics()) {
+      try {
+        parts.push({ dir: ref.dir, title: ref.title, graph: await this.loadGraph(ref.dir) });
+      } catch {
+        /* a topic that cannot be read is left out of the graph, not out of the vault */
+      }
+    }
+    return joinCourse(parts);
+  }
+
+  /**
+   * Adds a relation between two concepts, stored with the topic the first one belongs to.
+   * A `requires` relation that would close a loop of prerequisites is refused.
+   */
+  async addRelation(edge: { from: string; to: string; type: Relation; status?: EdgeStatus; source?: string }): Promise<void> {
+    const course = await this.loadCourse();
+    const from = course.concepts.get(edge.from);
+    if (!from || !course.concepts.has(edge.to)) throw new Error("Choose two existing concepts.");
+    if (edge.from === edge.to) throw new Error("A concept cannot be related to itself.");
+    if (edge.type === "requires" && wouldCycle(course.edges, edge.from, edge.to)) throw new Error("This prerequisite would create a circular dependency.");
+    const graph = await this.loadGraph(from.topic);
+    const existing = graph.edges.find((e) => e.from === edge.from && e.to === edge.to && e.type === edge.type);
+    if (existing) existing.status = edge.status ?? "reviewed";
+    else graph.edges.push({ from: edge.from, to: edge.to, type: edge.type, status: edge.status ?? "reviewed", source: edge.source ?? "learner" });
+    await this.saveGraph(from.topic, graph);
+  }
+
+  /**
+   * Marks a relation reviewed or rejected. A relation the learner added is removed outright when
+   * rejected; one that comes from the topic card stays in the file as rejected, so it is not
+   * proposed again the next time the card is read.
+   */
+  async setRelationStatus(edge: { from: string; to: string; type: Relation }, status: EdgeStatus): Promise<void> {
+    const same = (e: CourseEdge) => e.from === edge.from && e.to === edge.to && e.type === edge.type;
+    const course = await this.loadCourse();
+    const from = course.concepts.get(edge.from);
+    if (!from) throw new Error("That concept no longer exists.");
+    const graph = await this.loadGraph(from.topic);
+    const i = graph.edges.findIndex(same);
+    if (i < 0) return;
+    // Bringing a rejected prerequisite back must not close a loop either.
+    if (status !== "rejected" && edge.type === "requires" && graph.edges[i].status === "rejected" && wouldCycle(course.edges.filter((e) => !same(e)), edge.from, edge.to)) throw new Error("This prerequisite would create a circular dependency.");
+    if (status === "rejected" && graph.edges[i].source !== "topic card") graph.edges.splice(i, 1);
+    else graph.edges[i].status = status;
+    await this.saveGraph(from.topic, graph);
+  }
+
+  /** Prerequisites that live in other topics, for each subskill of this one, with the level held there. */
+  async externalPrereqs(dir: string, target: number): Promise<ExternalPrereq[]> {
+    const graph = await this.loadGraph(dir);
+    const mine = new Map(graph.concepts.filter((c) => !c.retired).map((c) => [c.id, c.n]));
+    const outside = graph.edges.filter((e) => e.type === "requires" && e.status !== "rejected" && mine.has(e.from) && !mine.has(e.to));
+    if (!outside.length) return [];
+    const course = await this.loadCourse();
+    const out: ExternalPrereq[] = [];
+    const states = new Map<string, LearnerState>();
+    const topics = new Map<string, Topic>();
+    for (const e of outside) {
+      const c = course.concepts.get(e.to);
+      if (!c) continue;
+      if (!states.has(c.topic)) {
+        states.set(c.topic, await this.loadState(c.topic, target));
+        topics.set(c.topic, await this.loadTopic(c.topic));
+      }
+      out.push({ skill: mine.get(e.from)!, name: c.name, topic: c.topicTitle, dir: c.topic, n: c.n, level: states.get(c.topic)!.levels[c.n] ?? null, section: topics.get(c.topic)!.subskills.find((k) => k.n === c.n)?.section ?? "" });
+    }
+    return out;
+  }
+
+  /** What the tutor is told about the focus subskill's prerequisites in other topics. */
+  async linkedContext(dir: string, state: LearnerState, known?: ExternalPrereq[]): Promise<string> {
+    const links = (known ?? (await this.externalPrereqs(dir, state.target))).filter((l) => l.skill === state.focus);
+    return links.map((l) => `External prerequisite [[${l.dir}/topic]]: ${l.name}, level ${l.level ?? "unknown"}.\n${l.section}`).join("\n\n");
+  }
+
+  /** Moves cross-topic links from the 0.5.0 learner state into the course graph, once. */
+  private async migrateLinks(dir: string, s: LearnerState, graph: TopicGraph): Promise<boolean> {
+    const links = s.links ?? [];
+    if (!links.length) return false;
+    const left: typeof links = [];
+    let changed = false;
+    for (const link of links) {
+      const from = graph.concepts.find((c) => c.n === link.skill && !c.retired);
+      let to: string | undefined;
+      try {
+        if (await this.fs.exists(`${link.topic}/topic.md`)) to = (await this.loadGraph(link.topic)).concepts.find((c) => c.n === link.prerequisite && !c.retired)?.id;
+      } catch {
+        to = undefined;
+      }
+      // A link whose other end cannot be found yet is kept for a later attempt, not dropped.
+      if (!from || !to) {
+        left.push(link);
+        continue;
+      }
+      if (!graph.edges.some((e) => e.from === from.id && e.to === to && e.type === "requires")) {
+        graph.edges.push({ from: from.id, to, type: "requires", status: "reviewed", source: "learner" });
+        changed = true;
+      }
+    }
+    if (changed) await this.saveGraph(dir, graph);
+    const moved = left.length !== links.length;
+    s.links = left.length ? left : undefined;
+    return moved;
   }
 
   async loadQuestions(dir: string): Promise<Question[]> {
@@ -174,39 +337,82 @@ export class Store {
     return (await this.fs.exists(p)) ? parseQuestions(await this.fs.read(p)) : [];
   }
 
+  // ----- learner state: levels in state.md, the evidence behind them in evidence.md -----
+
+  private evidencePath(dir: string): string {
+    return `${dir}/evidence.md`;
+  }
+  /** What was last written to each evidence file, so an unchanged log is not written again. */
+  private evidenceWritten = new Map<string, string>();
+
   async loadState(dir: string, target: number): Promise<LearnerState> {
     const p = `${dir}/state.md`;
     const topic = await this.loadTopic(dir);
-    if (await this.fs.exists(p)) {
-      const s = parseState(await this.fs.read(p));
-      // Keep the state in step with the topic card if it was edited by hand.
-      for (const sk of topic.subskills) {
-        if (!(sk.n in s.names)) {
-          s.levels[sk.n] = null;
-          s.bank[sk.n] = { right: 0, total: 0 };
-        }
-        s.names[sk.n] = sk.name;
-      }
-      for (const n of Object.keys(s.names).map(Number)) {
-        if (!topic.subskills.some((sk) => sk.n === n)) {
-          delete s.names[n];
-          delete s.levels[n];
-          delete s.bank[n];
-        }
-      }
-      s.topic = topic.title;
+    const graph = await this.loadGraph(dir, topic);
+    const concepts: Record<number, string> = {};
+    for (const c of graph.concepts) if (!c.retired) concepts[c.n] = c.id;
+    if (!(await this.fs.exists(p))) {
+      const s = newState(topic, target);
+      s.concepts = concepts;
+      await this.saveState(dir, s);
       return s;
     }
-    const s = newState(topic, target);
-    await this.saveState(dir, s);
+    const s = parseState(await this.fs.read(p));
+    const legacy = s.attempts.length > 0;
+    if (await this.fs.exists(this.evidencePath(dir))) {
+      const stored = parseEvidence(await this.fs.read(this.evidencePath(dir)));
+      // The evidence file is the record. Attempts still in the old place are added, never doubled.
+      const ids = new Set(stored.attempts.map((a) => a.id));
+      s.attempts = [...stored.attempts, ...s.attempts.filter((a) => !ids.has(a.id))];
+      s.changes = stored.changes;
+    }
+    // Keep the state in step with the topic card if it was edited by hand.
+    for (const sk of topic.subskills) {
+      if (!(sk.n in s.names)) {
+        s.levels[sk.n] = null;
+        s.bank[sk.n] = { right: 0, total: 0 };
+      }
+      s.names[sk.n] = sk.name;
+    }
+    for (const n of Object.keys(s.names).map(Number)) {
+      if (!topic.subskills.some((sk) => sk.n === n)) {
+        delete s.names[n];
+        delete s.levels[n];
+        delete s.bank[n];
+      }
+    }
+    s.topic = topic.title;
+    s.concepts = concepts;
+    // Attempts made before concepts had ids take the id of the subskill they were recorded on.
+    for (const a of s.attempts) if (!a.concept && a.skill in concepts) a.concept = concepts[a.skill];
+    const moved = await this.migrateLinks(dir, s, graph);
+    if (legacy || moved) await this.saveState(dir, s);
     return s;
   }
 
+  /**
+   * Writes the evidence log first and the state second. If the second write is interrupted, the
+   * log already holds the attempt, and because attempts are keyed by id, doing the turn again
+   * replaces the record instead of adding one.
+   */
   async saveState(dir: string, s: LearnerState): Promise<void> {
+    const p = this.evidencePath(dir);
+    if (s.attempts.length || s.changes.length || this.evidenceWritten.has(p) || (await this.fs.exists(p))) {
+      const evidence = serializeEvidence(s.topic, s);
+      if (this.evidenceWritten.get(p) !== evidence) {
+        await this.writeFile(p, evidence);
+        this.evidenceWritten.set(p, evidence);
+      }
+    }
     await this.writeFile(`${dir}/state.md`, serializeState(s, this.today()));
   }
 
-  /** Writes a compiled topic. With `existingDir` it recompiles in place and keeps levels where subskill names match. */
+  /**
+   * Writes a compiled topic. With `existingDir` it recompiles in place. The learner's history is
+   * read before anything is overwritten and carried over through the course graph's stable
+   * concept ids, so levels, attempts, priorities and relations follow a subskill that was
+   * renumbered or renamed. Relations from other topics point at ids, so they follow too.
+   */
   async saveCompiled(p: { title: string; fm: Frontmatter; topicBody: string; questionsBody: string; target: number; existingDir?: string }): Promise<string> {
     let dir = p.existingDir;
     if (!dir) {
@@ -215,11 +421,19 @@ export class Store {
       for (let i = 2; await this.fs.exists(dir); i++) dir = `${this.topicsDir}/${name} ${i}`;
     }
     let previous: LearnerState | undefined;
-    if (await this.fs.exists(`${dir}/state.md`)) previous = parseState(await this.fs.read(`${dir}/state.md`));
+    let oldGraph: TopicGraph | null = null;
+    if (await this.fs.exists(`${dir}/state.md`)) previous = await this.loadState(dir, p.target);
+    if (await this.fs.exists(this.graphPath(dir))) oldGraph = parseTopicGraph(await this.fs.read(this.graphPath(dir)));
     const topicMd = withFrontmatter({ tutor: "topic", title: p.title, ...p.fm, compiled: this.today() }, p.topicBody + "\n");
+    const topic = parseTopic(topicMd);
+    const { graph, remap } = syncTopicGraph(base(dir), topic, oldGraph);
     await this.writeFile(`${dir}/topic.md`, topicMd);
     await this.writeFile(`${dir}/questions.md`, withFrontmatter({ tutor: "questions", topic: p.title }, p.questionsBody + "\n"));
-    await this.saveState(dir, newState(parseTopic(topicMd), p.target, previous));
+    await this.writeFile(this.graphPath(dir), serializeTopicGraph(topic.title, graph));
+    const next = newState(topic, p.target, previous, previous && oldGraph ? remap : undefined);
+    for (const c of graph.concepts) if (!c.retired) next.concepts[c.n] = c.id;
+    // The question bank is new, so its card schedule starts again. Everything else is kept.
+    await this.saveState(dir, next);
     return dir;
   }
 
@@ -248,9 +462,13 @@ export class Store {
 
   async saveChat(path: string, chat: Chat): Promise<void> {
     await this.writeFile(path, serializeChat(chat));
-    if (chat.fm.session) {
-      const memoryPath = path.replace("/chats/", "/sessions/");
-      await this.writeFile(memoryPath, `# Study session\n\nChat: [[${path.replace(/\.md$/, "")}]]\n\n` + String(chat.fm.session) + "\n");
+    if (!chat.fm.session) return;
+    // The session record is mirrored as a readable note. The chat file stays the source of truth.
+    try {
+      const record = JSON.parse(String(chat.fm.session)) as SessionRecord;
+      await this.writeFile(path.replace("/chats/", "/sessions/"), sessionMarkdown(record, path));
+    } catch {
+      /* a record that cannot be read is simply not mirrored */
     }
   }
 
@@ -275,9 +493,118 @@ export class Store {
     return next;
   }
 
+  /** The earlier parts of a chat, oldest first, followed back through each part's `previous` link. */
+  async earlierParts(path: string): Promise<Chat[]> {
+    const out: Chat[] = [];
+    const seen = new Set<string>([path]);
+    let chat: Chat;
+    try {
+      chat = await this.loadChat(path);
+    } catch {
+      return out;
+    }
+    for (let i = 0; i < 12; i++) {
+      const m = /^\[\[([^\]|]+)/.exec(fmStr(chat.fm, "previous"));
+      const prev = m ? `${m[1]}.md` : "";
+      if (!prev || seen.has(prev) || !(await this.fs.exists(prev))) break;
+      seen.add(prev);
+      try {
+        chat = await this.loadChat(prev);
+      } catch {
+        break;
+      }
+      out.unshift(chat);
+    }
+    return out;
+  }
+
+  /** The most recent chats across every topic, newest first. Only the last few files of each topic are read. */
+  async recentChats(limit = 8): Promise<ChatRef[]> {
+    const out: ChatRef[] = [];
+    const flat = (t: string) => t.replace(/```[\s\S]*?(```|$)/g, " [code] ").replace(/[#*_>]+/g, "").replace(/\s+/g, " ").trim();
+    for (const ref of await this.listTopics()) {
+      let files: string[] = [];
+      try {
+        files = (await this.listChats(ref.dir)).slice(-(limit + 4));
+      } catch {
+        continue;
+      }
+      for (const path of files) {
+        try {
+          const chat = await this.loadChat(path);
+          // A part that has been continued elsewhere is history; its last part is the session.
+          if (fmStr(chat.fm, "next") || (!chat.messages.length && !chat.summary)) continue;
+          const last = chat.messages[chat.messages.length - 1];
+          let record: Partial<SessionRecord> = {};
+          try {
+            record = JSON.parse(fmStr(chat.fm, "session", "{}")) ?? {};
+          } catch {
+            record = {};
+          }
+          const pending = typeof record.pendingQuestion === "string" ? record.pendingQuestion : "";
+          const m = /(\d{4}-\d{2}-\d{2} \d{4})/.exec(base(path));
+          out.push({
+            path,
+            dir: ref.dir,
+            topic: ref.title,
+            mode: (fmStr(chat.fm, "mode", "tutor") as Mode) || "tutor",
+            stamp: m ? m[1] : fmStr(chat.fm, "created"),
+            part: fmNum(chat.fm, "part", 1),
+            messages: chat.messages.length,
+            unfinished: !!pending || !!fmStr(chat.fm, "card") || fmStr(chat.fm, "placement") === "on" || last?.role === "you" || (record.completedStep !== true && last?.role === "tutor" && /\?\s*$/.test(last.text.trim())),
+            snippet: flat(pending || last?.text || chat.summary).slice(0, 180),
+            action: typeof record.action === "string" ? record.action : "",
+          });
+        } catch {
+          /* an unreadable chat is skipped */
+        }
+      }
+    }
+    return out.sort((a, b) => (a.stamp < b.stamp ? 1 : a.stamp > b.stamp ? -1 : b.part - a.part)).slice(0, limit);
+  }
+
   async saveSummary(dir: string, title: string, body: string): Promise<string> {
     const p = `${dir}/summary.md`;
     await this.writeFile(p, withFrontmatter({ tutor: "summary", topic: title, written: this.today() }, body + "\n"));
+    return p;
+  }
+
+  // ----- the decision log: what the policy saw and chose, for comparing policy versions -----
+
+  private get decisionsPath(): string {
+    return `${this.root}/_logs/decisions.md`;
+  }
+
+  async logDecision(c: PolicyCase): Promise<void> {
+    try {
+      const p = this.decisionsPath;
+      const old = (await this.fs.exists(p)) ? (await this.fs.read(p)).split(/\r?\n/).filter((l) => l.startsWith("{")) : [];
+      const lines = [...old, JSON.stringify(c)].slice(-300);
+      await this.writeFile(p, `Decisions the study policy made, one per line, newest last. Used to compare policy versions.\n\n${FENCE}jsonl\n${lines.join("\n")}\n${FENCE}\n`);
+    } catch {
+      /* logging must never break a turn */
+    }
+  }
+
+  async loadDecisions(): Promise<PolicyCase[]> {
+    const p = this.decisionsPath;
+    if (!(await this.fs.exists(p))) return [];
+    const out: PolicyCase[] = [];
+    for (const line of (await this.fs.read(p)).split(/\r?\n/)) {
+      if (!line.startsWith("{")) continue;
+      try {
+        out.push(JSON.parse(line));
+      } catch {
+        /* skip a damaged line */
+      }
+    }
+    return out;
+  }
+
+  /** Writes a note under the tutor folder and returns its path. */
+  async writeNote(rel: string, text: string): Promise<string> {
+    const p = `${this.root}/${rel}`;
+    await this.writeFile(p, text);
     return p;
   }
 
@@ -287,7 +614,7 @@ export class Store {
   async writeDashboard(): Promise<void> {
     const p = `${this.root}/Dashboard.base`;
     if (await this.fs.exists(p)) return;
-    const yaml = ["filters:", "  and:", `    - 'tutor == "state"'`, "properties:", "  note.topic:", "    displayName: Topic", "  note.progress:", "    displayName: Progress %", "  note.due:", "    displayName: Cards due at last study","  note.updated:", "    displayName: Last studied", "views:", "  - type: table", "    name: Topics", "    order:", "      - topic", "      - progress", "      - due", "      - updated", ""];
+    const yaml = ["filters:", "  and:", `    - 'tutor == "state"'`, "properties:", "  note.topic:", "    displayName: Topic", "  note.progress:", "    displayName: Progress %", "  note.due:", "    displayName: Cards due at last study", "  note.updated:", "    displayName: Last studied", "views:", "  - type: table", "    name: Topics", "    order:", "      - topic", "      - progress", "      - due", "      - updated", ""];
     await this.writeFile(p, yaml.join("\n"));
   }
 

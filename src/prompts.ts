@@ -1,6 +1,7 @@
 // Bundled skill files and the functions that assemble prompts from them. No Obsidian imports.
 
 import coreMd from "../skills/core.md";
+import autoMd from "../skills/mode-auto.md";
 import tutorMd from "../skills/mode-tutor.md";
 import teachMd from "../skills/mode-teach.md";
 import summaryMd from "../skills/summary.md";
@@ -10,6 +11,7 @@ import expertMd from "../skills/mode-expert.md";
 import compileMd from "../skills/compile.md";
 import utilityMd from "../skills/utility.md";
 import subjectsMd from "../skills/subjects.md";
+import policyMd from "../skills/policy.md";
 import { Chat, LearnerState, Mode, SourceMode, Topic, chatForPrompt, stateForPrompt, words } from "./formats";
 
 export function splitSubjects(md: string): Record<string, string> {
@@ -25,8 +27,7 @@ export function splitSubjects(md: string): Record<string, string> {
 /** Every skill file the plugin ships, keyed by its path under the vault's _skills folder. */
 export const BUNDLED: Record<string, string> = {
   "core.md": coreMd,
-  "mode-auto.md": `# Mode: Adaptive study guide
-Use the instructional action selected by the app. Diagnose with a short question, explain unfamiliar material with a worked example, offer graduated help during guided practice, and use fresh problems for independent practice and transfer. Keep one instructional step active until resolved. When there is sufficient evidence, suggest the next skill and explain why. The learner can choose to continue, switch to Learn, or ask directly. Never infer mastery from confidence or agreement.`,
+  "mode-auto.md": autoMd,
   "mode-tutor.md": tutorMd,
   "mode-teach.md": teachMd,
   "summary.md": summaryMd,
@@ -35,6 +36,8 @@ Use the instructional action selected by the app. Diagnose with a short question
   "mode-expert.md": expertMd,
   "compile.md": compileMd,
   "utility.md": utilityMd,
+  // Documentation of the rules the code enforces. It is never sent to a model.
+  "policy.md": policyMd,
   ...Object.fromEntries(Object.entries(splitSubjects(subjectsMd)).map(([name, text]) => [`subjects/${name}.md`, text])),
 };
 
@@ -78,7 +81,7 @@ export function buildTurnInput(p: { state: LearnerState; today: string; chat: Ch
   if (chat) out.push("# Chat", chat, "");
   if (p.attached) out.push(`# Attached note: [[${p.attached.name}]]`, p.attached.text.trim(), "");
   const last = p.chat.messages[p.chat.messages.length - 1];
-  out.push(last && last.role === "you" ? "Reply to the learner's last message." : "The learner has just opened this chat. Begin.");
+  out.push(last && last.role === "you" ? "Reply to the learner's last message." : last ? "The learner pressed Continue. Carry on with the next step." : "The learner has just opened this chat. Begin.");
   return out.join("\n");
 }
 

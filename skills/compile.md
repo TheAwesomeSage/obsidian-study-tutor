@@ -26,6 +26,7 @@ subject: <one name from SUBJECT CARDS, or none>
 
 ### 1. <name>
 prerequisites: <comma-separated subskill numbers, or none>
+relations: <optional; other links to subskills, such as: supports 4; contrasts_with 2; derived_from 1; applies_to 6>
 - <a key claim, definition or technique on one line, LaTeX in $...$> ([[Note name]])
 - <3 to 7 such lines>
 misconceptions:
@@ -55,6 +56,7 @@ RULES
 
 - Write 4 to 10 subskills, ordered so prerequisites come first. Each must be something the learner can be tested on.
 - "prerequisites:" lists only the subskills this one cannot be learned without. Do not simply list the one before it: the app draws these as a graph and uses them to decide what to study first, so a chain where every subskill needs the previous one is right only when that is really so. Two subskills may share a prerequisite, and a subskill may have none.
+- "relations:" is optional and never orders study. Use it only where the link is real: "supports N" (knowing this helps with N without being needed for it), "applies_to N" (this is used in the application N), "contrasts_with N" (learners confuse this with N), "derived_from N" (this is derived mathematically from N). Leave the line out when there is nothing to say.
 - Write 8 questions per subskill: three mcq whose wrong options are real misconceptions, three short, and two open that ask for a reason, a prediction or an error to find. Order them from easiest to hardest within the subskill, and make no two test the same fact.
 - A short answer must be checkable by exact match: one number, one expression or a few words, with no alternative phrasings.
 - Include "options:" only for mcq.

@@ -1,4 +1,5 @@
-import { Attempt, skillEvidence } from "./evidence";
+import { Attempt, LevelChange, normaliseAttempt, skillEvidence, supportedLevel } from "./evidence";
+import type { Relation } from "./course";
 // Parsing and serialising of the plugin's markdown files. Pure functions, no Obsidian imports.
 
 export type Mode = "auto" | "tutor" | "teach" | "quiz" | "expert";
@@ -120,6 +121,10 @@ export interface Subskill {
   n: number;
   name: string;
   prerequisites: number[];
+  /** Other typed relations the card states for this subskill ("relations: supports 4; contrasts_with 2"). */
+  relations: { type: Relation; n: number }[];
+  /** Notes cited in this subskill's section, as [[links]]. */
+  sources: string[];
   section: string;
 }
 export interface Topic {
@@ -144,10 +149,18 @@ export function parseTopic(md: string): Topic {
     if (cut) end = h.start + 4 + cut.index;
     const sec = body.slice(h.start, end).trim();
     const pre = /^prerequisites:\s*(.*)$/im.exec(sec);
+    const rel = /^relations:\s*(.*)$/im.exec(sec);
+    const relations: { type: Relation; n: number }[] = [];
+    for (const part of rel ? rel[1].split(";") : []) {
+      const m = /(requires|supports|applies[_ ]to|contrasts[_ ]with|derived[_ ]from)\s*:?\s*([\d,\s]+)/i.exec(part);
+      if (m) for (const n of m[2].match(/\d+/g) ?? []) relations.push({ type: m[1].toLowerCase().replace(" ", "_") as Relation, n: Number(n) });
+    }
     subskills.push({
       n: h.n,
       name: h.name,
       prerequisites: pre ? (pre[1].match(/\d+/g) ?? []).map(Number) : [],
+      relations,
+      sources: [...new Set([...sec.matchAll(/\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/g)].map((x) => `[[${x[1].trim()}]]`))],
       section: sec,
     });
   });
@@ -269,6 +282,19 @@ export function sameShortAnswer(given: string, expected: string): boolean {
   return norm(given) !== "" && norm(given) === norm(expected);
 }
 
+/** The value of an answer that is nothing but a number ("5", "$-0.25$"), otherwise null. */
+export function plainNumber(s: string): number | null {
+  const t = s.replace(/\$/g, "").replace(/\s+/g, "").replace(/[.;,]+$/, "").replace(/−/g, "-");
+  return /^[+-]?(\d+(\.\d+)?|\.\d+)$/.test(t) ? Number(t) : null;
+}
+
+/** Two plain numbers that differ. Code can mark that wrong without any model or algebra system. */
+export function differentNumbers(given: string, expected: string): boolean {
+  const a = plainNumber(given);
+  const b = plainNumber(expected);
+  return a !== null && b !== null && a !== b;
+}
+
 export const mcqLetter = (s: string): string => (/[A-Za-z]/.exec(s)?.[0] ?? "").toUpperCase();
 
 // ---------- learner state ----------
@@ -281,9 +307,18 @@ export interface CardSched {
   lapses: number;
 }
 export interface LearnerState {
-  attempts?: Attempt[];
+  /** Every marked answer, with how it was marked. Kept in evidence.md beside the state file. */
+  attempts: Attempt[];
+  /** Every change of level, with its cause. */
+  changes: LevelChange[];
+  /** Study priority per subskill, from 0.1 to 5. Weighs what is suggested next; it never touches levels. */
+  priorities: Record<number, number>;
+  /** The day a lesson on the subskill was first delivered. */
+  taught: Record<number, string>;
+  /** Stable concept id of each subskill, filled in by the store from the course graph. */
+  concepts: Record<number, string>;
+  /** Cross-topic links as 0.5.0 stored them. The store moves them into the course graph on load. */
   links?: { skill: number; topic: string; prerequisite: number }[];
-  priorities?: Record<number, number>;
   topic: string;
   target: number;
   focus: number | null;
@@ -296,34 +331,60 @@ export interface LearnerState {
   newCount: number;
 }
 
-export function newState(topic: Topic, target: number, previous?: LearnerState): LearnerState {
-  const s: LearnerState = { topic: topic.title, target, focus: null, names: {}, levels: {}, bank: {}, misconceptions: [], cards: {}, newDate: "", newCount: 0 };
-  const oldByName = new Map<string, number | null>();
-  if (previous) for (const [n, name] of Object.entries(previous.names)) oldByName.set(name.toLowerCase(), previous.levels[Number(n)] ?? null);
+export const blankState = (topic = "", target = 4): LearnerState => ({ topic, target, focus: null, names: {}, levels: {}, bank: {}, misconceptions: [], cards: {}, newDate: "", newCount: 0, attempts: [], changes: [], priorities: {}, taught: {}, concepts: {} });
+
+/**
+ * A fresh state for a topic card. With `previous`, the learner's history is carried over:
+ * `remap` gives the new number of each old subskill (from the course graph's stable concept
+ * ids), and without it subskills are matched by name. Evidence for a subskill that no longer
+ * exists is kept under skill 0, so nothing the learner did is thrown away.
+ */
+export function newState(topic: Topic, target: number, previous?: LearnerState, remap?: Record<number, number>): LearnerState {
+  const s = blankState(topic.title, target);
   for (const sk of topic.subskills) {
     s.names[sk.n] = sk.name;
-    s.levels[sk.n] = oldByName.get(sk.name.toLowerCase()) ?? null;
+    s.levels[sk.n] = null;
     s.bank[sk.n] = { right: 0, total: 0 };
   }
-  if (previous) {
-    s.target = previous.target;
-    s.misconceptions = [...previous.misconceptions];
-    const remap = (old: number) => topic.subskills.find(sk => sk.name.toLowerCase() === previous.names[old]?.toLowerCase())?.n;
-    s.attempts = (previous.attempts ?? []).flatMap(a => {
-      const skill = remap(a.skill);
-      return skill === undefined ? [] : [{ ...a, skill }];
-    });
-    s.links = (previous.links ?? []).flatMap(link => {
-      const skill = remap(link.skill);
-      return skill === undefined ? [] : [{ ...link, skill }];
-    });
-    s.priorities = {};
-    for (const [key, value] of Object.entries(previous.priorities ?? {})) {
-      const skill = remap(Number(key));
-      if (skill !== undefined) s.priorities[skill] = value;
-    }
+  if (!previous) return s;
+  const byName = (old: number) => topic.subskills.find((sk) => sk.name.toLowerCase() === previous.names[old]?.toLowerCase())?.n;
+  const now = (old: number): number | undefined => {
+    const n = remap ? remap[old] : byName(old);
+    return n !== undefined && n in s.names ? n : undefined;
+  };
+  s.target = previous.target;
+  s.misconceptions = [...previous.misconceptions];
+  s.changes = [...(previous.changes ?? [])];
+  for (const old of Object.keys(previous.names).map(Number)) {
+    const n = now(old);
+    if (n === undefined) continue;
+    s.levels[n] = previous.levels[old] ?? null;
+    if (previous.bank[old]) s.bank[n] = { ...previous.bank[old] };
+    if (previous.priorities?.[old] !== undefined) s.priorities[n] = previous.priorities[old];
+    if (previous.taught?.[old]) s.taught[n] = previous.taught[old];
   }
+  s.attempts = (previous.attempts ?? []).map((a) => ({ ...a, skill: a.skill ? now(a.skill) ?? 0 : 0 }));
+  if (previous.focus !== null) s.focus = now(previous.focus) ?? null;
+  if (previous.links?.length) s.links = previous.links.flatMap((l) => (now(l.skill) === undefined ? [] : [{ ...l, skill: now(l.skill)! }]));
   return s;
+}
+
+/** Sets a level and logs why. Every level change in the plugin goes through here. */
+export function setLevel(s: LearnerState, n: number, to: number | null, cause: string, note: string, at: string = new Date().toISOString()): string | null {
+  const from = s.levels[n] ?? null;
+  if (from === to || !(n in s.names)) return null;
+  s.levels[n] = to;
+  s.changes.push({ t: at, skill: n, concept: s.concepts[n] ?? "", from, to, cause, note });
+  if (s.changes.length > 400) s.changes = s.changes.slice(-400);
+  return `${s.names[n]}: ${from ?? "unset"} → ${to ?? "unset"}`;
+}
+
+/** The evidence for one subskill and the level it can hold. */
+export function mastery(s: LearnerState, n: number) {
+  const evidence = skillEvidence(s.attempts, n);
+  const supported = supportedLevel(evidence, n in s.taught);
+  const level = s.levels[n] ?? null;
+  return { level, evidence, supported, backed: level !== null && level <= supported };
 }
 
 export function progress(s: LearnerState): number {
@@ -346,10 +407,11 @@ export function serializeState(s: LearnerState, today: string): string {
     new_date: s.newDate || today,
     new_count: s.newCount,
     updated: today,
-    evidence: JSON.stringify(s.attempts ?? []),
-    links: JSON.stringify(s.links ?? []),
     priorities: JSON.stringify(s.priorities ?? {}),
+    taught: JSON.stringify(s.taught ?? {}),
   };
+  // Links not yet moved into the course graph are written back, so a failed migration loses nothing.
+  if (s.links?.length) fm.links = JSON.stringify(s.links);
   const cell = (t: string) => t.replace(/\|/g, "/");
   const lines = ["## Skill map", "", "| # | Subskill | Level | Bank |", "| --- | --- | --- | --- |"];
   for (const n of Object.keys(s.names).map(Number).sort((a, b) => a - b)) {
@@ -364,25 +426,30 @@ export function serializeState(s: LearnerState, today: string): string {
 
 export function parseState(md: string): LearnerState {
   const { fm, body } = splitFrontmatter(md);
-  const s: LearnerState = {
-    topic: fmStr(fm, "topic"),
-    target: fmNum(fm, "target", 4),
-    focus: fmNum(fm, "focus", 0) || null,
-    names: {},
-    levels: {},
-    bank: {},
-    misconceptions: [],
-    cards: {},
-    newDate: fmStr(fm, "new_date"),
-    newCount: fmNum(fm, "new_count", 0),
+  const s = blankState(fmStr(fm, "topic"), fmNum(fm, "target", 4));
+  s.focus = fmNum(fm, "focus", 0) || null;
+  s.newDate = fmStr(fm, "new_date");
+  s.newCount = fmNum(fm, "new_count", 0);
+  // Each optional field is read on its own, so one damaged value cannot take the others with it.
+  const json = (key: string): unknown => {
+    try {
+      return JSON.parse(fmStr(fm, key, "null"));
+    } catch {
+      return null;
+    }
   };
-  try {
-    const links = JSON.parse(fmStr(fm, "links", "[]"));
-    if (Array.isArray(links)) s.links = links.filter(l => l && Number.isInteger(l.skill) && typeof l.topic === "string" && Number.isInteger(l.prerequisite));
-    const priorities = JSON.parse(fmStr(fm, "priorities", "{}"));
-    if (priorities && typeof priorities === "object" && !Array.isArray(priorities)) s.priorities = priorities;
-  } catch { /* Optional metadata can be repaired without losing the learner state. */ }
-  try { const evidence = JSON.parse(fmStr(fm, "evidence", "[]")); if (Array.isArray(evidence)) s.attempts = evidence.filter(a => a && typeof a.id === "string" && typeof a.timestamp === "string" && typeof a.question === "string"); } catch { s.attempts = []; }
+  const numMap = <T>(raw: unknown, ok: (v: unknown) => boolean): Record<number, T> => {
+    const out: Record<number, T> = {};
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) for (const [k, v] of Object.entries(raw)) if (Number.isInteger(Number(k)) && ok(v)) out[Number(k)] = v as T;
+    return out;
+  };
+  const links = json("links");
+  if (Array.isArray(links) && links.length) s.links = links.filter((l) => l && Number.isInteger(l.skill) && typeof l.topic === "string" && Number.isInteger(l.prerequisite));
+  s.priorities = numMap<number>(json("priorities"), (v) => typeof v === "number" && v >= 0.1 && v <= 5);
+  s.taught = numMap<string>(json("taught"), (v) => typeof v === "string");
+  // 0.5.0 kept attempts in this file's frontmatter. They are read here and saved to evidence.md.
+  const legacy = json("evidence");
+  if (Array.isArray(legacy)) s.attempts = legacy.map(normaliseAttempt).filter((x): x is Attempt => !!x);
   for (const r of tableRows(section(body, "Skill map"))) {
     const n = Number(r[0]);
     if (!n) continue;
@@ -404,10 +471,11 @@ export function parseState(md: string): LearnerState {
 
 /** The part of the state the model sees each turn. The review schedule is left out. */
 export function stateForPrompt(s: LearnerState, today: string): string {
-  const lines = [`target level: ${s.target}`, `current focus: ${s.focus ?? "not set"}`, "", "| # | subskill | level | bank reviews right/total |", "| --- | --- | --- | --- |"];
+  const lines = [`target level: ${s.target}`, `current focus: ${s.focus ?? "not set"}`, "", "| # | subskill | level | bank reviews right/total | unaided correct/attempts |", "| --- | --- | --- | --- | --- |"];
   for (const n of Object.keys(s.names).map(Number).sort((a, b) => a - b)) {
     const b = s.bank[n] ?? { right: 0, total: 0 };
-    lines.push(`| ${n} | ${s.names[n]} | ${s.levels[n] ?? "unset"} | ${b.right}/${b.total} |`);
+    const e = skillEvidence(s.attempts, n);
+    lines.push(`| ${n} | ${s.names[n]} | ${s.levels[n] ?? "unset"} | ${b.right}/${b.total} | ${e.independentCorrect}/${e.independent} |`);
   }
   lines.push("", "misconceptions: " + (s.misconceptions.length ? s.misconceptions.map((m) => `"${m}"`).join("; ") : "none recorded"));
   lines.push(`flashcards due today: ${dueCount(s, today)}`);
@@ -438,24 +506,30 @@ export function extractStateTrailer(reply: string): { text: string; update: Stat
   return { text, update };
 }
 
-/** Applies a validated update and returns a readable list of what changed. */
-export function applyStateUpdate(s: LearnerState, u: StateUpdate, allowLevels = true): string[] {
+/**
+ * Applies a model's proposed update, within what the evidence allows, and returns a readable
+ * list of what changed.
+ *
+ * A level goes up only one step at a time and never past what the recorded attempts support.
+ * It goes down only by one step, and only when this turn's attempt on that subskill was not
+ * correct. With `levels: false` no level changes at all.
+ */
+export function applyStateUpdate(s: LearnerState, u: StateUpdate, opts: { levels?: boolean; attempt?: Attempt | null } = {}): string[] {
   const changes: string[] = [];
-  if (allowLevels && u.levels && typeof u.levels === "object") {
+  if (opts.levels !== false && u.levels && typeof u.levels === "object") {
     for (const [k, v] of Object.entries(u.levels)) {
       const n = Number(k);
       const lvl = Number(v);
       if (!(n in s.names) || !Number.isInteger(lvl) || lvl < 0 || lvl > 5) continue;
       const current = s.levels[n] ?? 0;
+      const mine = opts.attempt && opts.attempt.skill === n && opts.attempt.result !== "ungraded" && opts.attempt.verification !== "disputed" ? opts.attempt : null;
       if (lvl > current) {
-        const evidence = skillEvidence(s.attempts ?? [], n);
-        if (evidence.correct < 2 || (lvl >= 4 && !evidence.delayedTransfer)) continue;
-        if (lvl > current + 1) continue;
-      }
-      if (s.levels[n] !== lvl) {
-        changes.push(`${s.names[n]}: ${s.levels[n] ?? "unset"} → ${lvl}`);
-        s.levels[n] = lvl;
-      }
+        if (lvl > current + 1 || lvl > mastery(s, n).supported) continue;
+      } else if (lvl < current) {
+        if (!mine || mine.result === "correct" || lvl < current - 1) continue;
+      } else if (s.levels[n] !== null) continue;
+      const line = setLevel(s, n, lvl, mine?.id ?? "tutor", lvl > current ? "the recorded attempts support this level" : "this turn's answer was not correct");
+      if (line) changes.push(line);
     }
   }
   const focus = Number(u.focus);
@@ -518,15 +592,6 @@ export function reviewQueue(questions: Question[], s: LearnerState, today: strin
 
 // ---------- quiz from the question bank, marked by plain code ----------
 
-/** The next bank question for a quiz: weakest subskill first, skipping ones already asked in this chat. */
-export function pickQuizQuestion(questions: Question[], s: LearnerState, asked: string[]): Question | null {
-  const left = questions.filter((q) => !asked.includes(q.id));
-  if (!left.length) return null;
-  const level = (q: Question) => s.levels[q.subskill] ?? 0;
-  const seen = (q: Question) => (s.cards[q.id] ? 1 : 0);
-  return [...left].sort((a, b) => level(a) - level(b) || seen(a) - seen(b))[0];
-}
-
 export function formatQuizQuestion(q: Question, s: LearnerState): string {
   const head = `**${s.names[q.subskill] ?? "Question"}**\n\n${q.question}`;
   if (q.type === "mcq") return `${head}\n\n${q.options.map((o) => `- ${o}`).join("\n")}\n\n*Reply with a letter.*`;
@@ -570,6 +635,7 @@ export function codeMark(q: Question, answer: string): Grade | "letter" | "model
     return letter === mcqLetter(q.answer) ? "good" : "again";
   }
   if (q.type === "short" && sameShortAnswer(answer, q.answer)) return "good";
+  if (q.type === "short" && differentNumbers(answer, q.answer)) return "again";
   return "model";
 }
 
@@ -722,6 +788,9 @@ export function nextStep(s: LearnerState, today: string, dueOverride?: number, p
     const first = foundationFor(s, pre, ns[0], 2);
     return { action: "teach", title: "Learn", detail: `Start with a lesson on ${s.names[first]}.`, subskill: first };
   }
+  // A wrong unaided answer after earlier success is the clearest sign of what to look at next.
+  const lapsed = ns.filter((n) => (lvl(n) ?? 0) >= 2 && skillEvidence(s.attempts, n).lapse);
+  if (lapsed.length) return { action: "auto", title: "Revisit", detail: `Your last unaided answer on ${s.names[lapsed[0]]} was wrong after earlier success. Find out what slipped.`, subskill: lapsed[0] };
   if (due > 0) return { action: "review", title: "Review", detail: `${due} flashcard${due === 1 ? " is" : "s are"} due. Reviewing uses no tokens.` };
   if (untaught.length) {
     // A lesson needs its prerequisites at "can follow along" (2) or better.
@@ -736,8 +805,24 @@ export function nextStep(s: LearnerState, today: string, dueOverride?: number, p
     const first = foundationFor(s, pre, below[0], Math.min(3, s.target));
     return { action: "tutor", title: "Master", detail: `Work with the tutor on ${s.names[first]} (level ${lvl(first)} of ${s.target})${because(first, below[0])}.`, subskill: first };
   }
-  return { action: "done", title: "At target", detail: "Every subskill is at your target level. Come back when flashcards are due." };
+  // A level at target counts as reached only when the recorded attempts can hold it. A level
+  // carried over from an older version, or set by placement alone, is checked before it is trusted.
+  const unbacked = ns.filter((n) => !mastery(s, n).backed);
+  if (unbacked.length) {
+    const n = unbacked[0];
+    const m = mastery(s, n);
+    return { action: "auto", title: "Confirm", detail: `${s.names[n]} is recorded at level ${m.level}, but the answers recorded so far support level ${m.supported}. A short unaided check will settle it.`, subskill: n };
+  }
+  const stale = ns.filter((n) => {
+    const last = skillEvidence(s.attempts, n).last;
+    return !!last && addDays(last.slice(0, 10), STALE_DAYS) < today;
+  });
+  if (stale.length) return { action: "quiz", title: "Retrieval check", detail: `${s.names[stale[0]]} has not been practised for over ${STALE_DAYS} days. A few questions will show whether it has held.`, subskill: stale[0] };
+  return { action: "done", title: "At target", detail: "Every subskill is at your target level, and your unaided answers back that up. Come back when flashcards are due." };
 }
+
+/** Days without practice after which a subskill at target is worth a retrieval check. */
+export const STALE_DAYS = 21;
 
 /** What to do with one subskill the learner picked from the graph: a lesson if it is new, otherwise the tutor. */
 export function stepFor(s: LearnerState, n: number): NextStep {

@@ -194,7 +194,7 @@ test("placement sets starting levels in code and then hands over to the tutor", 
   r = await engine.placementTurn(dir, chat, "B");
   assert.match(r!.reply, /^\*\*Correct\.\*\*[\s\S]*dim\\ker/);
   r = await engine.placementTurn(dir, chat, "5");
-  assert.match(r!.reply, /^\*\*Placement done\.\*\*[\s\S]*\| Definition of a linear map \| 2 \|[\s\S]*\| Kernel and image \| 1 \|[\s\S]*begin with \*\*Kernel and image\*\*/);
+  assert.match(r!.reply, /^\*\*Not quite\.\*\*\n\n\*\*Placement done\.\*\*[\s\S]*\| Definition of a linear map \| 2 \|[\s\S]*\| Kernel and image \| 1 \|[\s\S]*begin with \*\*Kernel and image\*\*/);
   assert.equal(calls.length, 0, "placement never calls a model");
   const state = await store.loadState(dir, 4);
   assert.deepEqual([state.levels[1], state.levels[2], state.focus], [2, 1, 2]);
@@ -278,5 +278,9 @@ test("the next step follows learn, practise, master", () => {
   assert.equal(F.nextStep(s, day).action, "review");
   delete s.cards["Q1"];
   s.levels = { 1: 4, 2: 5 };
+  const confirm = F.nextStep(s, day);
+  assert.deepEqual([confirm.action, confirm.title], ["auto", "Confirm"], "levels at target with no answers behind them are checked, not announced");
+  const ok = (id: string, skill: number, at: string, transfer = false) => ({ id, v: 2 as const, skill, concept: "", questionId: id, question: id, answer: "a", activity: "quiz", mode: "quiz", difficulty: null, result: "correct" as const, errorType: "", note: "", confidence: null, assisted: false, assistance: [], answerExposed: false, transfer, seconds: null, timestamp: at, grading: "deterministic" as const, verification: "verified" as const, assumptions: "" });
+  s.attempts = [1, 2].flatMap((k) => [ok(`a${k}`, k, "2026-11-08T10:00:00Z"), ok(`b${k}`, k, "2026-11-08T11:00:00Z"), ok(`c${k}`, k, "2026-11-10T10:00:00Z", true)]);
   assert.equal(F.nextStep(s, day).action, "done");
 });

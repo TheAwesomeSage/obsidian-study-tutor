@@ -2,6 +2,7 @@ import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, Workspace
 import { ClaudeError, callClaude, findClaude, usageLine } from "./claude";
 import { CompileResult, Engine, EngineSettings, Material } from "./engine";
 import { Frontmatter, SourceMode, fmList, fmStr, splitFrontmatter, words } from "./formats";
+import { DEFAULT_WEIGHTS, PolicyWeights, WEIGHT_LABELS } from "./policy";
 import { FS, Store } from "./store";
 import { SympyWorker } from "./sympy";
 import { TutorView, VIEW_TYPE } from "./view";
@@ -9,14 +10,18 @@ import { TutorView, VIEW_TYPE } from "./view";
 export interface TutorSettings extends EngineSettings {
   root: string;
   newCardsPerDay: number;
-  /** Quiz mode asks from the question bank and marks with plain code before using the model. */
+  /** Quiz mode, and unaided practice in Adaptive mode, ask from the question bank and mark with plain code first. */
   bankQuiz: boolean;
   /** Hand flashcard review and scheduling to the Spaced Repetition community plugin when it is enabled. */
   useSpacedRepetition: boolean;
   /** Compute and check maths with SymPy. Off by default because the first use downloads SymPy from a CDN. */
   mathCheck: boolean;
-  /** Tutor mode places a new learner with bank questions marked by code, not model turns. */
+  /** A new learner is placed with bank questions marked by code, not model turns. */
   codePlacement: boolean;
+  /** How the study policy weighs its components when choosing what to suggest. */
+  weights: PolicyWeights;
+  /** Minutes available for this sitting, chosen on the home screen. */
+  minutes: number;
 }
 
 interface PluginData {
@@ -27,6 +32,10 @@ interface PluginData {
   skills: Record<string, string>;
   /** Bumped when a default changes, so the old default can be moved forward once. */
   settingsVersion: number;
+  /** Unsent text per chat, so a draft survives switching screens and restarting. */
+  drafts: Record<string, string>;
+  /** Where each concept sits on the knowledge graph, so the map stays familiar. */
+  graphLayout: Record<string, [number, number]>;
 }
 
 const DEFAULTS: TutorSettings = {
@@ -47,6 +56,8 @@ const DEFAULTS: TutorSettings = {
   codePlacement: true,
   smartRouting: true,
   hardEffort: "high",
+  weights: { ...DEFAULT_WEIGHTS },
+  minutes: 25,
 };
 
 const SR_PLUGIN = "obsidian-spaced-repetition";
@@ -69,7 +80,9 @@ export default class StudyTutorPlugin extends Plugin {
 
   async onload(): Promise<void> {
     const saved = ((await this.loadData()) ?? {}) as Partial<PluginData>;
-    this.data = { settings: { ...DEFAULTS, ...(saved.settings ?? {}) }, activeTopic: saved.activeTopic ?? "", activeChat: saved.activeChat ?? {}, skills: saved.skills ?? {}, settingsVersion: saved.settingsVersion ?? 1 };
+    this.data = { settings: { ...DEFAULTS, ...(saved.settings ?? {}) }, activeTopic: saved.activeTopic ?? "", activeChat: saved.activeChat ?? {}, skills: saved.skills ?? {}, settingsVersion: saved.settingsVersion ?? 1, drafts: saved.drafts ?? {}, graphLayout: saved.graphLayout ?? {} };
+    // Settings saved by an older version have no weights; a partly filled set is completed from the defaults.
+    this.data.settings.weights = { ...DEFAULT_WEIGHTS, ...(saved.settings?.weights ?? {}) };
     if (this.data.settingsVersion < 2) {
       // 0.1 shipped with 1,200-word chat parts. Move anyone still on that default to 600.
       if (this.data.settings.maxChatWords === 1200) this.data.settings.maxChatWords = 600;
@@ -82,7 +95,9 @@ export default class StudyTutorPlugin extends Plugin {
     this.addRibbonIcon("graduation-cap", "Open Study Tutor", () => void this.activateView());
     this.addCommand({ id: "open", name: "Open tutor", callback: () => void this.activateView() });
     this.addCommand({ id: "new-topic", name: "New topic", callback: () => this.openNewTopic() });
-    this.addCommand({ id: "review", name: "Review due flashcards", callback: async () => (await this.activateView())?.showTab("review") });
+    this.addCommand({ id: "home", name: "Open home screen", callback: async () => (await this.activateView())?.go("home") });
+    this.addCommand({ id: "review", name: "Review due flashcards", callback: async () => (await this.activateView())?.go("review") });
+    this.addCommand({ id: "graph", name: "Open knowledge graph", callback: async () => (await this.activateView())?.go("graph") });
     this.addSettingTab(new TutorSettingTab(this.app, this));
 
     this.app.workspace.onLayoutReady(async () => {
@@ -105,6 +120,23 @@ export default class StudyTutorPlugin extends Plugin {
     this.store = new Store(this.app.vault.adapter as FS, root);
     this.engine = new Engine(this.store, () => ({ ...this.opts, externalFlashcards: this.usesSr() }));
     this.engine.maths = this.sympy;
+    // Source notes are read by name, for the short excerpts a teaching step may need.
+    this.engine.readNote = async (name: string) => {
+      const f = this.app.metadataCache.getFirstLinkpathDest(name, "");
+      if (!f || f.extension !== "md" || f.path.startsWith(this.store.root + "/")) return null;
+      return splitFrontmatter(await this.app.vault.cachedRead(f)).body;
+    };
+  }
+
+  /** Opens Obsidian's settings on this plugin's tab. The settings API is not typed, so every step is guarded. */
+  openSettings(): void {
+    try {
+      const setting = (this.app as unknown as { setting?: { open?: () => void; openTabById?: (id: string) => void } }).setting;
+      setting?.open?.();
+      setting?.openTabById?.(this.manifest.id);
+    } catch {
+      new Notice("Open Settings, then Community plugins, then Study Tutor.");
+    }
   }
 
   onunload(): void {
@@ -368,7 +400,7 @@ class TutorSettingTab extends PluginSettingTab {
     );
 
     new Setting(containerEl).setName("Models").setHeading();
-    text("Chat model", "Used for tutor, quiz and expert turns. An alias (sonnet, opus, haiku, fable) or a full model name.", "chatModel", "sonnet");
+    text("Chat model", "Used for study turns in every mode. An alias (sonnet, opus, haiku, fable) or a full model name.", "chatModel", "sonnet");
     text("Compile model", "Used once per topic to build the topic card and question bank.", "compileModel", "sonnet");
     text("Utility model", "Cheap model for reading large note sets, summarising chats and grading flashcards.", "utilityModel", "haiku");
     new Setting(containerEl)
@@ -399,6 +431,28 @@ class TutorSettingTab extends PluginSettingTab {
         }),
       );
     num("New flashcards per day", "Built-in review only: unseen cards added to each day's review, per topic.", "newCardsPerDay", 0);
+
+    new Setting(containerEl).setName("Study policy").setHeading();
+    new Setting(containerEl).setDesc("These weights decide which concept Adaptive mode and the home screen suggest next. They only rank suggestions. A level changes through marked answers and nothing else, whatever the weights are. 0 switches a component off.").addButton((b) =>
+      b.setButtonText("Reset to defaults").onClick(async () => {
+        s.weights = { ...DEFAULT_WEIGHTS };
+        await this.plugin.save();
+        this.display();
+      }),
+    );
+    for (const key of Object.keys(WEIGHT_LABELS) as (keyof PolicyWeights)[]) {
+      new Setting(containerEl)
+        .setName(WEIGHT_LABELS[key][0])
+        .setDesc(`${WEIGHT_LABELS[key][1]} Default ${DEFAULT_WEIGHTS[key]}.`)
+        .addText((t) =>
+          t.setValue(String(s.weights[key])).onChange(async (v) => {
+            const n = Number(v);
+            if (v.trim() === "" || !Number.isFinite(n) || n < 0 || n > 5) return;
+            s.weights[key] = n;
+            await this.plugin.save();
+          }),
+        );
+    }
 
     new Setting(containerEl).setName("Maths").setHeading();
     const sympy = this.plugin.sympy;
@@ -446,8 +500,8 @@ class TutorSettingTab extends PluginSettingTab {
           await this.plugin.save();
         }),
       );
-    toggle("Placement without the model", "When you start the tutor on a new topic, the plugin asks one question per subskill from the question bank and marks them itself to set your starting levels. Off: the tutor runs its own diagnostic, one model turn per question.", "codePlacement");
-    toggle("Quiz from the question bank first", "Quiz mode asks bank questions and marks multiple-choice and exact answers itself, using no tokens. The model is called only for answers that need judgement, or once the bank runs out.", "bankQuiz");
+    toggle("Placement without the model", "When you start Adaptive or Master mode on a new topic, the plugin asks one question per subskill from the question bank and marks them itself to set your starting levels. Off: the tutor runs its own diagnostic, one model turn per question.", "codePlacement");
+    toggle("Question bank first", "Practise mode, and unaided practice in Adaptive mode, ask bank questions and marks multiple-choice and exact answers itself, using no tokens. The model is called only for answers that need judgement, or once the bank runs out.", "bankQuiz");
     toggle("Smart model routing", "The plugin reads each message and picks the model: the utility model for short look-up questions to the expert, the chat model for everything else, and the chat model with extra thinking for proofs, derivations, code and answers containing maths. Anything doubtful goes to the stronger option.", "smartRouting");
     new Setting(containerEl)
       .setName("Effort for hard turns")

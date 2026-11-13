@@ -1,40 +1,315 @@
+// Structured attempt evidence, and the rules that decide what it can support.
+// Pure functions with no Obsidian imports. The rules here are enforced in code: no prompt,
+// routing weight or model reply can raise a level past what `supportedLevel` returns.
+// docs/policy.md describes the same rules in prose.
+
+export type Outcome = "correct" | "partial" | "incorrect" | "skipped" | "ungraded";
+
+/**
+ * How the outcome was decided.
+ *   deterministic  plain code: a multiple-choice letter or an exact match after normalising
+ *   symbolic       SymPy simplified the difference of the two expressions to zero
+ *   numeric        SymPy compared values (random test points, or the decimal places written)
+ *   model          a language model judged it
+ *   self           the learner rated themselves after seeing the answer
+ */
+export type Grading = "deterministic" | "symbolic" | "numeric" | "model" | "self";
+
+/** verified: decided or confirmed by code. unverified: one judgement, unchecked. disputed: the learner contests it. */
+export type Verification = "verified" | "unverified" | "disputed";
+
 export interface Attempt {
   id: string;
+  v: 2;
+  /** Subskill number in the topic card as it is now. 0 when the concept was retired by a recompile. */
   skill: number;
+  /** Stable concept id from the course graph. Survives renumbering. */
+  concept: string;
+  /** Bank id (Q7) for bank questions, otherwise a fingerprint of the question text. */
+  questionId: string;
   question: string;
   answer: string;
-  timestamp: string;
+  /** placement, diagnosis, guided-practice, independent-practice, transfer, retrieval, review, quiz. */
+  activity: string;
   mode: string;
-  result: "correct" | "partial" | "incorrect" | "ungraded";
+  difficulty: number | null;
+  result: Outcome;
+  /** conceptual, procedural, arithmetic, notation, prerequisite, careless, skipped, or empty. */
+  errorType: string;
+  /** Feedback shown to the learner, or why the attempt could not be graded. */
+  note: string;
+  /** Self-reported confidence from 0 to 1, given before feedback. Null when not given. */
   confidence: number | null;
+  /** Any hint, worked step or explanation was given for this question before the answer. */
   assisted: boolean;
+  assistance: string[];
+  /** The answer to this question had been shown before this attempt. */
+  answerExposed: boolean;
+  /** A fresh application, not a question seen in the notes or earlier in the chat. */
   transfer: boolean;
-  source: "model" | "bank" | "self";
-  error: string;
+  /** Seconds from the question being asked to the answer being sent. Null when unknown. */
+  seconds: number | null;
+  timestamp: string;
+  grading: Grading;
+  verification: Verification;
+  /** What the check assumed, for example "sampled at random points; not a proof". */
+  assumptions: string;
 }
 
-export function skillEvidence(attempts: Attempt[], skill: number) {
-  const graded = attempts.filter(a => a.skill === skill && a.result !== "ungraded");
-  const independent = graded.filter(a => !a.assisted && a.source !== "self");
-  const unique = [...new Map(independent.map(a => [a.question, a])).values()];
-  const correct = unique.filter(a => a.result === "correct");
-  const days = new Set(correct.map(a => a.timestamp.slice(0, 10)));
-  const calibrated = independent.filter(a => a.confidence !== null);
+/** One change of level, with what caused it. Every change is logged so it can be explained later. */
+export interface LevelChange {
+  t: string;
+  skill: number;
+  concept: string;
+  from: number | null;
+  to: number | null;
+  /** An attempt id, or one of: placement, lapse, dispute, recompile, legacy. */
+  cause: string;
+  note: string;
+}
+
+const OUTCOMES: Outcome[] = ["correct", "partial", "incorrect", "skipped", "ungraded"];
+const GRADINGS: Grading[] = ["deterministic", "symbolic", "numeric", "model", "self"];
+
+/** FNV-1a over the normalised text. Two wordings that differ only in case or spacing share a key. */
+export function questionKey(text: string): string {
+  const s = text.toLowerCase().replace(/\s+/g, " ").trim();
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return "t" + (h >>> 0).toString(16);
+}
+
+const day = (iso: string): string => iso.slice(0, 10);
+
+/**
+ * Reads a stored attempt of any version. Records from 0.5.0 had `source`, `assisted` and `error`
+ * only; they are upgraded in memory and written back in the new shape on the next save.
+ * Returns null for anything that is not an attempt.
+ */
+export function normaliseAttempt(raw: unknown): Attempt | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.id !== "string" || typeof r.timestamp !== "string" || typeof r.question !== "string") return null;
+  const str = (k: string, d = ""): string => (typeof r[k] === "string" ? (r[k] as string) : d);
+  const result = OUTCOMES.includes(r.result as Outcome) ? (r.result as Outcome) : "ungraded";
+  const legacyNote = str("error");
+  let grading: Grading;
+  if (GRADINGS.includes(r.grading as Grading)) grading = r.grading as Grading;
+  else if (r.source === "self") grading = "self";
+  else if (r.source === "bank") grading = /^SymPy/.test(legacyNote) ? "symbolic" : legacyNote ? "model" : "deterministic";
+  else grading = "model";
+  const verification: Verification = r.verification === "disputed" ? "disputed" : r.verification === "verified" || r.verification === "unverified" ? r.verification : grading === "model" || grading === "self" ? "unverified" : "verified";
+  const assistance = Array.isArray(r.assistance) ? r.assistance.filter((x): x is string => typeof x === "string") : [];
+  const confidence = typeof r.confidence === "number" && r.confidence >= 0 && r.confidence <= 1 ? r.confidence : null;
   return {
-    count: unique.length,
-    correct: correct.length,
-    estimate: unique.length ? (correct.length + 1) / (unique.length + 2) : null,
-    last: graded[graded.length - 1]?.timestamp ?? null,
-    delayedTransfer: days.size >= 2 && correct.some(a => a.transfer && a.timestamp.slice(0, 10) > correct[0].timestamp.slice(0, 10)),
-    brier: calibrated.length ? calibrated.reduce((sum, a) => sum + ((a.confidence! - (a.result === "correct" ? 1 : 0)) ** 2), 0) / calibrated.length : null,
+    id: r.id,
+    v: 2,
+    skill: Number.isInteger(r.skill) ? (r.skill as number) : 0,
+    concept: str("concept"),
+    questionId: str("questionId") || questionKey(r.question),
+    question: r.question,
+    answer: str("answer"),
+    activity: str("activity") || (r.mode === "review" ? "review" : r.mode === "quiz" ? "quiz" : "other"),
+    mode: str("mode"),
+    difficulty: typeof r.difficulty === "number" ? r.difficulty : null,
+    result,
+    errorType: str("errorType"),
+    note: str("note") || (r.note === undefined ? legacyNote : ""),
+    confidence,
+    assisted: r.assisted === true || assistance.length > 0,
+    assistance,
+    // A self-rated review shows the answer before the rating by design.
+    answerExposed: r.answerExposed === true || (r.answerExposed === undefined && grading === "self"),
+    transfer: r.transfer === true,
+    seconds: typeof r.seconds === "number" && r.seconds >= 0 ? r.seconds : null,
+    timestamp: r.timestamp,
+    grading,
+    verification,
+    assumptions: str("assumptions"),
   };
 }
 
+/** Adds an attempt, replacing any earlier record with the same id: a retried turn is one attempt, not two. */
 export function recordAttempt(attempts: Attempt[], attempt: Attempt): Attempt[] {
-  const next = attempts.filter(a => a.id !== attempt.id);
+  const next = attempts.filter((a) => a.id !== attempt.id);
   next.push(attempt);
   return next;
 }
 
-export const EVIDENCE_RULES = `If grading an actual learner attempt, add <attempt>{"skill":1,"result":"correct|partial|incorrect|ungraded","assisted":true,"transfer":false,"error":"specific error or empty"}</attempt>.
-Use ungraded when uncertain. Assisted is true if hints, an example solution or the answer have helped with this question. Transfer is true only for a fresh application. Never treat a request, agreement or explanation you supplied as a learner performance. The app enforces promotion eligibility from recorded attempts.`;
+export interface SkillEvidence {
+  /** Attempts with an outcome, whatever their provenance. Disputed ones are left out everywhere. */
+  graded: number;
+  /** Distinct questions answered fully correctly, with or without help. Self-ratings do not count. */
+  correctAny: number;
+  partialAny: number;
+  /** Independent data points: unassisted, answer not seen, not self-rated, not a same-day repeat. */
+  independent: number;
+  /** Distinct questions with an independent fully correct answer. */
+  independentCorrect: number;
+  /** Distinct days on which an independent success happened. */
+  independentDays: number;
+  /** An independent success on a transfer question, on a later day than the first independent success. */
+  delayedTransfer: boolean;
+  /** Failures among the last three independent data points. */
+  recentFailures: number;
+  /** The latest independent data point is a failure, and an earlier one was a success. */
+  lapse: boolean;
+  /** True when that lapse came on a later day than the last success. */
+  delayedLapse: boolean;
+  /** Share of independent data points that were fully correct, smoothed. Null without data. */
+  estimate: number | null;
+  /** Mean squared gap between stated confidence and the outcome, over independent data points that had one. */
+  brier: number | null;
+  /** Independent data points that came with a confidence. */
+  rated: number;
+  /** Mean confidence minus observed accuracy over those points. Positive means overconfident. */
+  calibrationGap: number | null;
+  last: string | null;
+  lastResult: Outcome | null;
+  /** Counts by error type over graded attempts that were not correct. */
+  errors: Record<string, number>;
+  assistedCount: number;
+  exposedCount: number;
+  selfCount: number;
+  ungraded: number;
+  disputed: number;
+}
+
+/** Below this many independent data points an estimate is not shown as a number. */
+export const MIN_ESTIMATE_N = 3;
+/** Below this many confidence-rated independent data points calibration is not shown. */
+export const MIN_CALIBRATION_N = 3;
+
+/**
+ * What the estimate predicts. Brier scores use the same binary target.
+ * Shown wherever a probability is displayed, so the number always has a defined meaning.
+ */
+export const PREDICTION_TARGET = "the next unassisted first answer on this concept is fully correct";
+
+/**
+ * Summarises the attempts on one subskill.
+ *
+ * An attempt is an independent data point only if it was not assisted, the answer had not been
+ * shown, it was not self-rated, and it is not a repeat of a question whose answer the learner
+ * saw earlier the same day. Once a question has been answered and marked, its answer is known,
+ * so asking it again that day shows memory of the feedback and nothing more. On a later day
+ * the same question counts again, as delayed retrieval.
+ */
+export function skillEvidence(attempts: Attempt[], skill: number): SkillEvidence {
+  const mine = attempts.filter((a) => a.skill === skill).sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
+  const e: SkillEvidence = { graded: 0, correctAny: 0, partialAny: 0, independent: 0, independentCorrect: 0, independentDays: 0, delayedTransfer: false, recentFailures: 0, lapse: false, delayedLapse: false, estimate: null, brier: null, rated: 0, calibrationGap: null, last: null, lastResult: null, errors: {}, assistedCount: 0, exposedCount: 0, selfCount: 0, ungraded: 0, disputed: 0 };
+  const exposedOn = new Map<string, string>();
+  const correctQs = new Set<string>();
+  const partialQs = new Set<string>();
+  const indCorrectQs = new Set<string>();
+  const indDays = new Set<string>();
+  const points: { ok: boolean; day: string; transfer: boolean; confidence: number | null }[] = [];
+  for (const a of mine) {
+    const d = day(a.timestamp);
+    if (a.verification === "disputed") {
+      e.disputed++;
+      continue;
+    }
+    if (a.answerExposed) e.exposedCount++;
+    if (a.result === "ungraded") {
+      e.ungraded++;
+      if (a.answerExposed) exposedOn.set(a.questionId, d);
+      continue;
+    }
+    e.graded++;
+    e.last = a.timestamp;
+    e.lastResult = a.result;
+    if (a.assisted) e.assistedCount++;
+    if (a.grading === "self") e.selfCount++;
+    else if (a.result === "correct") correctQs.add(a.questionId);
+    else if (a.result === "partial") partialQs.add(a.questionId);
+    if (a.result !== "correct") {
+      const kind = a.errorType || (a.result === "skipped" ? "skipped" : "unclassified");
+      e.errors[kind] = (e.errors[kind] ?? 0) + 1;
+    }
+    const seen = exposedOn.get(a.questionId);
+    const independent = a.grading !== "self" && !a.assisted && !a.answerExposed && (seen === undefined || d > seen);
+    if (independent) {
+      const ok = a.result === "correct";
+      points.push({ ok, day: d, transfer: a.transfer, confidence: a.confidence });
+      if (ok) {
+        indCorrectQs.add(a.questionId);
+        indDays.add(d);
+      }
+    }
+    // Marking an answer tells the learner what the answer is, right or wrong.
+    exposedOn.set(a.questionId, d);
+  }
+  e.correctAny = correctQs.size;
+  e.partialAny = [...partialQs].filter((q) => !correctQs.has(q)).length;
+  e.independent = points.length;
+  e.independentCorrect = indCorrectQs.size;
+  e.independentDays = indDays.size;
+  const firstOk = points.find((p) => p.ok);
+  e.delayedTransfer = !!firstOk && points.some((p) => p.ok && p.transfer && p.day > firstOk.day);
+  e.recentFailures = points.slice(-3).filter((p) => !p.ok).length;
+  const lastPoint = points[points.length - 1];
+  const lastOk = [...points].reverse().find((p) => p.ok);
+  e.lapse = !!lastPoint && !lastPoint.ok && !!lastOk;
+  e.delayedLapse = e.lapse && lastPoint.day > lastOk!.day;
+  if (points.length) e.estimate = (points.filter((p) => p.ok).length + 1) / (points.length + 2);
+  const rated = points.filter((p) => p.confidence !== null);
+  e.rated = rated.length;
+  if (rated.length) {
+    e.brier = rated.reduce((sum, p) => sum + (p.confidence! - (p.ok ? 1 : 0)) ** 2, 0) / rated.length;
+    e.calibrationGap = rated.reduce((sum, p) => sum + p.confidence!, 0) / rated.length - rated.filter((p) => p.ok).length / rated.length;
+  }
+  return e;
+}
+
+/**
+ * The highest level the evidence can hold. Levels 1 and 2 describe exposure and following
+ * along, so help is allowed there. From level 4 up only independent work counts, and
+ * confidence never enters into it.
+ *
+ *   1  the idea has been taught, or any attempt has been marked
+ *   2  one answer at least partly right (help allowed)
+ *   3  two different questions answered fully correctly (help allowed)
+ *   4  two different questions answered correctly without help, one of them a transfer question
+ *      on a later day than the first success, and no more than one recent failure
+ *   5  as 4, with three such questions over two or more days and no recent failure
+ */
+export function supportedLevel(e: SkillEvidence, taught = false): number {
+  let level = 0;
+  if (taught || e.graded > 0) level = 1;
+  if (e.correctAny + e.partialAny >= 1) level = 2;
+  if (e.correctAny >= 2) level = 3;
+  if (level === 3 && e.independentCorrect >= 2 && e.delayedTransfer && e.recentFailures < 2) level = 4;
+  if (level === 4 && e.independentCorrect >= 3 && e.independentDays >= 2 && e.recentFailures === 0) level = 5;
+  return level;
+}
+
+/** In a sentence, what is still missing before `level` can be recorded. Empty when nothing is. */
+export function missingFor(e: SkillEvidence, level: number, taught = false): string {
+  if (supportedLevel(e, taught) >= level) return "";
+  if (level <= 1) return "a lesson or a first marked answer";
+  if (level === 2) return "one answer that is at least partly right";
+  if (level === 3) return `${Math.max(1, 2 - e.correctAny)} more fully correct answer${2 - e.correctAny === 1 ? "" : "s"} on different questions`;
+  const need: string[] = [];
+  const wanted = level === 4 ? 2 : 3;
+  if (e.correctAny < 2) need.push("two fully correct answers on different questions");
+  if (e.independentCorrect < wanted) need.push(`${wanted - e.independentCorrect} more correct answer${wanted - e.independentCorrect === 1 ? "" : "s"} without help`);
+  if (!e.delayedTransfer) need.push("a correct transfer question on a later day");
+  if (level === 5 && e.independentDays < 2) need.push("unaided success on two different days");
+  if (e.recentFailures >= (level === 4 ? 2 : 1)) need.push("recent unaided answers to come out right");
+  return need.join(", ");
+}
+
+/** How a grading method reads in the interface. */
+export function gradingLabel(a: Pick<Attempt, "grading" | "verification">): string {
+  const base = { deterministic: "checked by the plugin", symbolic: "checked symbolically by SymPy", numeric: "checked numerically by SymPy", model: "graded by the model", self: "self-rated" }[a.grading];
+  if (a.verification === "disputed") return `${base}, disputed`;
+  if (a.grading === "model") return a.verification === "verified" ? `${base}, confirmed` : `${base}, unverified`;
+  return base;
+}
+
+export const EVIDENCE_RULES = `If your reply grades an actual attempt by the learner at the pending question, add <attempt>{"skill":1,"result":"correct|partial|incorrect|ungraded","assisted":true,"transfer":false,"error_type":"conceptual|procedural|arithmetic|notation|prerequisite|careless|","error":"specific error or empty","difficulty":3}</attempt>.
+Use ungraded when you are not sure. Assisted is true if a hint, a worked step or the answer helped with this question. Transfer is true only for a fresh application the learner has not seen. Difficulty is 1 to 5. Never treat a request, an agreement or an explanation you supplied as a performance by the learner. The app decides which levels the recorded attempts support; a level you propose beyond that is ignored.`;

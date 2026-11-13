@@ -181,7 +181,7 @@ test("state round trip, trailer extraction and validated updates", () => {
   assert.equal(back.focus, 2);
   assert.equal(F.progress(back), 0);
   // Expert mode may add misconceptions but not change levels.
-  F.applyStateUpdate(back, { levels: { "2": 5 }, clear_misconceptions: ["Confuses kernel with image"] }, false);
+  F.applyStateUpdate(back, { levels: { "2": 5 }, clear_misconceptions: ["Confuses kernel with image"] }, { levels: false });
   assert.equal(back.levels[2], null);
   assert.equal(back.misconceptions.length, 0);
   assert.equal(F.extractStateTrailer("hi <state>{broken</state>").update, null);
@@ -379,7 +379,12 @@ test("a bank quiz is marked by code and calls the model only when judgement is n
   assert.deepEqual(Object.keys(state.cards).sort(), ["Q1", "Q2", "Q3"]);
   assert.deepEqual(state.bank[1], { right: 1, total: 1 });
   assert.deepEqual(state.bank[2], { right: 1, total: 2 });
-  assert.equal(state.levels[1], null, "code never changes levels; only the tutor's judgement does");
+  assert.deepEqual(state.levels, { 1: 2, 2: 2 }, "one marked success each: both can be followed, and no more than that");
+  assert.deepEqual(
+    state.attempts.map((a) => [a.questionId, a.result, a.grading, a.assisted]),
+    [["Q1", "correct", "deterministic", false], ["Q2", "correct", "deterministic", true], ["Q3", "partial", "model", false]],
+    "asking the tutor while Q2 was open makes that answer assisted",
+  );
 
   r = await engine.quizTurn(dir, chat, "another one please");
   assert.equal(calls.length, 3, "with the bank used up, the model-run quizzer takes over");
@@ -420,61 +425,4 @@ test("the Claude CLI is found on this machine", () => {
   const p = findClaude();
   assert.ok(p, "claude should be on PATH or in a known install location");
   assert.ok(!/\.cmd$/i.test(p!), "a .cmd shim must be resolved to the real binary");
-});
-
-
-test("session boundaries retain unfinished work and Learn stays in scope", async () => {
-  const { chooseAction, sessionFor, readSessionReply } = await import("../src/session");
-  const topic = F.parseTopic(F.parseCompileOutput(COMPILED).topicBody);
-  const state = F.newState(topic, 4);
-  const chat: F.Chat = { fm: {}, summary: "", messages: [{ role: "you", text: "x^2 + 2x" }] };
-  const session = sessionFor(chat, state);
-  assert.equal(chooseAction("teach", state, topic, session).action, "explain");
-  const pending = readSessionReply('Try this <session>{"pendingQuestion":"Find $x$","helpGiven":[],"nextAction":"check","completedStep":true}</session>', session);
-  assert.equal(pending.record.completedStep, false, "a pending question prevents rotation");
-  assert.equal(pending.text, "Try this");
-  pending.record.action = "guided-practice";
-  assert.equal(chooseAction("auto", state, topic, pending.record).action, "guided-practice");
-  assert.equal(readSessionReply("ok <session>{bad}</session>", session).record.completedStep, false);
-  assert.equal(session.attempt, "x^2 + 2x");
-});
-
-test("evidence deduplicates retries and requires delayed transfer for mastery", async () => {
-  const { recordAttempt, skillEvidence } = await import("../src/evidence");
-  const a = { id: "1", skill: 1, question: "q1", answer: "answer", timestamp: "2026-11-13T12:00:00Z", mode: "auto", result: "correct" as const, confidence: 0.8, assisted: false, transfer: false, source: "model" as const, error: "" };
-  let attempts = recordAttempt([], a);
-  attempts = recordAttempt(attempts, a);
-  assert.equal(attempts.length, 1);
-  attempts = recordAttempt(attempts, { ...a, id: "2", question: "q2", transfer: true });
-  assert.equal(skillEvidence(attempts, 1).delayedTransfer, false);
-  attempts = recordAttempt(attempts, { ...a, id: "3", question: "q3", transfer: true, timestamp: "2026-11-14T12:00:00Z" });
-  assert.equal(skillEvidence(attempts, 1).delayedTransfer, true);
-  const state = F.newState(F.parseTopic(F.parseCompileOutput(COMPILED).topicBody), 4);
-  state.levels[1] = 3;
-  F.applyStateUpdate(state, { levels: { "1": 4 } });
-  assert.equal(state.levels[1], 3);
-  state.attempts = attempts;
-  F.applyStateUpdate(state, { levels: { "1": 4 } });
-  assert.equal(state.levels[1], 4);
-  assert.equal(F.parseState(F.serializeState(state, "2026-11-14")).attempts?.length, 3);
-});
-
-
-test("cross-topic prerequisite links reject cycles and supply context", async () => {
-  const fs = new MemFS();
-  const store = new Store(fs, "Tutor");
-  const compiled = F.parseCompileOutput(COMPILED);
-  const make = (title: string) => store.saveCompiled({ title, fm: {}, topicBody: compiled.topicBody, questionsBody: compiled.questionsBody, target: 4 });
-  const first = await make("First");
-  const second = await make("Second");
-  const state = await store.loadState(first, 4);
-  state.focus = 1;
-  await store.addPrerequisite(first, state, { skill: 1, topic: second, prerequisite: 1 });
-  assert.match(await store.linkedContext(state), /External prerequisite/);
-  const other = await store.loadState(second, 4);
-  await assert.rejects(store.addPrerequisite(second, other, { skill: 1, topic: first, prerequisite: 1 }), /circular/);
-  state.priorities = { 1: 3 };
-  const migrated = F.newState(F.parseTopic(compiled.topicBody), 4, state);
-  assert.equal(migrated.priorities?.[1], 3);
-  assert.equal(migrated.links?.length, 1);
 });

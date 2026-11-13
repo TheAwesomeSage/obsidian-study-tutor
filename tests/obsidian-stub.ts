@@ -10,6 +10,8 @@ g.window = dom.window;
 g.document = dom.window.document;
 g.HTMLElement = dom.window.HTMLElement;
 (dom.window as any).confirm = () => true;
+// jsdom has no canvas. The graph treats a missing context as "nothing to draw".
+(dom.window as any).HTMLCanvasElement.prototype.getContext = () => null;
 
 const proto = dom.window.HTMLElement.prototype as any;
 proto.createEl = function (tag: string, o?: any) {
@@ -42,6 +44,15 @@ proto.setText = function (t: string) {
 };
 proto.appendText = function (t: string) {
   this.appendChild(dom.window.document.createTextNode(t));
+};
+proto.toggleClass = function (c: string, on: boolean) {
+  this.classList.toggle(c, !!on);
+};
+proto.hasClass = function (c: string) {
+  return this.classList.contains(c);
+};
+proto.removeClass = function (c: string) {
+  this.classList.remove(c);
 };
 proto.toggle = function (show: boolean) {
   this.style.display = show ? "" : "none";
@@ -233,6 +244,26 @@ export const MarkdownRenderer = {
     div.appendText(md.slice(last));
   },
 };
+
+/** Records the items a menu was given, so a test can pick one by title. */
+export const menus: Menu[] = [];
+export class Menu {
+  items: { title: string; run: () => void }[] = [];
+  constructor() {
+    menus.push(this);
+  }
+  addItem(cb: (i: any) => void) {
+    const item = { title: "", run: () => {} };
+    const api: any = { setTitle: (t: string) => ((item.title = t), api), setIcon: () => api, onClick: (f: () => void) => ((item.run = f), api) };
+    cb(api);
+    this.items.push(item);
+    return this;
+  }
+  addSeparator() {
+    return this;
+  }
+  showAtMouseEvent() {}
+}
 
 export type App = any;
 export type WorkspaceLeaf = any;
