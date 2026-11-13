@@ -22,6 +22,7 @@ Levels are earned, not given:
 - Level 5 needs an edge case or adversarial question handled, and an explanation clear enough to teach from.
 - A vague or partly right answer is not right. Probe until you know which it is.
 - A failed re-test of an earlier subskill lowers its level by one.
+- When the learner state lists a prerequisite gap, trouble with the later subskill often comes from the earlier one. Test the earlier one before going on.
 
 ## State updates
 

@@ -214,9 +214,42 @@ test("plugin loads, chats, reviews and shows the skill map", async () => {
   await tick();
   assert.ok(await fs.exists(`${dir}/flashcards.md`));
 
+  // The concept graph: one box per subskill, an arrow from the prerequisite, drawn without a model.
+  const click = (el: any) => el.dispatchEvent(new (globalThis as any).window.MouseEvent("click", { bubbles: true }));
+  assert.equal($$(root, "svg.st-graph .st-g-node").length, 2);
+  assert.equal($$(root, "svg.st-graph path.st-g-edge").length, 1);
+  assert.match($(root, ".st-g-node.st-g-l2").textContent, /1 · focusL2Definition/, "level 2, and the current focus");
+  assert.ok($(root, ".st-g-node.st-g-unset"), "the subskill not yet placed has no fill");
+  assert.equal($$(root, ".st-g-swatch").length, 7, "the legend runs from not placed to level 5");
+  assert.match($(root, ".st-g-node.st-g-unset title").textContent, /2\. Kernel and image: not placed of 4\. Builds on 1\. Definition of a linear map\./);
+  click($(root, ".st-g-node.st-g-unset"));
+  assert.match($(root, ".st-g-info").textContent, /2\. Kernel and imageNot placed yetBuilds on: 1\. Definition of a linear map \(level 2\)/);
+  assert.ok($(root, ".st-g-node.is-selected.st-g-unset"));
+  // Studying it from the graph makes it the focus and opens a lesson, since it is new.
+  button(root, "Learn this").click();
+  await tick(60);
+  assert.equal(parseState(await fs.read(`${dir}/state.md`)).focus, 2);
+  assert.ok($(root, ".st-step.is-active").textContent.includes("Learn"));
+  assert.equal(modelCalls, 0, "nothing in the graph calls the model");
+  await view.showTab("map");
+  assert.match($(root, ".st-g-node.st-g-unset").textContent, /2 · focus/);
+
   // The modal and settings tab build without errors.
   plugin.openNewTopic();
   assert.ok(notices.every((n) => !/could not/i.test(n)), notices.join(" | "));
+  const tab = (plugin as any).settingTabs[0];
+  tab.display();
+  const sympySetting = () => $$(tab.containerEl, ".setting-item").find((e: any) => /Compute and check maths with SymPy/.test(e.textContent));
+  assert.match(sympySetting().textContent, /Status: not loaded yet\./);
+  assert.equal(plugin.opts.mathCheck, false, "off until asked for, because the first use downloads SymPy");
+  // There are no web workers under jsdom: switching it on must fail quietly, never throw.
+  const toggle = $(sympySetting(), "input[type=checkbox]");
+  toggle.checked = true;
+  await toggle.onchange();
+  assert.equal(plugin.opts.mathCheck, true);
+  assert.match(sympySetting().textContent, /Status: unavailable: /);
+  assert.equal(await plugin.engine.mathEquivalent("1/2", "0.5"), null, "an unavailable checker decides nothing");
+  plugin.opts.mathCheck = false;
 
   // With the Spaced Repetition plugin enabled, review is handed to it.
   assert.equal(plugin.usesSr(), false, "without that plugin the built-in review is used");

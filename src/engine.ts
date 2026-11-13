@@ -6,8 +6,9 @@ import { answerText, fmList, fmNum, formatQuizQuestion, givesUp, looksLikeQuesti
 import { Frontmatter, Grade, LearnerState, Mode, Question, SourceMode, applyStateUpdate, chatWords, extractStateTrailer, fmStr, parseCompileOutput, parseQuestions, parseTopic, words, ymd } from "./formats";
 import { GRADE_SCHEMA, buildCompileInput, buildSystem, buildTurnInput, modeFile, topicForPrompt, utilityPrompt } from "./prompts";
 import { Route, routeTurn } from "./router";
+import { CheckReport, Claim, ClaimResult, MathBackend, checkReport, computeBlock, extractCompute, extractVerify, plainMaths } from "./sympy";
 import { Store } from "./store";
-import { codeMark, placementQuestions } from "./formats";
+import { codeMark, placementQuestions, prereqGaps, prereqMap } from "./formats";
 
 export interface EngineSettings {
   claudePath: string;
@@ -19,9 +20,11 @@ export interface EngineSettings {
   maxChatWords: number;
   maxTopicWords: number;
   singlePassWords: number;
-  /** Pick the model and thinking effort per turn from the message (see router.ts). */
   /** True when another plugin keeps the flashcard schedule; this one then records no schedule of its own. */
   externalFlashcards?: boolean;
+  /** Let SymPy compute and check the maths: typed answers, and the tutor's own results. */
+  mathCheck?: boolean;
+  /** Pick the model and thinking effort per turn from the message (see router.ts). */
   smartRouting: boolean;
   /** Thinking effort for turns the router calls complex. */
   hardEffort: string;
@@ -39,7 +42,17 @@ export interface TurnResult {
   local?: boolean;
   /** Which model answered and why, when routing is on. */
   route?: { route: Route; reason: string; model: string };
+  /** What SymPy did for this reply: results it computed, results it checked, whether it still disagrees, and whether a draft was rewritten. */
+  maths?: { computed: number; checked: number; disputed: boolean; corrected: boolean };
 }
+
+/** How many times one turn may ask SymPy to compute before it must answer. */
+const COMPUTE_ROUNDS = 2;
+/** How long a typed answer waits for SymPy's first download before it goes to the model instead. */
+const FIRST_CHECK_WAIT_MS = 20000;
+
+/** True when a topic card contains enough notation for maths checking to be worth its prompt. */
+export const looksMathematical = (card: string): boolean => (card.match(/\$[^$\n]+\$/g) ?? []).length >= 3 || /\\(frac|int|sum|sqrt|partial|mathbf|begin\{)/.test(card);
 
 export interface Material {
   name: string;
@@ -70,11 +83,51 @@ const BATCH_WORDS = 3000;
 const PARALLEL = 3;
 
 export class Engine {
+  /** The SymPy checker, when the plugin has one. Null in tests and wherever workers are unavailable. */
+  maths: MathBackend | null = null;
+
   constructor(
     public store: Store,
     private settings: () => EngineSettings,
     private today: () => string = () => ymd(),
   ) {}
+
+  private mathsOn(): boolean {
+    return !!this.settings().mathCheck && !!this.maths;
+  }
+
+  /**
+   * Asks SymPy whether a typed answer equals the expected one. True or false when it can tell;
+   * null when checking is off, either side is not an expression, or SymPy could not decide.
+   */
+  async mathEquivalent(expected: string, given: string): Promise<boolean | null> {
+    if (!this.mathsOn()) return null;
+    const a = plainMaths(given, { allowLhs: true });
+    const b = plainMaths(expected, { allowLhs: true });
+    if (!a || !b) return null;
+    const asked = this.runMaths([{ type: "equal", a, b, lenient: true }]);
+    // While SymPy is still downloading, an answer waits only so long before the model marks it.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const patience = new Promise<ClaimResult[]>((done) => (timer = setTimeout(() => done([]), FIRST_CHECK_WAIT_MS)));
+    const [r] = await (this.maths!.status() === "ready" ? asked : Promise.race([asked, patience]));
+    clearTimeout(timer);
+    return r ? r.ok : null;
+  }
+
+  /** Starts loading SymPy in the background when it is going to be wanted. */
+  private warmMaths(): void {
+    if (this.mathsOn()) this.maths!.warm();
+  }
+
+  /** Runs checks or computations; an empty list means SymPy was unavailable, never an error. */
+  private async runMaths(claims: Claim[]): Promise<ClaimResult[]> {
+    if (!claims.length || !this.maths) return [];
+    try {
+      return await this.maths.check(claims);
+    } catch {
+      return [];
+    }
+  }
 
   private claudePath(): string {
     const p = findClaude(this.settings().claudePath);
@@ -101,29 +154,89 @@ export class Engine {
     }
     const mode = (fmStr(chat.fm, "mode", "tutor") as Mode) || "tutor";
     const subjectName = fmStr(topic.fm, "subject", "none");
+    // Route on the learner's latest message (also on a retry, when `message` itself is empty).
+    const lastMsg = chat.messages[chat.messages.length - 1];
+    let decision = s.smartRouting ? routeTurn({ mode, message: lastMsg?.role === "you" ? lastMsg.text : "", attached: !!opts.attached }) : { route: "standard" as Route, reason: "routing off" };
+    const model = decision.route === "simple" ? s.utilityModel : s.chatModel;
+    // The chat model is told how to hand work to SymPy, on topics that have maths in them.
+    // The cheap model's look-ups need none of it.
+    const verifying = this.mathsOn() && decision.route !== "simple" && looksMathematical(topic.body);
+    if (verifying) this.warmMaths();
+    let effort = decision.route === "simple" ? undefined : decision.route === "complex" ? s.hardEffort || s.effort || undefined : s.effort || undefined;
+    if (verifying && decision.reason === "answer contains maths to check" && lastMsg && plainMaths(lastMsg.text, { allowLhs: true })) {
+      // The answer is a bare expression. SymPy does the comparing, so the model need not think
+      // hard about the algebra; if SymPy then disputes the reply, the redo below thinks harder.
+      decision = { route: "standard", reason: "expression answer, checked by SymPy" };
+      effort = s.effort || undefined;
+    }
+    const modeRules = await this.store.skill(modeFile(mode));
     const system = buildSystem({
       core: await this.store.skill("core.md"),
       subject: subjectName && subjectName !== "none" ? await this.store.skill(`subjects/${subjectName}.md`) : "",
       topicText: topicForPrompt(topic, state.focus, s.maxTopicWords),
-      mode: await this.store.skill(modeFile(mode)),
+      mode: verifying ? `${modeRules.trim()}\n\n---\n\n${(await this.store.skill("maths-check.md")).trim()}` : modeRules,
     });
-    const input = buildTurnInput({ state, today: this.today(), chat, attached: opts.attached });
-    // Route on the learner's latest message (also on a retry, when `message` itself is empty).
-    const lastMsg = chat.messages[chat.messages.length - 1];
-    const decision = s.smartRouting ? routeTurn({ mode, message: lastMsg?.role === "you" ? lastMsg.text : "", attached: !!opts.attached }) : { route: "standard" as Route, reason: "routing off" };
-    const model = decision.route === "simple" ? s.utilityModel : s.chatModel;
-    const effort = decision.route === "simple" ? undefined : decision.route === "complex" ? s.hardEffort || s.effort || undefined : s.effort || undefined;
-    const res = await this.call({ model, effort, system, input, onSpawn: opts.onSpawn });
+    const input = buildTurnInput({ state, today: this.today(), chat, attached: opts.attached, gaps: prereqGaps(state, prereqMap(topic)) });
+    let res = await this.call({ model, effort, system, input, onSpawn: opts.onSpawn });
+    let usage = res.usage;
 
-    const { text, update } = extractStateTrailer(res.text);
-    // Levels are never changed on the word of the cheap model.
-    const changes = update ? applyStateUpdate(state, update, mode !== "expert" && decision.route !== "simple") : [];
+    // 1. The model may ask SymPy to do the computing before it answers. It reasons about what
+    //    needs working out and how the pieces connect; SymPy works each piece out.
+    const asks: Claim[] = [];
+    let computed = 0;
+    let extra = "";
+    for (let round = 1; verifying && round <= COMPUTE_ROUNDS; round++) {
+      const more = extractCompute(res.text, asks.length).asks;
+      if (!more.length) break;
+      // Earlier requests are run again with the new ones, so the names r1, r2, … still resolve.
+      asks.push(...more);
+      const results = await this.runMaths(asks);
+      computed = results.filter((r) => r.ok).length;
+      const last = round === COMPUTE_ROUNDS;
+      extra = `\n\n# SymPy results\nYou asked the app to compute these before replying:\n${computeBlock(asks, results)}\n\nNow write your reply to the learner, relying on these results and not on your own arithmetic. ${last ? "Do not ask for more computation." : "Ask for more computation only if these results make a new one necessary."}`;
+      res = await this.call({ model, effort, system, input: input + extra, onSpawn: opts.onSpawn });
+      usage = addUsage(usage, res.usage);
+    }
+
+    // 2. Hidden lines may follow the reply: results for SymPy to check, and a state update.
+    const read = (raw: string) => {
+      const verify = extractVerify(extractCompute(raw).text);
+      return { ...extractStateTrailer(verify.text), claims: verifying ? verify.claims : [] };
+    };
+    const check = async (claims: Claim[], redone = false): Promise<CheckReport> => checkReport(claims, await this.runMaths(claims), { computed, corrected: redone });
+    let parsed = read(res.text);
+    let report = await check(parsed.claims);
+    let corrected = false;
+
+    // 3. SymPy disputes the draft: the learner never sees it. The model gets the findings and
+    //    one chance to rewrite, with more thinking. A reply still disputed is shown with a warning.
+    if (report.disagreed) {
+      const redo = `${input}${extra}\n\n# SymPy check of your draft\nThe app checked the reply you drafted. The learner has not seen it.\n\n<draft>\n${parsed.text}\n</draft>\n\n${report.findings.join("\n")}\n\nWrite the reply again with the error put right, ending with the hidden lines as usual. If the disagreement only shows that you transcribed something into SymPy syntax wrongly, keep the maths and correct the check.`;
+      try {
+        const again = await this.call({ model, effort: s.hardEffort || effort, system, input: redo, onSpawn: opts.onSpawn });
+        usage = addUsage(usage, again.usage);
+        const p2 = read(again.text);
+        if (p2.text) {
+          parsed = p2;
+          report = await check(p2.claims, true);
+          corrected = true;
+        }
+      } catch (e) {
+        if (e instanceof ClaudeError && e.message === "Stopped.") throw e;
+        /* the redo is a refinement: without it the draft is shown with SymPy's warning */
+      }
+    }
+
+    // Levels are never changed on the word of the cheap model, nor on a turn SymPy disputes.
+    const changes = parsed.update ? applyStateUpdate(state, parsed.update, mode !== "expert" && decision.route !== "simple" && !report.disagreed) : [];
     if (changes.length) await this.store.saveState(dir, state);
-    const reply = text || "(empty reply)";
+    // The outcome is saved with the message, so the learner sees it and the tutor reads it next turn.
+    const reply = (parsed.text || "(empty reply)") + (report.line ? `\n\n${report.line}` : "");
     chat.messages.push({ role: "tutor", text: reply });
     await this.store.saveChat(chatPath, chat);
 
-    const out: TurnResult = { reply, changes, state, usage: res.usage, route: { ...decision, model } };
+    const out: TurnResult = { reply, changes, state, usage, route: { ...decision, model } };
+    if (verifying) out.maths = { computed, checked: parsed.claims.length, disputed: report.disagreed, corrected };
     if (chatWords(chat) > s.maxChatWords && chat.messages.length > 4) {
       try {
         const sum = await this.call({
@@ -190,7 +303,8 @@ export class Engine {
     const mark = codeMark(pending, answer);
     if (mark === "letter") return say("Reply with one letter, for example **B**, or say **skip**.");
     // Placement never calls a model: anything code cannot confirm counts as not yet known.
-    const level = givesUp(answer) ? 0 : mark === "good" ? 2 : 1;
+    const same = mark === "model" && pending.type === "short" ? await this.mathEquivalent(pending.answer, answer) : null;
+    const level = givesUp(answer) ? 0 : mark === "good" || same === true ? 2 : 1;
     const placed = [...fmList(chat.fm, "placed"), `${pending.subskill}:${level}`];
     chat.fm.placed = placed;
     if (pending.subskill in state.names) {
@@ -298,6 +412,8 @@ export class Engine {
     const text = message.trim();
     const last = chat.messages[chat.messages.length - 1];
     const asksTutor = (t: string) => looksLikeQuestion(t) && !givesUp(t);
+    // A bank quiz may need SymPy for the next typed answer; load it while the learner reads.
+    if (questions.some((q) => q.type === "short")) this.warmMaths();
 
     if (!pending && (text || last?.role === "you")) return this.turn(dir, chatPath, message, opts);
     if (pending && text && asksTutor(text)) return this.turn(dir, chatPath, message, opts);
@@ -332,11 +448,19 @@ export class Engine {
           grade = letter === mcqLetter(pending.answer) ? "good" : "again";
         } else if (pending.type === "short" && sameShortAnswer(answer, pending.answer)) grade = "good";
         else {
-          // Not something code can mark: one small grading call on the cheap model.
-          const g = await this.grade(pending, answer);
-          grade = g.grade;
-          note = g.feedback;
-          usage = g.usage;
+          // An answer in another form (1/2 for 0.5, or an unsimplified expression): SymPy can say
+          // whether it equals the expected one, with no model call.
+          const same = pending.type === "short" ? await this.mathEquivalent(pending.answer, answer) : null;
+          if (same !== null) {
+            grade = same ? "good" : "again";
+            note = same ? "SymPy confirms your answer equals the expected one." : "SymPy finds your answer is not equal to the expected one.";
+          } else {
+            // Not something code can mark: one small grading call.
+            const g = await this.grade(pending, answer);
+            grade = g.grade;
+            note = g.feedback;
+            usage = g.usage;
+          }
         }
         if (!s.externalFlashcards) state.cards[pending.id] = schedule(state.cards[pending.id], grade, today);
         if (pending.subskill in state.names) {

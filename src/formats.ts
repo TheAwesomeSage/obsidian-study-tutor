@@ -623,27 +623,93 @@ export interface NextStep {
   action: Mode | "review" | "done";
   title: string;
   detail: string;
+  /** The subskill the step is about, when it is about one. Following the step makes it the focus. */
+  subskill?: number;
+}
+
+/** For each subskill, the subskills it lists as prerequisites (only ones that exist, never itself). */
+export type Prereqs = Record<number, number[]>;
+
+export function prereqMap(topic: Topic): Prereqs {
+  const known = new Set(topic.subskills.map((k) => k.n));
+  const out: Prereqs = {};
+  for (const k of topic.subskills) out[k.n] = [...new Set(k.prerequisites)].filter((p) => p !== k.n && known.has(p));
+  return out;
+}
+
+/** The direct prerequisites of `n` that the learner holds below level `need`, weakest first. */
+export function weakPrereqs(s: LearnerState, pre: Prereqs, n: number, need: number): number[] {
+  const lvl = (k: number) => s.levels[k] ?? -1;
+  return (pre[n] ?? []).filter((p) => p in s.names && lvl(p) < need).sort((a, b) => lvl(a) - lvl(b) || a - b);
+}
+
+/**
+ * Where to start in order to work on `n`: follows weak prerequisites down until it reaches a
+ * subskill whose own prerequisites are sound. Returns `n` itself when nothing is in the way.
+ */
+export function foundationFor(s: LearnerState, pre: Prereqs, n: number, need: number): number {
+  const seen = new Set<number>();
+  let cur = n;
+  while (!seen.has(cur)) {
+    seen.add(cur);
+    const weak = weakPrereqs(s, pre, cur, need).filter((p) => !seen.has(p));
+    if (!weak.length) break;
+    cur = weak[0];
+  }
+  return cur;
+}
+
+/** Places where the learner is further along in a subskill than in something it builds on. */
+export function prereqGaps(s: LearnerState, pre: Prereqs): string[] {
+  const out: string[] = [];
+  for (const n of Object.keys(s.names).map(Number).sort((a, b) => a - b)) {
+    const level = s.levels[n] ?? 0;
+    if (level <= 0) continue;
+    for (const p of pre[n] ?? []) if (p in s.names && (s.levels[p] ?? 0) < level) out.push(`${p} (${s.names[p]}, level ${s.levels[p] ?? "unset"}) is behind ${n} (${s.names[n]}, level ${level}), which builds on it`);
+  }
+  return out;
 }
 
 /**
  * The cheapest sensible next thing to do on a topic. Lessons and code-marked practice come
  * before Socratic tutoring, which is the most thorough mode and also the most expensive.
+ * With the prerequisites passed in, a subskill is never suggested while something it builds
+ * on is still weak: the weak prerequisite is suggested instead.
  */
-export function nextStep(s: LearnerState, today: string, dueOverride?: number): NextStep {
+export function nextStep(s: LearnerState, today: string, dueOverride?: number, pre: Prereqs = {}): NextStep {
   const ns = Object.keys(s.names).map(Number).sort((a, b) => a - b);
   if (!ns.length) return { action: "done", title: "Nothing to study yet", detail: "This topic has no subskills." };
   const lvl = (n: number) => s.levels[n];
+  const because = (first: number, wanted: number) => (first === wanted ? "" : ` first: ${s.names[wanted]} builds on it`);
   // When another plugin keeps the flashcard schedule, its count of due cards is passed in.
   const due = dueOverride ?? dueCount(s, today);
   const untaught = ns.filter((n) => lvl(n) === null || (lvl(n) as number) <= 1);
-  if (ns.every((n) => lvl(n) === null)) return { action: "teach", title: "Learn", detail: `Start with a lesson on ${s.names[ns[0]]}.` };
+  if (ns.every((n) => lvl(n) === null)) {
+    const first = foundationFor(s, pre, ns[0], 2);
+    return { action: "teach", title: "Learn", detail: `Start with a lesson on ${s.names[first]}.`, subskill: first };
+  }
   if (due > 0) return { action: "review", title: "Review", detail: `${due} flashcard${due === 1 ? " is" : "s are"} due. Reviewing uses no tokens.` };
-  if (untaught.length) return { action: "teach", title: "Learn", detail: `Take a lesson on ${s.names[untaught[0]]}.` };
+  if (untaught.length) {
+    // A lesson needs its prerequisites at "can follow along" (2) or better.
+    const first = foundationFor(s, pre, untaught[0], 2);
+    return { action: "teach", title: "Learn", detail: `Take a lesson on ${s.names[first]}${because(first, untaught[0])}.`, subskill: first };
+  }
   const unpractised = ns.filter((n) => (s.bank[n]?.total ?? 0) < 2);
-  if (unpractised.length) return { action: "quiz", title: "Practise", detail: `Quiz yourself on ${s.names[unpractised[0]]}. Most answers are marked without tokens.` };
+  if (unpractised.length) return { action: "quiz", title: "Practise", detail: `Quiz yourself on ${s.names[unpractised[0]]}. Most answers are marked without tokens.`, subskill: unpractised[0] };
   const below = ns.filter((n) => (lvl(n) ?? 0) < s.target).sort((a, b) => (lvl(a) ?? 0) - (lvl(b) ?? 0));
-  if (below.length) return { action: "tutor", title: "Master", detail: `Work with the tutor on ${s.names[below[0]]} (level ${lvl(below[0])} of ${s.target}).` };
+  if (below.length) {
+    // Mastery needs its prerequisites at "can do with help" (3) or better.
+    const first = foundationFor(s, pre, below[0], Math.min(3, s.target));
+    return { action: "tutor", title: "Master", detail: `Work with the tutor on ${s.names[first]} (level ${lvl(first)} of ${s.target})${because(first, below[0])}.`, subskill: first };
+  }
   return { action: "done", title: "At target", detail: "Every subskill is at your target level. Come back when flashcards are due." };
+}
+
+/** What to do with one subskill the learner picked from the graph: a lesson if it is new, otherwise the tutor. */
+export function stepFor(s: LearnerState, n: number): NextStep {
+  const level = s.levels[n];
+  if (level === null || level === undefined || level <= 1) return { action: "teach", title: "Learn", detail: `Take a lesson on ${s.names[n]}.`, subskill: n };
+  return { action: "tutor", title: "Master", detail: `Work with the tutor on ${s.names[n]}.`, subskill: n };
 }
 
 // ---------- chat files ----------

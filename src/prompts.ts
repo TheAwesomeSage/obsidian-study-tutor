@@ -4,6 +4,7 @@ import coreMd from "../skills/core.md";
 import tutorMd from "../skills/mode-tutor.md";
 import teachMd from "../skills/mode-teach.md";
 import summaryMd from "../skills/summary.md";
+import mathsMd from "../skills/maths-check.md";
 import quizMd from "../skills/mode-quiz.md";
 import expertMd from "../skills/mode-expert.md";
 import compileMd from "../skills/compile.md";
@@ -27,6 +28,7 @@ export const BUNDLED: Record<string, string> = {
   "mode-tutor.md": tutorMd,
   "mode-teach.md": teachMd,
   "summary.md": summaryMd,
+  "maths-check.md": mathsMd,
   "mode-quiz.md": quizMd,
   "mode-expert.md": expertMd,
   "compile.md": compileMd,
@@ -58,8 +60,10 @@ export function buildSystem(p: { core: string; subject: string; topicText: strin
 }
 
 /** The part that changes every turn. */
-export function buildTurnInput(p: { state: LearnerState; today: string; chat: Chat; attached?: { name: string; text: string } }): string {
-  const out = ["# Learner state", stateForPrompt(p.state, p.today), ""];
+export function buildTurnInput(p: { state: LearnerState; today: string; chat: Chat; attached?: { name: string; text: string }; gaps?: string[] }): string {
+  const out = ["# Learner state", stateForPrompt(p.state, p.today)];
+  if (p.gaps?.length) out.push("prerequisite gaps: " + p.gaps.join("; "));
+  out.push("");
   const chat = chatForPrompt(p.chat);
   if (chat) out.push("# Chat", chat, "");
   if (p.attached) out.push(`# Attached note: [[${p.attached.name}]]`, p.attached.text.trim(), "");

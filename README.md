@@ -23,14 +23,26 @@ The plugin works in any vault. On first load it creates one folder (default `Tut
   - the subject alone, with no notes.
 - Give a level in the Goal box (for example "second-year university"). With a spec or a bare subject you can switch on **Research on the web**: the compile step then searches for what courses at that level cover and cites its sources. This is the only time any tool is enabled, and only web search and fetch.
 - The topic is **compiled once** into a topic card (subskills, key claims with links back to your notes, common misconceptions) and a question bank.
-- The header shows your progress and a suggested **next step**, following the cheapest sensible order: learn a subskill, practise it with code-marked questions, then master it with the tutor.
+- The header shows your progress and a suggested **next step**, following the cheapest sensible order: learn a subskill, practise it with code-marked questions, then master it with the tutor. It never suggests a subskill while something it builds on is still weak; it sends you to the weak prerequisite first.
 - **Chat** tab: pick a mode. The modes are laid out as that path: Learn (Teacher), Practise (Quizzer), Master (Tutor), with Ask (Expert) available at any time.
   - *Tutor* places you with a short diagnostic, then teaches one question at a time and only raises a level on demonstrated performance.
   - *Teacher* explains one subskill at a time: why it matters, the idea, a worked example, a diagram where it helps, the common pitfall, then a problem for you. It opens with a short plan and closes with a summary.
   - *Quizzer* asks from the question bank first, weakest subskills first. Multiple-choice and exact short answers are marked by the plugin with no tokens. Only an answer that needs judgement costs a small grading call, and when the bank runs out the model writes fresh questions.
   - *Expert* answers questions directly, grounded in your notes.
 - **Review** tab: with the Spaced Repetition plugin enabled, a launcher for its review of this topic. Otherwise, built-in spaced flashcards from the question bank. Multiple choice and exact short answers are marked by the plugin. For anything else you grade yourself, or ask Claude to grade one answer.
-- **Skill map** tab: levels 0 to 5 per subskill, tracked misconceptions, recompile, flashcard export, and "Write summary note", which saves a revision summary with a concept map into the topic folder.
+- **Skill map** tab: the concept graph, levels 0 to 5 per subskill, tracked misconceptions, recompile, flashcard export, and "Write summary note", which saves a revision summary with a concept map into the topic folder.
+  - The **concept graph** draws every subskill as a box, prerequisites above what they unlock, shaded by your level (the level is also written in each box). A dashed arrow marks a prerequisite that is behind something built on it; a faded box is one whose prerequisites you have not learned yet. Select a box to see what it builds on and leads to, and to start a lesson or tutoring on it. It is drawn by the plugin from the topic card, so it uses no tokens. The tutor is told about the same gaps.
+
+## Maths with SymPy
+
+Switch on **Compute and check maths with SymPy** in the settings and the plugin runs [SymPy](https://www.sympy.org), a computer algebra system, for anything that is computation. The model does the reasoning and the teaching; SymPy does the algebra.
+
+- **Typed answers cost nothing.** In quizzes, placement and the built-in review, an answer that does not match the expected one exactly is compared by SymPy: `1/2` is accepted for `0.5`, `(x+1)^2` for `x^2+2x+1`. No model is called. If SymPy cannot decide (a sentence, an equation, a different letter), the answer goes to the model as before.
+- **The tutor hands over its computing.** On a topic with maths in it, the tutor can reply with a list of computations instead of an answer: an integral, a transform, a system to solve, a matrix inverse. Later items can use earlier results, so a chain of simple steps solves a harder problem. The plugin runs them and calls the model once more with the results. This costs one extra round, with the system prompt read from cache.
+- **Every stated result is checked.** A reply that judges your expression or states a result ends with a hidden list of checks. If SymPy disagrees, the reply is rewritten once, with more thinking, before you see it; if it still disagrees you see the reply with a warning and no level changes. A line under the reply says what was computed and checked.
+- **Less thinking where SymPy can decide.** An answer that is a bare expression gets the chat model's normal effort instead of extra thinking, because SymPy does the comparing.
+
+SymPy is Python, so it runs through [Pyodide](https://pyodide.org) (Python compiled to WebAssembly) in a background worker. Nothing needs installing. The first use downloads about 20 MB from the jsDelivr CDN and needs a connection; after that it is cached. The expressions themselves never leave your machine. Every string is filtered before it is parsed (no attribute access, no imports, no names beginning with an underscore), the worker has no access to Node or the vault, and a computation that runs too long is stopped. SymPy checks results, not the steps of a derivation or a proof: those stay with the model.
 
 ## How usage is kept low
 
@@ -59,8 +71,8 @@ The plugin always uses the last row, with `--strict-mcp-config`, `--disable-slas
 Tutor/
   Dashboard.base            a Bases table of every topic's progress
   _skills/                  the teaching rules, as markdown you can edit
-    core.md  mode-tutor.md  mode-quiz.md  mode-expert.md
-    compile.md  utility.md
+    core.md  mode-tutor.md  mode-teach.md  mode-quiz.md  mode-expert.md
+    compile.md  utility.md  summary.md  maths-check.md
     subjects/               one short card per field; add your own
   Topics/<topic>/
     topic.md                the compiled topic card
@@ -90,11 +102,14 @@ npm run preview   # writes tests/out/preview.html, a static look at the sidebar 
 npm run build     # writes main.js
 ```
 
+`npm test` also runs the SymPy checker's Python against a labelled set of checks when a Python with SymPy is on the machine (set `SYMPY_PYTHON` to choose one); without it that one test is skipped. To run the same set through the real in-browser worker, serve `tests/out/` over HTTP after `npm run preview` and open `sympy.html`; the page title ends as "SYMPY PASSED".
+
 ## Limits
 
 - Used inside Obsidian on Windows only; never tried on macOS or Linux. The logic is covered by unit tests, a jsdom run of the view with a stubbed `obsidian` module, and live CLI tests.
 - Replies are not streamed; a turn appears when it is complete.
-- A model can grade maths wrongly. The tutor is told to check steps before grading, and the topic card ties it to your notes, but treat a surprising verdict with care.
+- A model can grade maths wrongly. With SymPy switched on, results are checked and a wrong one is rewritten or flagged, but the steps of a derivation or a proof are still judged by the model alone. Treat a surprising verdict with care.
+- The concept graph covers one topic at a time. Prerequisites between topics are not recorded.
 - The flashcard schedule is a simple SM-2 style scheme, not FSRS.
 
 ## Licence

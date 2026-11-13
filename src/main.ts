@@ -3,6 +3,7 @@ import { ClaudeError, callClaude, findClaude, usageLine } from "./claude";
 import { CompileResult, Engine, EngineSettings, Material } from "./engine";
 import { Frontmatter, SourceMode, fmList, fmStr, splitFrontmatter, words } from "./formats";
 import { FS, Store } from "./store";
+import { SympyWorker } from "./sympy";
 import { TutorView, VIEW_TYPE } from "./view";
 
 export interface TutorSettings extends EngineSettings {
@@ -12,6 +13,8 @@ export interface TutorSettings extends EngineSettings {
   bankQuiz: boolean;
   /** Hand flashcard review and scheduling to the Spaced Repetition community plugin when it is enabled. */
   useSpacedRepetition: boolean;
+  /** Compute and check maths with SymPy. Off by default because the first use downloads SymPy from a CDN. */
+  mathCheck: boolean;
   /** Tutor mode places a new learner with bank questions marked by code, not model turns. */
   codePlacement: boolean;
 }
@@ -40,6 +43,7 @@ const DEFAULTS: TutorSettings = {
   newCardsPerDay: 10,
   bankQuiz: true,
   useSpacedRepetition: true,
+  mathCheck: false,
   codePlacement: true,
   smartRouting: true,
   hardEffort: "high",
@@ -56,6 +60,8 @@ export default class StudyTutorPlugin extends Plugin {
   data!: PluginData;
   store!: Store;
   engine!: Engine;
+  /** SymPy in a worker. Nothing is downloaded or started until a check is actually asked for. */
+  sympy = new SympyWorker();
 
   get opts(): TutorSettings {
     return this.data.settings;
@@ -98,6 +104,11 @@ export default class StudyTutorPlugin extends Plugin {
     const root = this.opts.root.replace(/^\/+|\/+$/g, "") || "Tutor";
     this.store = new Store(this.app.vault.adapter as FS, root);
     this.engine = new Engine(this.store, () => ({ ...this.opts, externalFlashcards: this.usesSr() }));
+    this.engine.maths = this.sympy;
+  }
+
+  onunload(): void {
+    this.sympy.dispose();
   }
 
   /** Whether the Spaced Repetition community plugin is installed and switched on in this vault. */
@@ -382,6 +393,44 @@ class TutorSettingTab extends PluginSettingTab {
         }),
       );
     num("New flashcards per day", "Built-in review only: unseen cards added to each day's review, per topic.", "newCardsPerDay", 0);
+
+    new Setting(containerEl).setName("Maths").setHeading();
+    const sympy = this.plugin.sympy;
+    new Setting(containerEl)
+      .setName("Compute and check maths with SymPy")
+      .setDesc(
+        "Runs SymPy, a computer algebra system, inside the plugin. Typed answers in quizzes, placement and review are compared by SymPy with no model call, so 1/2 is accepted for 0.5. In chats on mathematical topics the tutor hands its computations to SymPy and every result it states is checked; if SymPy disagrees, the reply is rewritten once before you see it. " +
+          "The first use downloads Python and SymPy (about 20 MB) from the jsDelivr CDN and needs an internet connection; your maths is never sent anywhere. " +
+          `Status: ${sympy.status()}.`,
+      )
+      .addToggle((t) =>
+        t.setValue(s.mathCheck).onChange(async (v) => {
+          s.mathCheck = v;
+          await this.plugin.save();
+          if (v) {
+            sympy.reset();
+            sympy.warm();
+          } else sympy.dispose();
+          this.display();
+        }),
+      )
+      .addButton((b) =>
+        b.setButtonText("Test").onClick(async () => {
+          b.setDisabled(true);
+          b.setButtonText("Loading…");
+          sympy.reset();
+          const t0 = Date.now();
+          // SymPy integrates, then its own answer is differentiated back: both must work.
+          const r = await sympy.check([
+            { type: "compute", expr: "integrate(x*exp(x), x)", name: "r1" },
+            { type: "derivative", f: "r1", var: "x", result: "x*exp(x)" },
+          ]);
+          const secs = ((Date.now() - t0) / 1000).toFixed(1);
+          if (r.length === 2 && r[0].ok && r[1].ok) new Notice(`SymPy works. It integrated x·eˣ to ${r[0].value} and confirmed the result by differentiating it (${secs}s).`, 10000);
+          else new Notice(`SymPy could not be used: ${sympy.status()}. Maths falls back to the model.`, 12000);
+          this.display();
+        }),
+      );
 
     new Setting(containerEl).setName("Token saving").setHeading();
     const toggle = (name: string, desc: string, key: "bankQuiz" | "codePlacement" | "smartRouting") =>

@@ -54,6 +54,7 @@ explanation: <1 or 2 lines: why, and the usual mistake>
 RULES
 
 - Write 4 to 10 subskills, ordered so prerequisites come first. Each must be something the learner can be tested on.
+- "prerequisites:" lists only the subskills this one cannot be learned without. Do not simply list the one before it: the app draws these as a graph and uses them to decide what to study first, so a chain where every subskill needs the previous one is right only when that is really so. Two subskills may share a prerequisite, and a subskill may have none.
 - Write 8 questions per subskill: three mcq whose wrong options are real misconceptions, three short, and two open that ask for a reason, a prediction or an error to find. Order them from easiest to hardest within the subskill, and make no two test the same fact.
 - A short answer must be checkable by exact match: one number, one expression or a few words, with no alternative phrasings.
 - Include "options:" only for mcq.

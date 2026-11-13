@@ -1,7 +1,8 @@
 import { Component, ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import { Usage, addUsage, usageLine, zeroUsage } from "./claude";
 import { Material, TurnResult } from "./engine";
-import { Chat, Grade, LearnerState, Mode, NextStep, Question, SrStats, Topic, answerText, dueCount, fmStr, mcqLetter, nextStep, progress, reviewQueue, sameShortAnswer, schedule, splitFrontmatter, ymd } from "./formats";
+import { Chat, Grade, LearnerState, Mode, NextStep, Question, SrStats, Topic, answerText, dueCount, fmStr, mcqLetter, nextStep, prereqMap, progress, reviewQueue, sameShortAnswer, schedule, splitFrontmatter, stepFor, ymd } from "./formats";
+import { drawGraph, layoutGraph, levelLabel } from "./graph";
 import type StudyTutorPlugin from "./main";
 import { TopicRef } from "./store";
 
@@ -34,6 +35,10 @@ export class TutorView extends ItemView {
   private draft = "";
   private lastUsage: Usage | null = null;
   private lastRoute = "";
+  /** What SymPy did on the last turn, for the usage line. */
+  private lastMaths = "";
+  /** The subskill picked in the concept graph. */
+  private picked: number | null = null;
   private sessionUsage = zeroUsage();
   private lastError = "";
   private lastChanges: string[] = [];
@@ -85,6 +90,11 @@ export class TutorView extends ItemView {
     this.kill?.();
   }
 
+  /** The concept graph is laid out to the sidebar's width, so it is redrawn when that changes. */
+  onResize(): void {
+    if (this.tab === "map" && this.bodyEl && Math.abs(this.bodyEl.clientWidth - this.graphWidth) > 24) this.render();
+  }
+
   private get today(): string {
     return ymd();
   }
@@ -132,6 +142,8 @@ export class TutorView extends ItemView {
     this.lastError = "";
     this.lastChanges = [];
     this.lastRoute = "";
+    this.lastMaths = "";
+    this.picked = null;
     if (dir) {
       try {
         this.topic = await this.plugin.store.loadTopic(dir);
@@ -212,7 +224,7 @@ export class TutorView extends ItemView {
     const hero = h.createDiv({ cls: "st-hero" });
     const ring = hero.createDiv({ cls: "st-ring", attr: { style: `--st-p:${pct}`, "aria-label": `${pct}% of the way to target level ${s.target}` } });
     ring.createDiv({ cls: "st-ring-num", text: `${pct}` });
-    const next = nextStep(s, this.today, this.sr ? this.sr.due : undefined);
+    const next = nextStep(s, this.today, this.sr ? this.sr.due : undefined, this.topic ? prereqMap(this.topic) : {});
     const info = hero.createDiv({ cls: "st-grow st-hero-info" });
     info.createDiv({ cls: "st-hero-kicker", text: `Next step · ${next.title}` });
     info.createDiv({ cls: "st-hero-detail", text: next.detail });
@@ -238,6 +250,11 @@ export class TutorView extends ItemView {
   private async follow(step: NextStep): Promise<void> {
     if (step.action === "review") return this.showTab("review");
     if (step.action === "done") return;
+    // The step names a subskill: make it the focus, so the lesson or the tutor starts there.
+    if (step.subskill && this.dir && this.state && step.subskill in this.state.names && this.state.focus !== step.subskill) {
+      this.state.focus = step.subskill;
+      await this.plugin.store.saveState(this.dir, this.state);
+    }
     this.tab = "chat";
     const sameMode = this.chat && this.mode === step.action;
     this.mode = step.action;
@@ -337,7 +354,7 @@ export class TutorView extends ItemView {
     const usage = body.createDiv({ cls: "st-usage st-meter" });
     const session = `Session: ${usageLine(this.sessionUsage)} over ${this.sessionUsage.calls} calls.`;
     if (this.lastUsage && this.lastUsage.calls === 0) usage.setText(`Last turn: marked by the plugin, no tokens used. ${session}`);
-    else if (this.lastUsage) usage.setText(`Last turn: ${usageLine(this.lastUsage)}${this.lastRoute ? ` · ${this.lastRoute}` : ""}. ${session}`);
+    else if (this.lastUsage) usage.setText(`Last turn: ${usageLine(this.lastUsage)}${this.lastRoute ? ` · ${this.lastRoute}` : ""}${this.lastMaths ? ` · ${this.lastMaths}` : ""}. ${session}`);
     else usage.setText("Token use appears here after each turn.");
     if (!this.busy) input.focus();
   }
@@ -408,6 +425,8 @@ export class TutorView extends ItemView {
       const used = r.rotationUsage ? addUsage(r.usage, r.rotationUsage) : r.usage;
       this.lastUsage = used;
       this.lastRoute = r.route && this.plugin.opts.smartRouting ? ROUTE_NOTE[r.route.route] : "";
+      const m = r.maths;
+      this.lastMaths = m && (m.computed || m.checked) ? `SymPy ${[m.computed ? `computed ${m.computed}` : "", m.checked ? `checked ${m.checked}` : ""].filter(Boolean).join(", ")}${m.corrected ? ", one draft rewritten" : ""}` : "";
       this.sessionUsage = addUsage(this.sessionUsage, used);
       this.lastChanges = r.changes;
       if (this.dir === dir) {
@@ -568,21 +587,77 @@ export class TutorView extends ItemView {
     const input = answerArea.createEl("textarea", { attr: { rows: q.type === "short" ? "1" : "3", placeholder: q.type === "short" ? "Type your answer" : "Answer in your head or type it here" } });
     const row = answerArea.createDiv({ cls: "st-row" });
     const check = row.createEl("button", { text: q.type === "short" ? "Check" : "Show answer", cls: "mod-cta" });
-    check.onclick = () => {
+    check.onclick = async () => {
       const typed = input.value;
-      if (q.type === "short" && sameShortAnswer(typed, q.answer)) reveal("Correct.", typed, "good");
-      else reveal(q.type === "short" && typed.trim() ? "That does not match exactly. Compare and grade yourself." : "", typed);
+      if (q.type === "short" && sameShortAnswer(typed, q.answer)) return reveal("Correct.", typed, "good");
+      if (q.type === "short" && typed.trim()) {
+        // Another form of the same expression (1/2 for 0.5): SymPy can tell, with no model call.
+        check.disabled = true;
+        const same = await this.plugin.engine.mathEquivalent(q.answer, typed).catch(() => null);
+        if (this.queue[0] !== q) return;
+        if (same !== null) return reveal(same ? "Correct. SymPy confirms your answer equals the expected one." : "Incorrect. SymPy finds your answer is not equal to the expected one.", typed, same ? "good" : "again");
+      }
+      reveal(q.type === "short" && typed.trim() ? "That does not match exactly. Compare and grade yourself." : "", typed);
     };
     input.focus();
   }
 
   // ---------- skill map ----------
 
+  private graphWidth = 0;
+
+  /** The concept graph: prerequisites above what they unlock, each box coloured by level. Drawn by plain code. */
+  private renderGraph(body: HTMLElement, s: LearnerState, topic: Topic): void {
+    if (!topic.subskills.length) return;
+    const card = body.createDiv({ cls: "st-card st-graph-card" });
+    const head = card.createDiv({ cls: "st-row" });
+    head.createDiv({ cls: "st-who st-grow", text: "Concept graph" });
+    const legend = head.createDiv({ cls: "st-g-legend", attr: { "aria-label": "Colour shows level, from not placed to level 5" } });
+    legend.createSpan({ cls: "st-g-legend-text", text: "new" });
+    for (const l of ["unset", "l0", "l1", "l2", "l3", "l4", "l5"]) legend.createSpan({ cls: `st-g-swatch st-g-${l}`, attr: { "aria-label": l === "unset" ? "not placed" : `level ${l[1]}` } });
+    legend.createSpan({ cls: "st-g-legend-text", text: "5" });
+
+    this.graphWidth = body.clientWidth;
+    const holder = card.createDiv({ cls: "st-graph-holder" });
+    // Laid out to the width actually available (jsdom and a hidden pane report none).
+    const graph = layoutGraph(topic, s, { width: holder.clientWidth || 312 });
+    if (this.picked !== null && !(this.picked in s.names)) this.picked = null;
+    drawGraph(holder, graph, s, this.picked, (n) => {
+      this.picked = this.picked === n ? null : n;
+      this.render();
+    });
+
+    const node = graph.nodes.find((x) => x.n === this.picked);
+    const info = card.createDiv({ cls: "st-g-info" });
+    if (!node) {
+      const lagging = graph.edges.filter((e) => e.lagging);
+      info.createDiv({ cls: "st-usage", text: lagging.length ? `Dashed arrows: ${lagging.length === 1 ? "a prerequisite is" : `${lagging.length} prerequisites are`} behind what is built on ${lagging.length === 1 ? "it" : "them"}. Select a box for details.` : "Arrows run from a prerequisite to what builds on it. Select a box for details." });
+      return;
+    }
+    const name = (n: number) => `${n}. ${s.names[n] ?? "?"} (${levelLabel(s.levels[n] ?? null)})`;
+    info.createDiv({ cls: "st-g-title", text: `${node.n}. ${node.name}` });
+    info.createDiv({ cls: "st-usage", text: `${node.level === null ? "Not placed yet" : `Level ${node.level} of ${s.target}`}${node.atTarget ? ", at target" : ""}${node.focus ? " · current focus" : ""}` });
+    if (node.prerequisites.length) info.createDiv({ cls: "st-usage", text: `Builds on: ${node.prerequisites.map(name).join("; ")}` });
+    if (node.unlocks.length) info.createDiv({ cls: "st-usage", text: `Leads to: ${node.unlocks.map(name).join("; ")}` });
+    const behind = graph.edges.filter((e) => e.to === node.n && e.lagging).map((e) => s.names[e.from]);
+    if (node.locked) info.createDiv({ cls: "st-g-warn", text: `Learn ${node.blockedBy.map((p) => s.names[p]).join(" and ")} first.` });
+    else if (behind.length) info.createDiv({ cls: "st-g-warn", text: `${behind.join(" and ")} ${behind.length === 1 ? "is" : "are"} behind this subskill. Strengthening ${behind.length === 1 ? "it" : "them"} will help here.` });
+    const row = info.createDiv({ cls: "st-row st-wrap" });
+    // Studying a locked subskill starts with what it is missing.
+    const target = node.locked ? node.blockedBy[0] : node.n;
+    const step = stepFor(s, target);
+    const go = row.createEl("button", { text: `${step.action === "teach" ? "Learn" : "Work on"} ${target === node.n ? "this" : s.names[target]}`, cls: "mod-cta" });
+    go.disabled = this.busy;
+    go.onclick = () => void this.follow(step);
+  }
+
   private renderMap(): void {
     const body = this.bodyEl;
     const s = this.state;
     if (!s || !this.topic || !this.dir) return;
     const dir = this.dir;
+
+    this.renderGraph(body, s, this.topic);
 
     const table = body.createEl("table", { cls: "st-table" });
     const hr = table.createEl("tr");

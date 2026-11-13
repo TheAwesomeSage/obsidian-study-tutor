@@ -134,6 +134,32 @@ async function main() {
   await tick();
   shots.push(["Skill map", view.contentEl.outerHTML]);
 
+  // A second topic whose subskills branch, to show the concept graph: one subskill picked, and
+  // one prerequisite (complex numbers) behind what was built on it (the Laplace transform).
+  const names: [string, string][] = [
+    ["Complex numbers", "none"],
+    ["Sinusoids and phasors", "1"],
+    ["Linear time-invariant systems", "none"],
+    ["Convolution", "3"],
+    ["Laplace transform", "1, 3"],
+    ["Transfer functions and poles", "5"],
+    ["Fourier series", "2"],
+    ["Frequency response and Bode plots", "6, 7"],
+  ];
+  const card = ["# Signals and systems", "", "## Overview", "How linear systems respond to signals.", "", "## Subskills", "", ...names.flatMap(([name, pre], i) => [`### ${i + 1}. ${name}`, `prerequisites: ${pre}`, "- A key claim.", ""])].join("\n");
+  const gdir = await plugin.store.saveCompiled({ title: "Signals and systems", fm: { source: "notes", subject: "none" }, topicBody: card, questionsBody: "### Q1\nsubskill: 1\ntype: short\nquestion: What is $|3+4j|$?\nanswer: 5\nexplanation: Pythagoras.", target: 4 });
+  const gs = await plugin.store.loadState(gdir, 4);
+  gs.levels = { 1: 2, 2: 4, 3: 5, 4: 3, 5: 3, 6: 1, 7: null, 8: null };
+  gs.focus = 5;
+  await plugin.store.saveState(gdir, gs);
+  plugin.data.activeTopic = gdir;
+  await view.reload();
+  await view.showTab("map");
+  view.picked = 5;
+  view.render();
+  await tick();
+  shots.push(["Concept graph", view.contentEl.outerHTML]);
+
   const css = nodefs.readFileSync("styles.css", "utf8");
   const panes = shots.map(([name, html]) => `<div><p class="cap">${name}</p><div class="pane">${html}</div></div>`).join("");
   const page = `<!doctype html><meta charset="utf-8"><title>Study Tutor preview</title><style>${BASE}${css}</style>` + Object.entries(THEMES).map(([, vars]) => `<div class="theme" style="${vars}">${panes}</div>`).join("");

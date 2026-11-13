@@ -88,7 +88,10 @@ export class Plugin {
   addCommand(c: any) {
     this.commands.push(c);
   }
-  addSettingTab() {}
+  settingTabs: any[] = [];
+  addSettingTab(tab: any) {
+    this.settingTabs.push(tab);
+  }
 }
 
 export class Component {
