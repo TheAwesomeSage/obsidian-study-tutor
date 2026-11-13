@@ -1,3 +1,5 @@
+import { Attempt, EVIDENCE_RULES, recordAttempt } from "./evidence";
+import { chooseAction, readSessionReply, sessionFor, SESSION_RULES } from "./session";
 // Orchestrates the three things that cost tokens: a chat turn, compiling a topic, and grading
 // one flashcard answer. No Obsidian imports, so it can be exercised from Node.
 
@@ -169,14 +171,24 @@ export class Engine {
       decision = { route: "standard", reason: "expression answer, checked by SymPy" };
       effort = s.effort || undefined;
     }
+    let session = sessionFor(chat, state);
+    const instruction = chooseAction(mode, state, topic, session);
+    if (mode === "auto" || mode === "teach") {
+      state.focus = instruction.focus;
+      session.action = instruction.action;
+      chat.fm.orchestration = instruction.reason;
+      await this.store.saveState(dir, state);
+    }
     const modeRules = await this.store.skill(modeFile(mode));
     const system = buildSystem({
-      core: await this.store.skill("core.md"),
+      core: `${await this.store.skill("core.md")}\n\n${SESSION_RULES}\n\n${EVIDENCE_RULES}`,
       subject: subjectName && subjectName !== "none" ? await this.store.skill(`subjects/${subjectName}.md`) : "",
       topicText: topicForPrompt(topic, state.focus, s.maxTopicWords),
       mode: verifying ? `${modeRules.trim()}\n\n---\n\n${(await this.store.skill("maths-check.md")).trim()}` : modeRules,
     });
-    const input = buildTurnInput({ state, today: this.today(), chat, attached: opts.attached, gaps: prereqGaps(state, prereqMap(topic)) });
+    const input = buildTurnInput({ state, today: this.today(), chat, attached: opts.attached, gaps: prereqGaps(state, prereqMap(topic)) })
+      + `\n\n# Cross-topic prerequisites\n${await this.store.linkedContext(state)}\n\n# Session record\n${JSON.stringify(session)}\n`
+      + ((mode === "auto" || mode === "teach") ? `Instructional action: ${instruction.action}. ${instruction.reason}` : "");
     let res = await this.call({ model, effort, system, input, onSpawn: opts.onSpawn });
     let usage = res.usage;
 
@@ -227,30 +239,39 @@ export class Engine {
       }
     }
 
+    let marked: Attempt | null = null;
+    parsed.text = parsed.text.replace(/<attempt>([\s\S]*?)<\/attempt>/g, (_, raw) => {
+      try {
+        const a = JSON.parse(raw);
+        if (lastMsg?.role === "you" && session.pendingQuestion && a.skill in state.names && ["correct", "partial", "incorrect", "ungraded"].includes(a.result)) {
+          const confidence = /^confidence\s*:\s*(100|\d{1,2})%/i.exec(lastMsg.text);
+          marked = { id: `${chatPath}:${chat.messages.length}`, skill: Number(a.skill), question: session.pendingQuestion, answer: lastMsg.text, timestamp: new Date().toISOString(), mode, result: report.disagreed ? "ungraded" : a.result, confidence: typeof chat.fm.confidence === "number" ? chat.fm.confidence : confidence ? Number(confidence[1]) / 100 : null, assisted: a.assisted !== false || session.helpGiven.length > 0, transfer: a.transfer === true, source: "model", error: typeof a.error === "string" ? a.error : "" };
+          state.attempts = recordAttempt(state.attempts ?? [], marked);
+        }
+      } catch { /* An invalid assessment cannot create evidence. */ }
+      return "";
+    }).trim();
     // Levels are never changed on the word of the cheap model, nor on a turn SymPy disputes.
+    if (parsed.update?.levels) {
+      const eligible = state.attempts?.find(a => a.id === `${chatPath}:${chat.messages.length}`);
+      parsed.update.levels = eligible && eligible.result !== "ungraded" ? Object.fromEntries(Object.entries(parsed.update.levels).filter(([key]) => Number(key) === eligible.skill)) : {};
+    }
     const changes = parsed.update ? applyStateUpdate(state, parsed.update, mode !== "expert" && decision.route !== "simple" && !report.disagreed) : [];
-    if (changes.length) await this.store.saveState(dir, state);
+    if (changes.length || marked) await this.store.saveState(dir, state);
     // The outcome is saved with the message, so the learner sees it and the tutor reads it next turn.
-    const reply = (parsed.text || "(empty reply)") + (report.line ? `\n\n${report.line}` : "");
+    const continuation = readSessionReply(parsed.text, session);
+    session = continuation.record;
+    session.unresolvedMisconceptions = [...state.misconceptions];
+    const reply = (continuation.text || "(empty reply)") + (report.line ? `\n\n${report.line}` : "");
     chat.messages.push({ role: "tutor", text: reply });
+    session.exactExcerpts = chat.messages.slice(-2).map(m => `${m.role}: ${m.text}`);
+    chat.fm.session = JSON.stringify(session);
     await this.store.saveChat(chatPath, chat);
 
     const out: TurnResult = { reply, changes, state, usage, route: { ...decision, model } };
     if (verifying) out.maths = { computed, checked: parsed.claims.length, disputed: report.disagreed, corrected };
-    if (chatWords(chat) > s.maxChatWords && chat.messages.length > 4) {
-      try {
-        const sum = await this.call({
-          model: s.utilityModel,
-          system: utilityPrompt(await this.store.skill("utility.md"), "summarise"),
-          input: [chat.summary ? `Summary of earlier parts:\n${chat.summary}\n` : "", "Chat:", ...chat.messages.map((m) => `${m.role === "you" ? "LEARNER" : "TUTOR"}: ${m.text}`)].join("\n"),
-        });
-        if (sum.text.trim()) {
-          out.rotatedTo = await this.store.rotateChat(chatPath, chat, sum.text.trim());
-          out.rotationUsage = sum.usage;
-        }
-      } catch {
-        /* Rotation is an optimisation. If it fails the chat simply stays in this file. */
-      }
+    if (session.completedStep && chatWords(chat) > s.maxChatWords && chat.messages.length > 4) {
+      out.rotatedTo = await this.store.rotateChat(chatPath, chat, JSON.stringify(session, null, 2));
     }
     return out;
   }
@@ -462,14 +483,20 @@ export class Engine {
             usage = g.usage;
           }
         }
+        state.attempts = recordAttempt(state.attempts ?? [], {
+          id: `${chatPath}:${chat.messages.length}:${pending.id}`, skill: pending.subskill,
+          question: pending.question, answer, timestamp: new Date().toISOString(), mode: "quiz",
+          result: grade === "again" ? "incorrect" : grade === "hard" ? "partial" : "correct",
+          confidence: typeof chat.fm.confidence === "number" ? chat.fm.confidence : null, assisted: false, transfer: false, source: "bank", error: note,
+        });
         if (!s.externalFlashcards) state.cards[pending.id] = schedule(state.cards[pending.id], grade, today);
         if (pending.subskill in state.names) {
           const b = state.bank[pending.subskill] ?? (state.bank[pending.subskill] = { right: 0, total: 0 });
           b.total += 1;
-          if (grade !== "again") b.right += 1;
+          if (grade === "good" || grade === "easy") b.right += 1;
         }
         await this.store.saveState(dir, state);
-        const right = fmNum(chat.fm, "right", 0) + (grade === "again" ? 0 : 1);
+        const right = fmNum(chat.fm, "right", 0) + (grade === "good" || grade === "easy" ? 1 : 0);
         const total = fmNum(chat.fm, "total", 0) + 1;
         chat.fm.right = right;
         chat.fm.total = total;
@@ -542,7 +569,8 @@ export class Engine {
         o = {};
       }
     }
-    const grade = (["again", "hard", "good", "easy"].includes(String(o?.grade)) ? o!.grade : "again") as Grade;
+    if (!["again", "hard", "good", "easy"].includes(String(o?.grade))) throw new ClaudeError("The answer could not be graded. It remains ungraded. Retry to check it.");
+    const grade = o!.grade as Grade;
     return { grade, feedback: String(o?.feedback ?? ""), usage: res.usage };
   }
 }

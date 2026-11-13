@@ -1,7 +1,8 @@
+import { Attempt, skillEvidence } from "./evidence";
 // Parsing and serialising of the plugin's markdown files. Pure functions, no Obsidian imports.
 
-export type Mode = "tutor" | "teach" | "quiz" | "expert";
-export const MODES: Mode[] = ["tutor", "teach", "quiz", "expert"];
+export type Mode = "auto" | "tutor" | "teach" | "quiz" | "expert";
+export const MODES: Mode[] = ["auto", "tutor", "teach", "quiz", "expert"];
 export type SourceMode = "notes" | "spec" | "subject";
 export type FmValue = string | number | string[];
 export type Frontmatter = Record<string, FmValue>;
@@ -280,6 +281,9 @@ export interface CardSched {
   lapses: number;
 }
 export interface LearnerState {
+  attempts?: Attempt[];
+  links?: { skill: number; topic: string; prerequisite: number }[];
+  priorities?: Record<number, number>;
   topic: string;
   target: number;
   focus: number | null;
@@ -304,6 +308,20 @@ export function newState(topic: Topic, target: number, previous?: LearnerState):
   if (previous) {
     s.target = previous.target;
     s.misconceptions = [...previous.misconceptions];
+    const remap = (old: number) => topic.subskills.find(sk => sk.name.toLowerCase() === previous.names[old]?.toLowerCase())?.n;
+    s.attempts = (previous.attempts ?? []).flatMap(a => {
+      const skill = remap(a.skill);
+      return skill === undefined ? [] : [{ ...a, skill }];
+    });
+    s.links = (previous.links ?? []).flatMap(link => {
+      const skill = remap(link.skill);
+      return skill === undefined ? [] : [{ ...link, skill }];
+    });
+    s.priorities = {};
+    for (const [key, value] of Object.entries(previous.priorities ?? {})) {
+      const skill = remap(Number(key));
+      if (skill !== undefined) s.priorities[skill] = value;
+    }
   }
   return s;
 }
@@ -328,6 +346,9 @@ export function serializeState(s: LearnerState, today: string): string {
     new_date: s.newDate || today,
     new_count: s.newCount,
     updated: today,
+    evidence: JSON.stringify(s.attempts ?? []),
+    links: JSON.stringify(s.links ?? []),
+    priorities: JSON.stringify(s.priorities ?? {}),
   };
   const cell = (t: string) => t.replace(/\|/g, "/");
   const lines = ["## Skill map", "", "| # | Subskill | Level | Bank |", "| --- | --- | --- | --- |"];
@@ -355,6 +376,13 @@ export function parseState(md: string): LearnerState {
     newDate: fmStr(fm, "new_date"),
     newCount: fmNum(fm, "new_count", 0),
   };
+  try {
+    const links = JSON.parse(fmStr(fm, "links", "[]"));
+    if (Array.isArray(links)) s.links = links.filter(l => l && Number.isInteger(l.skill) && typeof l.topic === "string" && Number.isInteger(l.prerequisite));
+    const priorities = JSON.parse(fmStr(fm, "priorities", "{}"));
+    if (priorities && typeof priorities === "object" && !Array.isArray(priorities)) s.priorities = priorities;
+  } catch { /* Optional metadata can be repaired without losing the learner state. */ }
+  try { const evidence = JSON.parse(fmStr(fm, "evidence", "[]")); if (Array.isArray(evidence)) s.attempts = evidence.filter(a => a && typeof a.id === "string" && typeof a.timestamp === "string" && typeof a.question === "string"); } catch { s.attempts = []; }
   for (const r of tableRows(section(body, "Skill map"))) {
     const n = Number(r[0]);
     if (!n) continue;
@@ -418,6 +446,12 @@ export function applyStateUpdate(s: LearnerState, u: StateUpdate, allowLevels = 
       const n = Number(k);
       const lvl = Number(v);
       if (!(n in s.names) || !Number.isInteger(lvl) || lvl < 0 || lvl > 5) continue;
+      const current = s.levels[n] ?? 0;
+      if (lvl > current) {
+        const evidence = skillEvidence(s.attempts ?? [], n);
+        if (evidence.correct < 2 || (lvl >= 4 && !evidence.delayedTransfer)) continue;
+        if (lvl > current + 1) continue;
+      }
       if (s.levels[n] !== lvl) {
         changes.push(`${s.names[n]}: ${s.levels[n] ?? "unset"} → ${lvl}`);
         s.levels[n] = lvl;
@@ -694,7 +728,7 @@ export function nextStep(s: LearnerState, today: string, dueOverride?: number, p
     const first = foundationFor(s, pre, untaught[0], 2);
     return { action: "teach", title: "Learn", detail: `Take a lesson on ${s.names[first]}${because(first, untaught[0])}.`, subskill: first };
   }
-  const unpractised = ns.filter((n) => (s.bank[n]?.total ?? 0) < 2);
+  const unpractised = ns.filter((n) => (s.bank[n]?.right ?? 0) < 2);
   if (unpractised.length) return { action: "quiz", title: "Practise", detail: `Quiz yourself on ${s.names[unpractised[0]]}. Most answers are marked without tokens.`, subskill: unpractised[0] };
   const below = ns.filter((n) => (lvl(n) ?? 0) < s.target).sort((a, b) => (lvl(a) ?? 0) - (lvl(b) ?? 0));
   if (below.length) {

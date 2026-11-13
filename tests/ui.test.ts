@@ -76,8 +76,8 @@ test("plugin loads, chats, reviews and shows the skill map", async () => {
       openLinkText: async (href: string) => {
         opened.push(href);
       },
-      getRightLeaf: () => {
-        const leaf: any = { app, view: null };
+      getLeaf: () => {
+        const leaf: any = { app, view: null, getRoot: () => app.workspace.rootSplit };
         leaf.setViewState = async ({ type }: { type: string }) => {
           leaf.view = (plugin as any).viewCreators[type](leaf);
           leaves.push(leaf);
@@ -119,9 +119,9 @@ test("plugin loads, chats, reviews and shows the skill map", async () => {
   await tick(60);
   assert.match($(root, ".st-messages").textContent, /Is \$f\(x\)=x\+1\$ linear\?/);
   assert.ok(!/<state>/.test(root.textContent), "the hidden state line is never shown");
-  assert.match(root.textContent, /Skill map updated: focus → Definition of a linear map/);
-  assert.match(calls[0].system, /# Tutor core[\s\S]*# Subject card: linear-algebra[\s\S]*# Topic card[\s\S]*# Mode: Socratic tutor/);
-  assert.match(calls[0].input, /just opened this chat\. Begin\.$/);
+  assert.match(root.textContent, /Gather evidence before selecting difficulty/);
+  assert.match(calls[0].system, /# Tutor core[\s\S]*# Subject card: linear-algebra[\s\S]*# Topic card[\s\S]*# Mode: Adaptive study guide/);
+  assert.match(calls[0].input, /just opened this chat\. Begin\./);
   assert.equal(calls[0].model, "sonnet");
 
   const input = $(root, ".st-composer textarea");
@@ -129,11 +129,11 @@ test("plugin loads, chats, reviews and shows the skill map", async () => {
   button(root, "Send").click();
   await tick(60);
   assert.equal($$(root, ".st-msg").length, 3);
-  assert.match(calls[1].input, /LEARNER: Yes, it is linear\.[\s\S]*Reply to the learner's last message\.$/);
+  assert.match(calls[1].input, /LEARNER: Yes, it is linear\.[\s\S]*Reply to the learner's last message\./);
   assert.equal(calls[1].system, calls[0].system, "the system prompt is identical between turns, so it is cached");
   assert.match(root.textContent, /Last turn: 4\.0k tokens in \(3\.0k from cache\)/);
   const state1 = parseState(await fs.read(`${dir}/state.md`));
-  assert.equal(state1.levels[1], 2);
+  assert.equal(state1.levels[1], null, "a level proposal without marked evidence is ignored");
   assert.deepEqual(state1.misconceptions, ["thinks translation is linear"]);
   const chats = await plugin.store.listChats(dir);
   assert.equal(chats.length, 1);
@@ -204,7 +204,9 @@ test("plugin loads, chats, reviews and shows the skill map", async () => {
   assert.deepEqual(state2.bank[1], { right: 1, total: 1 });
   assert.deepEqual(state2.bank[2], { right: 1, total: 2 });
   assert.equal(state2.newCount, 3);
-  assert.equal(state2.levels[1], 2, "reviewing does not disturb levels");
+  assert.equal(state2.levels[1], null, "reviewing does not invent mastery");
+  state2.levels[1] = 2; // Existing saved levels remain visible in the graph.
+  await plugin.store.saveState(dir, state2);
 
   // Skill map and extras.
   await view.showTab("map");

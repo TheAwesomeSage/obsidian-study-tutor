@@ -125,6 +125,50 @@ export class Store {
     return parseTopic(await this.fs.read(`${dir}/topic.md`));
   }
 
+  async addPrerequisite(dir: string, state: LearnerState, link: { skill: number; topic: string; prerequisite: number }): Promise<void> {
+    const topics = await this.listTopics();
+    const edges = new Map<string, string[]>();
+    const key = (topic: string, skill: number) => `${topic}#${skill}`;
+    for (const ref of topics) {
+      const topic = await this.loadTopic(ref.dir);
+      const saved = ref.dir === dir ? state : await this.loadState(ref.dir, state.target);
+      for (const sub of topic.subskills) edges.set(key(ref.dir, sub.n), sub.prerequisites.map(n => key(ref.dir, n)));
+      for (const edge of saved.links ?? []) {
+        const source = key(ref.dir, edge.skill);
+        edges.set(source, [...(edges.get(source) ?? []), key(edge.topic, edge.prerequisite)]);
+      }
+    }
+    const source = key(dir, link.skill);
+    const destination = key(link.topic, link.prerequisite);
+    if (!edges.has(source) || !edges.has(destination)) throw new Error("Choose an existing topic and skill.");
+    const visited = new Set<string>();
+    const reaches = (node: string): boolean => {
+      if (node === source) return true;
+      if (visited.has(node)) return false;
+      visited.add(node);
+      return (edges.get(node) ?? []).some(reaches);
+    };
+    if (reaches(destination)) throw new Error("This prerequisite would create a circular dependency.");
+    state.links = [...(state.links ?? []), link];
+    await this.saveState(dir, state);
+  }
+
+  async linkedContext(state: LearnerState): Promise<string> {
+    const topics = await this.listTopics();
+    const sections: string[] = [];
+    for (const link of state.links ?? []) {
+      if (link.skill !== state.focus) continue;
+      const ref = topics.find(t => t.dir === link.topic);
+      if (!ref) continue;
+      const topic = await this.loadTopic(ref.dir);
+      const prerequisite = topic.subskills.find(s => s.n === link.prerequisite);
+      if (!prerequisite) continue;
+      const other = await this.loadState(ref.dir, state.target);
+      sections.push(`External prerequisite [[${ref.dir}/topic]]: ${prerequisite.name}, level ${other.levels[prerequisite.n] ?? "unknown"}.\n${prerequisite.section}`);
+    }
+    return sections.join("\n\n");
+  }
+
   async loadQuestions(dir: string): Promise<Question[]> {
     const p = `${dir}/questions.md`;
     return (await this.fs.exists(p)) ? parseQuestions(await this.fs.read(p)) : [];
@@ -204,6 +248,10 @@ export class Store {
 
   async saveChat(path: string, chat: Chat): Promise<void> {
     await this.writeFile(path, serializeChat(chat));
+    if (chat.fm.session) {
+      const memoryPath = path.replace("/chats/", "/sessions/");
+      await this.writeFile(memoryPath, `# Study session\n\nChat: [[${path.replace(/\.md$/, "")}]]\n\n` + String(chat.fm.session) + "\n");
+    }
   }
 
   async newChat(dir: string, topicTitle: string, mode: Mode, now: Date = new Date()): Promise<string> {

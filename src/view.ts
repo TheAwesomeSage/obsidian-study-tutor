@@ -1,3 +1,4 @@
+import { recordAttempt, skillEvidence } from "./evidence";
 import { Component, ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf, setIcon } from "obsidian";
 import { Usage, addUsage, usageLine, zeroUsage } from "./claude";
 import { Material, TurnResult } from "./engine";
@@ -12,6 +13,7 @@ type Tab = "chat" | "review" | "map";
 
 /** The modes in the order of the guided path: learn it, practise it, master it; ask at any time. */
 const PATH: { mode: Mode; label: string; who: string; icon: string; step: string; start: string; hint: string }[] = [
+  { mode: "auto", label: "Adaptive", who: "Study guide", icon: "compass", step: "", start: "Start session", hint: "The guide chooses teaching, diagnosis and practice while preserving your current task." },
   { mode: "teach", label: "Learn", who: "Teacher", icon: "book-open", step: "1", start: "Start lesson", hint: "Lessons for material you have not met: why it matters, the idea, a worked example, a diagram where it helps, then a problem to try." },
   { mode: "quiz", label: "Practise", who: "Quizzer", icon: "zap", step: "2", start: "Start quiz", hint: "Strict questions on your weakest subskills, from the question bank first. The plugin marks most answers itself, so most turns use no tokens." },
   { mode: "tutor", label: "Master", who: "Tutor", icon: "target", step: "3", start: "Start", hint: "Socratic tutoring: one question at a time, and a level only goes up when you have shown it. The most thorough mode, and the one that uses the most tokens." },
@@ -27,7 +29,9 @@ export class TutorView extends ItemView {
   private state: LearnerState | null = null;
   private chatPath: string | null = null;
   private chat: Chat | null = null;
-  private mode: Mode = "tutor";
+  private mode: Mode = "auto";
+  private confidence: number | null = null;
+  private graphColour: "level" | "evidence" = "level";
   private tab: Tab = "chat";
   private busy = false;
   private kill: (() => void) | null = null;
@@ -284,6 +288,7 @@ export class TutorView extends ItemView {
 
     const bar = body.createDiv({ cls: "st-row st-toolbar" });
     bar.createDiv({ cls: "st-grow st-mode-name", text: here.who });
+    if (this.chat?.fm.orchestration) body.createDiv({ cls: "st-usage", text: String(this.chat.fm.orchestration) });
     const bankQuiz = this.mode === "quiz" && this.plugin.opts.bankQuiz;
     const chat = this.chat;
     const last = chat?.messages[chat.messages.length - 1];
@@ -345,6 +350,11 @@ export class TutorView extends ItemView {
     box.checked = this.attach;
     box.onchange = () => (this.attach = box.checked);
     label.appendText(" Attach the open note");
+    const confidence = row.createEl("select", { attr: { "aria-label": "Confidence before checking" } });
+    confidence.createEl("option", { value: "", text: "Confidence…" });
+    for (const value of [0, 25, 50, 75, 100]) confidence.createEl("option", { value: String(value), text: `${value}%` });
+    confidence.value = this.confidence === null ? "" : String(this.confidence * 100);
+    confidence.onchange = () => { this.confidence = confidence.value === "" ? null : Number(confidence.value) / 100; };
     const sendBtn = row.createEl("button", { text: this.busy ? "Stop" : "Send", cls: this.busy ? "mod-warning st-send" : "mod-cta st-send" });
     sendBtn.onclick = () => {
       if (this.busy) this.kill?.();
@@ -412,6 +422,9 @@ export class TutorView extends ItemView {
     try {
       if (!this.chatPath || !this.chat) await this.openChat(await this.plugin.store.newChat(dir, this.topic.title, this.mode));
       const chatPath = this.chatPath!;
+      this.chat!.fm.confidence = this.confidence === null ? "" : this.confidence;
+      await this.plugin.store.saveChat(chatPath, this.chat!);
+      this.confidence = null;
       const attached = await this.attachedNote();
       this.attach = false;
       // Start the turn first: it decides its path from the chat as it stood before this message.
@@ -466,6 +479,11 @@ export class TutorView extends ItemView {
     if (!this.dir || !this.state) return;
     const s = this.state;
     const isNew = !s.cards[q.id];
+    s.attempts = recordAttempt(s.attempts ?? [], {
+      id: `review:${q.id}:${Date.now()}`, skill: q.subskill, question: q.question, answer: "Self-rated review",
+      timestamp: new Date().toISOString(), mode: "review", result: grade === "again" ? "incorrect" : grade === "hard" ? "partial" : "correct",
+      confidence: null, assisted: true, transfer: false, source: "self", error: "",
+    });
     s.cards[q.id] = schedule(s.cards[q.id], grade, this.today);
     if (isNew) {
       if (s.newDate !== this.today) {
@@ -478,7 +496,7 @@ export class TutorView extends ItemView {
       const b = s.bank[q.subskill] ?? (s.bank[q.subskill] = { right: 0, total: 0 });
       if (q.subskill in s.names) {
         b.total += 1;
-        if (grade !== "again") b.right += 1;
+        if (grade === "good" || grade === "easy") b.right += 1;
       }
     }
     await this.plugin.store.saveState(this.dir, s);
@@ -612,6 +630,11 @@ export class TutorView extends ItemView {
     const card = body.createDiv({ cls: "st-card st-graph-card" });
     const head = card.createDiv({ cls: "st-row" });
     head.createDiv({ cls: "st-who st-grow", text: "Concept graph" });
+    const colours = head.createEl("select", { attr: { "aria-label": "Graph colour" } });
+    colours.createEl("option", { value: "level", text: "Skill level" });
+    colours.createEl("option", { value: "evidence", text: "Estimated success" });
+    colours.value = this.graphColour;
+    colours.onchange = () => { this.graphColour = colours.value as "level" | "evidence"; this.render(); };
     const legend = head.createDiv({ cls: "st-g-legend", attr: { "aria-label": "Colour shows level, from not placed to level 5" } });
     legend.createSpan({ cls: "st-g-legend-text", text: "new" });
     for (const l of ["unset", "l0", "l1", "l2", "l3", "l4", "l5"]) legend.createSpan({ cls: `st-g-swatch st-g-${l}`, attr: { "aria-label": l === "unset" ? "not placed" : `level ${l[1]}` } });
@@ -625,7 +648,7 @@ export class TutorView extends ItemView {
     drawGraph(holder, graph, s, this.picked, (n) => {
       this.picked = this.picked === n ? null : n;
       this.render();
-    });
+    }, this.graphColour);
 
     const node = graph.nodes.find((x) => x.n === this.picked);
     const info = card.createDiv({ cls: "st-g-info" });
@@ -634,6 +657,9 @@ export class TutorView extends ItemView {
       info.createDiv({ cls: "st-usage", text: lagging.length ? `Dashed arrows: ${lagging.length === 1 ? "a prerequisite is" : `${lagging.length} prerequisites are`} behind what is built on ${lagging.length === 1 ? "it" : "them"}. Select a box for details.` : "Arrows run from a prerequisite to what builds on it. Select a box for details." });
       return;
     }
+    const evidence = skillEvidence(s.attempts ?? [], node.n);
+    info.createDiv({ cls: "st-usage", text: `Independent questions: ${evidence.count}. Correct: ${evidence.correct}. Estimated success: ${evidence.estimate === null ? "unknown" : Math.round(evidence.estimate * 100) + "% (provisional)"}. Delayed transfer: ${evidence.delayedTransfer ? "demonstrated" : "awaiting evidence"}.` });
+    if (evidence.brier !== null) info.createDiv({ cls: "st-usage", text: `Confidence calibration (Brier): ${evidence.brier.toFixed(3)}. Lower is better.` });
     const name = (n: number) => `${n}. ${s.names[n] ?? "?"} (${levelLabel(s.levels[n] ?? null)})`;
     info.createDiv({ cls: "st-g-title", text: `${node.n}. ${node.name}` });
     info.createDiv({ cls: "st-usage", text: `${node.level === null ? "Not placed yet" : `Level ${node.level} of ${s.target}`}${node.atTarget ? ", at target" : ""}${node.focus ? " Â· current focus" : ""}` });
@@ -642,6 +668,44 @@ export class TutorView extends ItemView {
     const behind = graph.edges.filter((e) => e.to === node.n && e.lagging).map((e) => s.names[e.from]);
     if (node.locked) info.createDiv({ cls: "st-g-warn", text: `Learn ${node.blockedBy.map((p) => s.names[p]).join(" and ")} first.` });
     else if (behind.length) info.createDiv({ cls: "st-g-warn", text: `${behind.join(" and ")} ${behind.length === 1 ? "is" : "are"} behind this subskill. Strengthening ${behind.length === 1 ? "it" : "them"} will help here.` });
+    const priority = info.createEl("input", { type: "number", attr: { min: "0.1", max: "5", step: "0.1", "aria-label": "Study priority weight" } });
+    priority.value = String(s.priorities?.[node.n] ?? 1);
+    info.createSpan({ text: " Study priority (0.1 to 5)" });
+    priority.onchange = async () => {
+      const value = Number(priority.value);
+      if (!Number.isFinite(value) || value < 0.1 || value > 5 || !this.dir) return;
+      s.priorities = { ...s.priorities, [node.n]: value };
+      await this.plugin.store.saveState(this.dir, s);
+    };
+    for (const link of (s.links ?? []).filter(l => l.skill === node.n)) {
+      const linkRow = info.createDiv({ cls: "st-row" });
+      const open = linkRow.createEl("button", { text: `${this.topics.find(t => t.dir === link.topic)?.title ?? link.topic}: skill ${link.prerequisite}` });
+      open.onclick = () => void this.selectTopic(link.topic);
+      const remove = linkRow.createEl("button", { text: "Remove link" });
+      remove.onclick = async () => { if (!this.dir) return; s.links = (s.links ?? []).filter(l => l !== link); await this.plugin.store.saveState(this.dir, s); this.render(); };
+    }
+    const links = info.createDiv({ cls: "st-row" });
+    const other = links.createEl("select", { attr: { "aria-label": "Prerequisite topic" } });
+    other.createEl("option", { value: "", text: "Link prerequisite topic" });
+    for (const t of this.topics.filter(t => t.dir !== this.dir)) other.createEl("option", { value: t.dir, text: t.title });
+    const skill = links.createEl("select", { attr: { "aria-label": "Prerequisite skill" } });
+    other.onchange = async () => {
+      skill.empty();
+      if (!other.value) return;
+      const topic = await this.plugin.store.loadTopic(other.value);
+      for (const sub of topic.subskills) skill.createEl("option", { value: String(sub.n), text: sub.name });
+    };
+    const add = links.createEl("button", { text: "Add link" });
+    add.onclick = async () => {
+      if (!this.dir || !other.value || !skill.value) return;
+      const link = { skill: node.n, topic: other.value, prerequisite: Number(skill.value) };
+      if (!(s.links ?? []).some(l => l.skill === link.skill && l.topic === link.topic && l.prerequisite === link.prerequisite)) {
+        try {
+          await this.plugin.store.addPrerequisite(this.dir, s, link);
+          this.render();
+        } catch (error) { new Notice((error as Error).message); }
+      }
+    };
     const row = info.createDiv({ cls: "st-row st-wrap" });
     // Studying a locked subskill starts with what it is missing.
     const target = node.locked ? node.blockedBy[0] : node.n;

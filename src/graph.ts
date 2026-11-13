@@ -1,3 +1,4 @@
+import { skillEvidence } from "./evidence";
 // The concept graph: a topic's subskills laid out by what depends on what, coloured by level.
 // Built from the topic card and the learner state alone, so drawing it costs no tokens.
 // No Obsidian imports: the layout is plain arithmetic and the drawing is plain SVG.
@@ -215,7 +216,7 @@ export function describeNode(n: GraphNode, names: Record<number, string>, target
  * Draws the graph as SVG inside `parent`. Colours come from CSS classes (st-g-l0 … st-g-l5,
  * st-g-unset), so the theme decides them. Clicking or pressing Enter on a box calls `onSelect`.
  */
-export function drawGraph(parent: HTMLElement, g: Graph, s: LearnerState, selected: number | null, onSelect: (n: number) => void): SVGElement {
+export function drawGraph(parent: HTMLElement, g: Graph, s: LearnerState, selected: number | null, onSelect: (n: number) => void, colour: "level" | "evidence" = "level"): SVGElement {
   const doc = parent.ownerDocument;
   const svg = el(doc, "svg", { class: "st-graph", width: g.width, height: g.height, viewBox: `0 0 ${g.width} ${g.height}`, role: "group", "aria-label": "Concept graph: subskills by prerequisite, coloured by level" });
   const defs = el(doc, "defs", {});
@@ -237,9 +238,11 @@ export function drawGraph(parent: HTMLElement, g: Graph, s: LearnerState, select
   }
 
   for (const n of g.nodes) {
-    const cls = ["st-g-node", n.level === null ? "st-g-unset" : `st-g-l${n.level}`, n.locked ? "is-locked" : "", n.focus ? "is-focus" : "", n.n === selected ? "is-selected" : ""].filter(Boolean).join(" ");
+    const evidence = skillEvidence(s.attempts ?? [], n.n);
+    const shade = colour === "evidence" ? (evidence.estimate === null ? "st-g-unset" : `st-g-l${Math.round(evidence.estimate * 5)}`) : (n.level === null ? "st-g-unset" : `st-g-l${n.level}`);
+    const cls = ["st-g-node", shade, n.locked ? "is-locked" : "", n.focus ? "is-focus" : "", n.n === selected ? "is-selected" : ""].filter(Boolean).join(" ");
     const group = el(doc, "g", { class: cls, transform: `translate(${n.x} ${n.y})`, tabindex: 0, role: "button", "aria-label": describeNode(n, s.names, s.target), "aria-pressed": n.n === selected ? "true" : "false" });
-    group.appendChild(el(doc, "title", {}, describeNode(n, s.names, s.target)));
+    group.appendChild(el(doc, "title", {}, describeNode(n, s.names, s.target) + ` Independent questions: ${evidence.count}. Estimate: ${evidence.estimate === null ? "unknown" : Math.round(evidence.estimate * 100) + "%"}.`));
     group.appendChild(el(doc, "rect", { class: "st-g-box", x: 0.5, y: 0.5, width: n.w - 1, height: n.h - 1, rx: 8 }));
     group.appendChild(el(doc, "text", { class: "st-g-num", x: 8, y: 14 }, n.focus ? `${n.n} · focus` : String(n.n)));
     group.appendChild(el(doc, "text", { class: "st-g-level", x: n.w - 8, y: 14, "text-anchor": "end" }, n.level === null ? "–" : `L${n.level}${n.atTarget ? " ✓" : ""}`));

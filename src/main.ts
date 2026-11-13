@@ -149,10 +149,16 @@ export default class StudyTutorPlugin extends Plugin {
     const { workspace } = this.app;
     let leaf = workspace.getLeavesOfType(VIEW_TYPE)[0];
     if (!leaf) {
-      const right = workspace.getRightLeaf(false);
+      const right = workspace.getLeaf("tab");
       if (!right) return null;
       leaf = right;
       await leaf.setViewState({ type: VIEW_TYPE, active: true });
+    }
+    if (leaf.getRoot() !== workspace.rootSplit) {
+      const previous = leaf;
+      leaf = workspace.getLeaf("tab");
+      await leaf.setViewState({ type: VIEW_TYPE, active: true });
+      previous.detach();
     }
     await workspace.revealLeaf(leaf);
     return leaf.view instanceof TutorView ? leaf.view : null;

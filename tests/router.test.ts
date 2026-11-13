@@ -269,6 +269,8 @@ test("the next step follows learn, practise, master", () => {
   s.levels = { 1: 2, 2: 2 };
   assert.equal(F.nextStep(s, day).action, "quiz");
   s.bank = { 1: { right: 2, total: 2 }, 2: { right: 1, total: 2 } };
+  assert.equal(F.nextStep(s, day).action, "quiz", "partial practice does not establish readiness");
+  s.bank[2].right = 2;
   const master = F.nextStep(s, day);
   assert.equal(master.action, "tutor");
   assert.match(master.detail, /level 2 of 4/);

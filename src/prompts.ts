@@ -25,6 +25,8 @@ export function splitSubjects(md: string): Record<string, string> {
 /** Every skill file the plugin ships, keyed by its path under the vault's _skills folder. */
 export const BUNDLED: Record<string, string> = {
   "core.md": coreMd,
+  "mode-auto.md": `# Mode: Adaptive study guide
+Use the instructional action selected by the app. Diagnose with a short question, explain unfamiliar material with a worked example, offer graduated help during guided practice, and use fresh problems for independent practice and transfer. Keep one instructional step active until resolved. When there is sufficient evidence, suggest the next skill and explain why. The learner can choose to continue, switch to Learn, or ask directly. Never infer mastery from confidence or agreement.`,
   "mode-tutor.md": tutorMd,
   "mode-teach.md": teachMd,
   "summary.md": summaryMd,
@@ -47,7 +49,15 @@ export function topicForPrompt(topic: Topic, focus: number | null, maxWords: num
   if (words(topic.body) <= maxWords) return topic.body;
   const outline = topic.subskills.map((s) => `${s.n}. ${s.name}${s.prerequisites.length ? ` (needs ${s.prerequisites.join(", ")})` : ""}`).join("\n");
   const current = topic.subskills.find((s) => s.n === focus) ?? topic.subskills[0];
-  return [`# ${topic.title}`, "", topic.overview, "", "## Subskills (outline; only the focus subskill is shown in full)", outline, "", "## Focus subskill", current ? current.section : ""].join("\n");
+  const needed = new Set<number>();
+  const include = (n: number): void => {
+    if (needed.has(n)) return;
+    needed.add(n);
+    for (const prerequisite of topic.subskills.find(s => s.n === n)?.prerequisites ?? []) include(prerequisite);
+  };
+  if (current) include(current.n);
+  const relevant = topic.subskills.filter(s => needed.has(s.n)).map(s => s.section).join("\n\n");
+  return [`# ${topic.title}`, "", topic.overview, "", "## Subskills (outline; focus and relevant prerequisites are shown in full)", outline, "", "## Focus subskill", relevant].join("\n");
 }
 
 /**

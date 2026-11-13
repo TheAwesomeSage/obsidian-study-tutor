@@ -85,8 +85,8 @@ async function main() {
       getActiveFile: () => null,
       revealLeaf: async () => {},
       openLinkText: async () => {},
-      getRightLeaf: () => {
-        const leaf: any = { app, view: null };
+      getLeaf: () => {
+        const leaf: any = { app, view: null, getRoot: () => app.workspace.rootSplit };
         leaf.setViewState = async ({ type }: { type: string }) => {
           leaf.view = plugin.viewCreators[type](leaf);
           leaves.push(leaf);

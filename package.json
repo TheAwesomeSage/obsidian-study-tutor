@@ -1,6 +1,6 @@
 {
   "name": "study-tutor",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Obsidian plugin: a Socratic tutor, quizzer and subject expert that runs on the Claude CLI with minimal token overhead.",
   "main": "main.js",
   "scripts": {
