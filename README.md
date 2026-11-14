@@ -187,6 +187,19 @@ STUDY_VAULT=<vault> VISUAL_REGISTRY=<bundled registry.cjs> npm run bench:qwen
 MIT. See `LICENSE`. `NOTICE.md` lists the sources the teaching method draws on.
 
 
+## Version 0.6.0
+
+Install the whole release folder: besides `main.js`, `manifest.json` and `styles.css`, copy `player.js`, `plot.js` and the `assets` folder (or unzip `study-tutor-0.6.0.zip` into `<vault>/.obsidian/plugins/study-tutor/`).
+
+- **Visual activities on demand.** Ask for a simulation, diagram or game while studying, or open one the guide offers after a repeated difficulty. Four modules: a function plotter (JSXGraph) with a draggable point and tangent, a projectile target challenge with velocity and acceleration components, an algorithm player that follows real traces (indexing, bubble sort, linear and binary search), and PhET links with a source-based question. Each asks for a prediction first, and moving controls, playing and resetting use no model.
+- **Configured locally, never by Claude.** A new activity is configured from a short excerpt of your notes by qwen2.5:3b through Ollama on this computer, checked by the module itself, and saved; it reopens with no model at all, and **New numbers** gives fresh values made by the module. When no module fits, the compiled worked example is shown and the request is noted in `_logs/capability-requests.md`.
+- **Evidence and study choices.** Each concept has a next unaided check, and help no longer counts as renewed retention. A transfer question is set only when it can count, and question families decide what is new. Prerequisites in other topics are checked one by one and taught when a check fails. Level 5 now needs an unaided teach-back and an edge case; an older level 5 shows as not yet backed. Home suggests exactly what Adaptive study would do first. Answers inside activities count as helped work.
+- **Compilation.** Each topic gets a course package (`package.md`) with objectives and their coverage, worked examples, question families, rubrics, sources and visual eligibility. Recompiling rewrites only the subskills whose notes changed, and calls no model when nothing did.
+- **SymPy** lines now say when a stated result could not be checked, or was checked only numerically.
+- **Graph.** Arrows show what each concept requires, inferred prerequisites are dashed, and a concept's panel shows what you can do now, the evidence, the next step and the next unaided check.
+
+Verified in Obsidian 1.15.1 with an isolated vault and the real local model (`docs/INTEGRATION.md`, screenshots in `docs/verification/`), plus the unit tests (129 of 130 pass; the native SymPy test is skipped without a local Python) and 6 browser tests. Local inference runs on the CPU: about 20–30 s to configure a new activity on an i5-1335U.
+
 ## Version 0.5.2
 
 Fixes found by running 0.5.1 in Obsidian 1.15.1 and in scripted live sessions (`npm run test:session`).
