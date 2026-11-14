@@ -723,6 +723,8 @@
 .study-tutor .st-tile {
   display: flex;
   align-items: center;
+  /* Obsidian centres button content; tiles read as left-aligned rows. */
+  justify-content: flex-start;
   gap: var(--st-3);
   height: auto;
   min-height: 56px;
@@ -1670,6 +1672,20 @@
   align-items: center;
   gap: 6px;
   line-height: 1.35;
+}
+.study-tutor .st-legend-box > summary {
+  pointer-events: auto;
+  cursor: pointer;
+  font-weight: var(--font-semibold, 600);
+  color: var(--text-muted);
+}
+.study-tutor .st-legend-box[open] > summary {
+  margin-bottom: 4px;
+}
+.study-tutor .st-legend-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 .study-tutor .st-legend-note {
   max-width: 18rem;

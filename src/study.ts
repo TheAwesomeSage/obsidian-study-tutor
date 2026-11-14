@@ -405,7 +405,7 @@ export class StudyScreen implements Screen {
         onClick: async () => {
           try {
             const r = await v.plugin.engine.dispute(dir, a.id, v.chatPath ?? undefined);
-            this.marked = r.state.attempts.find((x) => x.id === a.id) ?? null;
+            this.marked = r.attempt;
             this.changes = r.changes;
             this.markedNote = "The mark no longer counts either way. " + (/^Q\d+$/.test(a.questionId) ? "You can ask for a second opinion, or carry on." : "The tutor will look at your answer again on your next message.");
             if (v.chatPath) v.chat = await v.plugin.store.loadChat(v.chatPath);

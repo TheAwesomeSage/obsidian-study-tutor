@@ -45,6 +45,7 @@ async function main() {
     metadataCache: { resolvedLinks: {}, getFirstLinkpathDest: () => null },
     workspace: {
       onLayoutReady: (cb: () => void) => cb(),
+      on: () => ({}),
       getLeavesOfType: () => leaves,
       getActiveFile: () => null,
       revealLeaf: async () => {},

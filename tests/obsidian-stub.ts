@@ -117,6 +117,7 @@ export class Component {
   registerDomEvent(el: any, type: string, cb: (e: any) => void) {
     el.addEventListener(type, cb);
   }
+  registerEvent(_ref: unknown) {}
 }
 
 export class ItemView extends Component {

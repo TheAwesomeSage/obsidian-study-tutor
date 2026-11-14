@@ -21,6 +21,13 @@ export interface SessionRecord {
   /** The exact question still awaiting an answer. Empty when nothing is open. */
   pendingQuestion: string;
   questionId: string;
+  /** The instructional action the pending question was asked under. A hint turn in between does not change it. */
+  askedUnder: string;
+  /**
+   * Stable id of the concept the pending question assesses, when that is not the concept in
+   * focus: a prerequisite check on a concept in another topic. Its answer is recorded there.
+   */
+  assesses: string;
   /** When the pending question was put, for timing the answer. */
   askedAt: string;
   /** The learner's latest attempt at the pending question, word for word. */
@@ -84,6 +91,8 @@ export function sessionFor(chat: Chat, state: LearnerState, mode: Mode): Session
     reason: str(p.reason),
     pendingQuestion: pending,
     questionId: str(p.questionId) || (pending ? questionKey(pending) : ""),
+    askedUnder: pending ? str(p.askedUnder) : "",
+    assesses: pending ? str(p.assesses) : "",
     askedAt: str(p.askedAt),
     attempt: str(p.attempt),
     helpGiven: strings(p.helpGiven),
@@ -148,7 +157,7 @@ Follow the app's instructional action for this turn. Finish the current step bef
  * question must not wipe the record that help was given for it.
  * A reply that ends by asking something always leaves a question pending, whatever the tag says.
  */
-export function readSessionReply(text: string, record: SessionRecord, opts: { now?: string; resolved?: boolean } = {}): { text: string; record: SessionRecord; tagged: boolean } {
+export function readSessionReply(text: string, record: SessionRecord, opts: { now?: string; resolved?: boolean; assesses?: string } = {}): { text: string; record: SessionRecord; tagged: boolean } {
   let tag: Record<string, unknown> | null = null;
   const clean = text
     .replace(/`{0,3}\s*<session>([\s\S]*?)<\/session>\s*`{0,3}/g, (_all, raw: string) => {
@@ -171,6 +180,9 @@ export function readSessionReply(text: string, record: SessionRecord, opts: { no
     next.pendingQuestion = pending;
     if (newStep) {
       next.questionId = pending ? questionKey(pending) : "";
+      // A new question is asked under this turn's action, about the concept the turn assesses.
+      next.askedUnder = pending ? record.action : "";
+      next.assesses = pending ? opts.assesses ?? "" : "";
       next.askedAt = pending ? opts.now ?? new Date().toISOString() : "";
       next.attempt = "";
       next.helpGiven = [];
@@ -179,6 +191,10 @@ export function readSessionReply(text: string, record: SessionRecord, opts: { no
   } else if (opts.resolved && !pending) {
     next.helpGiven = [];
     next.answerExposed = false;
+  }
+  if (!next.pendingQuestion) {
+    next.askedUnder = "";
+    next.assesses = "";
   }
   if (t) {
     next.helpGiven = [...new Set([...next.helpGiven, ...strings(t.helpGiven)])].slice(-8);

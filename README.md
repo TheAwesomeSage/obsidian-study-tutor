@@ -98,6 +98,7 @@ npm install
 npm test          # unit tests and a jsdom run of the view; no model calls
 npm run test:live # end-to-end against the real CLI; spends a little usage
 npm run test:features # live check of research, lessons, quiz and summaries; spends more
+npm run test:session # a scripted live study session: hints, reveals, a restart, a dispute, a cross-topic prerequisite, cache use per turn
 npm run preview   # writes tests/out/preview.html, light and dark previews at wide and narrow widths
 npm run build     # writes main.js
 ```

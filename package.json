@@ -9,6 +9,7 @@
     "test": "node esbuild.config.mjs test && node --test tests/out/unit.test.cjs tests/out/learning.test.cjs tests/out/graph.test.cjs tests/out/router.test.cjs tests/out/maths.test.cjs tests/out/ui.test.cjs",
     "test:live": "node esbuild.config.mjs test && node tests/out/live.test.cjs",
     "test:features": "node esbuild.config.mjs test && node tests/out/live-features.test.cjs",
+    "test:session": "node esbuild.config.mjs test && node tests/out/live-session.test.cjs",
     "preview": "node esbuild.config.mjs test && node tests/out/preview.cjs"
   },
   "license": "MIT",

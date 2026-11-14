@@ -49,6 +49,8 @@ export interface GraphColors {
   font: string;
 }
 
+/** Maps with this many concepts or fewer label every concept at any zoom. */
+const SMALL_MAP = 40;
 const DASH: Record<Relation, number[]> = { synoptic: [10, 4, 3, 4], requires: [], supports: [7, 4], applies_to: [2, 4], contrasts_with: [9, 3, 2, 3], derived_from: [1, 3] };
 
 export class GraphCanvas {
@@ -61,6 +63,8 @@ export class GraphCanvas {
   private colors: GraphColors = { text: "#ddd", muted: "#aaa", faint: "#666", surface: "#1e1e1e", edge: "#888", accent: "#8a5cf5", pre: "#3987e5", dep: "#d95926", font: "sans-serif" };
   /** World point at the centre of the canvas, and pixels per world unit. */
   cam = { x: 0, y: 0, k: 1 };
+  /** The view is still the whole-graph fit: nothing has panned, zoomed or centred it since. */
+  showsFit = false;
   selected: string | null = null;
   hover: string | null = null;
   /** Search matches, ringed and labelled. */
@@ -148,10 +152,10 @@ export class GraphCanvas {
     return (y - this.cam.y) * this.cam.k + this.h / 2;
   }
 
-  /** Fits everything that is shown, or the given nodes, into the canvas. */
-  fit(ids?: Iterable<string>): void {
+  /** Fits everything that is shown, or the given nodes, into the canvas. False when there was nothing to fit yet. */
+  fit(ids?: Iterable<string>): boolean {
     const list = ids ? [...ids].map((id) => this.byId.get(id)).filter((n): n is GNode => !!n) : this.nodes.filter((n) => this.shown(n.id));
-    if (!list.length || !this.w) return;
+    if (!list.length || !this.w) return false;
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const n of list) {
       x0 = Math.min(x0, n.x);
@@ -162,10 +166,13 @@ export class GraphCanvas {
     const pad = 56;
     const k = Math.min((this.w - 2 * pad) / Math.max(1, x1 - x0), (this.h - 2 * pad) / Math.max(1, y1 - y0));
     this.cam = { x: (x0 + x1) / 2, y: (y0 + y1) / 2, k: Math.max(0.08, Math.min(2.4, k)) };
+    this.showsFit = !ids;
     this.redraw();
+    return true;
   }
 
   zoomAt(factor: number, px = this.w / 2, py = this.h / 2): void {
+    this.showsFit = false;
     const k = Math.max(0.05, Math.min(6, this.cam.k * factor));
     // Keep the world point under the cursor where it is.
     const wx = (px - this.w / 2) / this.cam.k + this.cam.x;
@@ -177,6 +184,7 @@ export class GraphCanvas {
   centreOn(id: string, k = this.cam.k): void {
     const n = this.byId.get(id);
     if (!n) return;
+    this.showsFit = false;
     this.cam = { x: n.x, y: n.y, k };
     this.redraw();
   }
@@ -241,6 +249,7 @@ export class GraphCanvas {
       const dy = e.offsetY - this.drag.y;
       if (!this.drag.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
       this.drag.moved = true;
+      this.showsFit = false;
       this.canvas.style.cursor = "grabbing";
       this.cam = { ...this.cam, x: this.drag.cx - dx / this.cam.k, y: this.drag.cy - dy / this.cam.k };
       this.redraw();
@@ -405,8 +414,9 @@ export class GraphCanvas {
         ctx.stroke();
       }
       // Labels appear progressively: always for what is selected, hovered, found or adjacent;
-      // for well-connected concepts at medium zoom; for everything when zoomed in.
-      const rank = isSel ? 0 : n.id === this.hover ? 1 : this.matches.has(n.id) ? 2 : sel && this.near.has(n.id) ? 3 : sel && (this.anc.has(n.id) || this.desc.has(n.id)) ? 4 : k >= 1.5 ? 6 : k >= 0.85 && n.degree >= 3 ? 5 : -1;
+      // for well-connected concepts at medium zoom; for everything when zoomed in, or when the
+      // map is small enough that every name fits.
+      const rank = isSel ? 0 : n.id === this.hover ? 1 : this.matches.has(n.id) ? 2 : sel && this.near.has(n.id) ? 3 : sel && (this.anc.has(n.id) || this.desc.has(n.id)) ? 4 : k >= 1.5 || this.nodes.length <= SMALL_MAP ? 6 : k >= 0.85 && n.degree >= 3 ? 5 : -1;
       if (rank >= 0 && !(dim && rank > 4)) labels.push({ n, px, py, r, rank });
     }
     ctx.globalAlpha = 1;

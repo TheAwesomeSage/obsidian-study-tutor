@@ -771,6 +771,79 @@ test("recompiling carries evidence, priorities and cross-topic relations to the 
   assert.ok(!course.concepts.has("calculus/derivatives"), "a retired concept is not drawn");
 });
 
+test("an answer to a prerequisite check in another topic is recorded there, keeps its purpose through a hint, and can be disputed", async () => {
+  // Found in a live session: the answer to an index-law check was filed as a failure on the
+  // calculus concept in focus, and the hint turn in between relabelled it as guided practice.
+  const t = await setup();
+  const algebra = await t.store.saveCompiled({ title: "Algebra", fm: {}, topicBody: CARD([["Index laws", "none"]]).replace("# Calculus", "# Algebra"), questionsBody: "", target: 4 });
+  await t.store.addRelation({ from: "calculus/limits", to: "algebra/index-laws", type: "requires" });
+  const chat = await t.chatIn("teach");
+
+  t.replies.push(`Quick check first: what is $x^2 \\cdot x^3$?\n${session('{"pendingQuestion":"What is $x^2 \\\\cdot x^3$?","helpGiven":[],"nextAction":"check","completedStep":false}')}`);
+  const r1 = await t.engine.study(t.dir, chat, "");
+  assert.equal(r1.decision?.action, "diagnose-prerequisite");
+  assert.equal(r1.decision?.focus, 1);
+  assert.equal(r1.decision?.assesses, "algebra/index-laws");
+
+  t.replies.push(`Add the powers.\n${session('{"pendingQuestion":"What is $x^2 \\\\cdot x^3$?","helpGiven":["Add the powers."],"nextAction":"check","completedStep":false}')}`);
+  await t.engine.study(t.dir, chat, "hint please");
+
+  // The model tags the answer against the calculus concept; code files it where it belongs.
+  t.replies.push(`Not quite.\n<attempt>{"skill":1,"result":"incorrect","assisted":true,"transfer":false,"error_type":"prerequisite","error":"multiplied the indices"}</attempt>\n${session('{"pendingQuestion":"","helpGiven":[],"nextAction":"re-explain","completedStep":true}')}`);
+  const r3 = await t.engine.study(t.dir, chat, "x^6", { confidence: 0.8 });
+  assert.equal(r3.attempt?.concept, "algebra/index-laws");
+  assert.equal(r3.attempt?.activity, "diagnosis", "the question keeps the purpose it was asked for, through the hint");
+  assert.equal(r3.attempt?.assisted, true);
+  const calc = await t.store.loadState(t.dir, 4);
+  assert.equal(calc.attempts.length, 0, "nothing is recorded against Limits");
+  assert.equal(calc.levels[1] ?? null, null, "Limits is not placed by an answer about index laws");
+  const alg = await t.store.loadState(algebra, 4);
+  assert.deepEqual(alg.attempts.map((a) => [a.skill, a.result, a.confidence]), [[1, "incorrect", 0.8]]);
+
+  // Disputing it from the calculus chat finds it in Algebra and hands back the calculus state.
+  const d = await t.engine.dispute(t.dir, r3.attempt!.id, chat);
+  assert.equal(d.attempt.verification, "disputed");
+  assert.equal(d.state.topic, "Calculus");
+  assert.equal((await t.store.loadState(algebra, 4)).attempts[0].verification, "disputed");
+  await assert.rejects(t.engine.regrade(t.dir, r3.attempt!.id), /marked in conversation/);
+});
+
+test("after a revealed prerequisite check, the follow-up is filed where the tutor's mark says, and the worked example teaches nothing about the focus", async () => {
+  // Also found live: the worked example shown for an index-law check marked the calculus concept
+  // as taught, and the question after it could be on either concept. Code cannot tell which, so
+  // the mark names an external prerequisite when it tested one; otherwise the focus is assumed.
+  // Each case starts from a fresh vault, so the prerequisite is still unchecked.
+  const reveal = async (followUp: string, tagExtra: string, answer: string) => {
+    const t = await setup();
+    const algebra = await t.store.saveCompiled({ title: "Algebra", fm: {}, topicBody: CARD([["Index laws", "none"]]).replace("# Calculus", "# Algebra"), questionsBody: "", target: 4 });
+    await t.store.addRelation({ from: "calculus/limits", to: "algebra/index-laws", type: "requires" });
+    const chat = await t.chatIn("teach");
+    t.replies.push(`Quick check first: what is $x^2 \\cdot x^3$?\n${session('{"pendingQuestion":"What is $x^2 \\\\cdot x^3$?","helpGiven":[],"nextAction":"check","completedStep":false}')}`);
+    const r1 = await t.engine.study(t.dir, chat, "");
+    assert.equal(r1.decision?.action, "diagnose-prerequisite");
+    t.replies.push(`Worked example: $x^4 \\cdot x = x^5$, because the indices add. Now you: ${followUp}?\n${session(JSON.stringify({ pendingQuestion: followUp, helpGiven: [], answerExposed: true, nextAction: "check", completedStep: false }))}`);
+    const r2 = await t.engine.study(t.dir, chat, "just tell me the answer");
+    assert.equal(r2.decision?.action, "worked-example");
+    t.replies.push(`Marked.\n<attempt>{"skill":1,"result":"correct","assisted":true,"transfer":false,"error_type":"","error":""${tagExtra}}</attempt>\n${session('{"pendingQuestion":"","helpGiven":[],"nextAction":"go on","completedStep":true}')}`);
+    const r = await t.engine.study(t.dir, chat, answer);
+    return { r, calc: await t.store.loadState(t.dir, 4), alg: await t.store.loadState(algebra, 4) };
+  };
+
+  const a = await reveal("what is $x^3 \\cdot x^3$", ',"external":"Index laws"', "x^6");
+  assert.equal(a.r.attempt?.concept, "algebra/index-laws", "the tutor's mark names the prerequisite it tested");
+  assert.equal(a.calc.attempts.length, 0, "nothing is recorded against Limits");
+  assert.equal(a.calc.levels[1] ?? null, null, "a worked example on index laws is not a lesson on Limits");
+  assert.ok(!(1 in a.calc.taught));
+  assert.deepEqual(a.alg.attempts.map((x) => [x.result, x.assisted]), [["correct", true]]);
+
+  const b = await reveal("what is the limit of $1/x^2$ as $x$ grows", "", "0");
+  assert.equal(b.r.attempt?.concept, "calculus/limits", "a follow-up the mark does not tie to a prerequisite counts for the focus");
+  assert.equal(b.alg.attempts.length, 0);
+
+  const c = await reveal("what is $x^4 \\cdot x^4$", ',"external":"Factorising"', "x^8");
+  assert.equal(c.r.attempt?.concept, "calculus/limits", "a named prerequisite this concept does not have is ignored");
+});
+
 test("a 0.5.0 state file migrates: attempts move to evidence.md, links move to the course graph, nothing is lost", async () => {
   const t = await setup();
   const algebra = await t.store.saveCompiled({ title: "Algebra", fm: {}, topicBody: CARD([["Inequalities", "none"], ["Factorising", "none"]]).replace("# Calculus", "# Algebra"), questionsBody: BANK, target: 4 });

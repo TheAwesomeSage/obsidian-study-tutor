@@ -133,7 +133,7 @@ export interface PolicyInput {
   /** Placement by bank questions is possible: nothing is placed yet and the chat is empty. */
   placementReady: boolean;
   /** Prerequisites in other topics of each subskill, with the level held there. */
-  external: { skill: number; name: string; topic: string; level: number | null }[];
+  external: { skill: number; name: string; topic: string; level: number | null; id?: string }[];
   /** Subskills whose outside prerequisites this chat has already checked. */
   checked: number[];
   /** The subskill of a run of unaided bank practice whose last answer was right, when one is under way. */
@@ -159,6 +159,11 @@ export interface Decision {
   /** True when Learn mode thinks the learner is ready to practise unaided. */
   suggestIndependent: boolean;
   scores: Score[];
+  /**
+   * Stable id of a concept in another topic that this turn's question checks. Set only for a
+   * prerequisite check across topics, whose answer is evidence about that concept, not the focus.
+   */
+  assesses?: string;
 }
 
 /** Level a prerequisite must hold before what builds on it is taught. */
@@ -293,7 +298,8 @@ export function decide(p: PolicyInput): Decision {
   const outside = p.external.filter((e) => e.skill === s.n && (e.level === null || e.level < UNLOCK));
   if (outside.length && !p.checked.includes(s.n)) {
     const e = outside[0];
-    return out("diagnose-prerequisite", s.n, `${s.name} builds on ${e.name} from ${e.topic}, where your level is ${e.level === null ? "not known" : `only ${e.level}`}. One short question checks it before going on.`, "a suspected prerequisite weakness is diagnosed before it is treated as established");
+    const d = out("diagnose-prerequisite", s.n, `${s.name} builds on ${e.name} from ${e.topic}, where your level is ${e.level === null ? "not known" : `only ${e.level}`}. One short question checks it before going on.`, "a suspected prerequisite weakness is diagnosed before it is treated as established");
+    return e.id ? { ...d, assesses: e.id } : d;
   }
 
   const level = s.level;

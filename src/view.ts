@@ -28,6 +28,8 @@ export interface Screen {
   /** The view's shared data changed (another topic, a finished turn). */
   refresh?(): void | Promise<void>;
   onResize?(): void;
+  /** The theme or a CSS snippet changed. Screens that paint with computed colours repaint. */
+  onThemeChange?(): void;
 }
 
 const NAV: { screen: ScreenName; label: string; icon: string }[] = [
@@ -105,6 +107,7 @@ export class TutorView extends ItemView {
       e.preventDefault();
       void this.app.workspace.openLinkText(href, this.chatPath ?? "", e.ctrlKey || e.metaKey);
     });
+    this.registerEvent(this.app.workspace.on("css-change", () => this.mounted?.onThemeChange?.()));
     this.renderNav();
     this.mainEl.createDiv({ cls: "st-loading", text: "Loading your topics…" });
     await this.reload();

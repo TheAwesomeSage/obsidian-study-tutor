@@ -371,7 +371,7 @@ export class Engine {
       minutes: s.minutes ?? 25,
       weights: s.weights ?? DEFAULT_WEIGHTS,
       placementReady: s.codePlacement !== false && !p.chat.messages.length && skills.every((k) => k.level === null) && placementQuestions(p.questions, state).length > 0,
-      external: p.external.map((e) => ({ skill: e.skill, name: e.name, topic: e.topic, level: e.level })),
+      external: p.external.map((e) => ({ skill: e.skill, name: e.name, topic: e.topic, level: e.level, id: e.id })),
       checked: fmList(p.chat.fm, "checked").map(Number),
     };
   }
@@ -461,7 +461,8 @@ export class Engine {
     const before = sessionFor(chat, state, mode);
     const intent = readIntent(said, !!before.pendingQuestion);
     let session = applyIntent(before, intent, said);
-    const askedUnder = before.action;
+    // The action the open question was put under. A hint turn since then does not change it.
+    const askedUnder = before.askedUnder || before.action;
 
     const pre = await this.store.prereqs(dir, topic);
     const external = await this.store.externalPrereqs(dir, state.target);
@@ -481,6 +482,12 @@ export class Engine {
       session.action = intent === "attempt" ? "check" : intent === "hint" ? "hint" : "continue";
       session.reason = `${MODE_NAME[mode]} mode, chosen by you.`;
     }
+    // The concept this turn's question assesses, when it lives in another topic. A hint or a nudge
+    // to go on leaves the same question open, so it keeps the link. A worked example after a
+    // reveal or skip may go on to ask about either concept, so the link stops there and the
+    // tutor's mark says which one its next question tested.
+    const stepPrereq = before.pendingQuestion ? before.assesses : "";
+    const assesses = decision?.assesses ?? (decision && ["hint", "continue"].includes(decision.action) ? stepPrereq : "");
     session.mode = mode;
     session.skill = state.focus;
     session.concept = state.focus !== null ? state.concepts[state.focus] ?? "" : "";
@@ -597,6 +604,8 @@ export class Engine {
 
     // 5. The learner's attempt. The model proposes a mark; code decides what it may count as.
     let marked: Attempt | null = null;
+    /** The attempt was recorded in another topic, against a prerequisite this turn checked. */
+    let elsewhere = false;
     let tagRaw: string | null = null;
     parsed.text = parsed.text.replace(/`{0,3}\s*<attempt>([\s\S]*?)<\/attempt>\s*`{0,3}/g, (_all, raw: string) => ((tagRaw = raw), "")).trim();
     const canMark = !!said && !!before.pendingQuestion && (intent === "attempt" || intent === "skip");
@@ -656,14 +665,30 @@ export class Engine {
           verification: result === "skipped" || checkedBySympy ? "verified" : "unverified",
           assumptions: result === "skipped" ? "the learner skipped the question" : checkedBySympy ? "SymPy recomputed the results the reply states; the judgement of the reasoning is the model's" : "one model judgement, not independently checked",
         };
-        state.attempts = recordAttempt(state.attempts, marked);
-        for (const line of applyAttempt(state, marked)) changes.push(line);
+        // A check on a prerequisite in another topic is evidence about that concept. It is kept
+        // with that topic's evidence, and counts neither for nor against the concept in focus.
+        // The app knows when it set the question as such a check; otherwise the tutor's mark may
+        // name a prerequisite, which must be one this concept actually has.
+        const named = tag && typeof tag.external === "string" ? tag.external.trim().toLowerCase() : "";
+        const outside = before.assesses ? external.find((e) => e.id === before.assesses) : named ? external.find((e) => e.skill === skill && e.name.toLowerCase() === named) : undefined;
+        const there = outside ? await this.store.loadState(outside.dir, s.targetLevel) : null;
+        if (outside && there && outside.n in there.names) {
+          marked = { ...marked, skill: outside.n, concept: outside.id };
+          there.attempts = recordAttempt(there.attempts, marked);
+          for (const line of applyAttempt(there, marked)) changes.push(`${outside.topic}: ${line}`);
+          await this.store.saveState(outside.dir, there);
+          elsewhere = true;
+        } else {
+          state.attempts = recordAttempt(state.attempts, marked);
+          for (const line of applyAttempt(state, marked)) changes.push(line);
+        }
       }
     }
 
     // 6. A lesson that was delivered is exposure: it can put a subskill on the map at level 1,
     //    and no higher. What the learner can do is shown only by their answers.
-    if (decision && TEACHING.includes(decision.action) && decision.focus !== null && decision.focus in state.names && parsed.text) {
+    //    A worked example that answers a prerequisite check from another topic teaches that, not the focus.
+    if (decision && TEACHING.includes(decision.action) && !assesses && !stepPrereq && decision.focus !== null && decision.focus in state.names && parsed.text) {
       const f = decision.focus;
       if (!(f in state.taught)) state.taught[f] = this.today();
       if ((state.levels[f] ?? 0) < 1) push(setLevel(state, f, 1, "lesson", "a lesson on this was delivered", now));
@@ -671,12 +696,12 @@ export class Engine {
 
     // 7. The model's own proposals, within what the evidence allows. Levels are never changed on
     //    the word of the cheap model, in Ask mode, or on a turn SymPy disputes.
-    if (parsed.update) for (const line of applyStateUpdate(state, parsed.update, { levels: mode !== "expert" && route.route !== "simple" && !report.disagreed, attempt: marked })) changes.push(line);
+    if (parsed.update) for (const line of applyStateUpdate(state, parsed.update, { levels: mode !== "expert" && route.route !== "simple" && !report.disagreed, attempt: elsewhere ? null : marked })) changes.push(line);
     await this.store.saveState(dir, state);
 
     // 8. The session record, saved with the reply so the next turn and a restart both resume from it.
     const resolved = (!!marked && marked.result !== "ungraded") || intent === "skip" || intent === "reveal";
-    const continuation = readSessionReply(parsed.text, session, { now: new Date().toISOString(), resolved });
+    const continuation = readSessionReply(parsed.text, session, { now: new Date().toISOString(), resolved, assesses });
     session = continuation.record;
     session.unresolvedMisconceptions = [...state.misconceptions];
     session.disputed = "";
@@ -1143,29 +1168,49 @@ export class Engine {
    * in either direction, and a level change it caused is undone if the level is still where
    * that change left it. With `chatPath`, the tutor is told to look at the answer again.
    */
-  async dispute(dir: string, attemptId: string, chatPath?: string): Promise<{ state: LearnerState; changes: string[] }> {
+  /**
+   * Where an attempt is kept: this topic, or, for a prerequisite check across topics, the topic
+   * that holds the prerequisite.
+   */
+  private async findAttempt(dir: string, attemptId: string): Promise<{ dir: string; state: LearnerState; attempt: Attempt } | null> {
     const s = this.settings();
-    const state = await this.store.loadState(dir, s.targetLevel);
-    const a = state.attempts.find((x) => x.id === attemptId);
-    if (!a) throw new Error("That attempt is no longer on record.");
+    const here = await this.store.loadState(dir, s.targetLevel);
+    const a = here.attempts.find((x) => x.id === attemptId);
+    if (a) return { dir, state: here, attempt: a };
+    for (const ref of await this.store.listTopics()) {
+      if (ref.dir === dir) continue;
+      const st = await this.store.loadState(ref.dir, s.targetLevel);
+      const b = st.attempts.find((x) => x.id === attemptId);
+      if (b) return { dir: ref.dir, state: st, attempt: b };
+    }
+    return null;
+  }
+
+  /** Sets a mark aside. The returned state is always this topic's, for the screen showing it. */
+  async dispute(dir: string, attemptId: string, chatPath?: string): Promise<{ state: LearnerState; changes: string[]; attempt: Attempt }> {
+    const s = this.settings();
+    const found = await this.findAttempt(dir, attemptId);
+    if (!found) throw new Error("That attempt is no longer on record.");
+    const { state, attempt: a } = found;
     const changes: string[] = [];
     if (a.verification !== "disputed") {
       a.verification = "disputed";
       const change = [...state.changes].reverse().find((c) => c.cause === a.id);
       if (change && change.skill in state.names && state.levels[change.skill] === change.to) {
         const line = setLevel(state, change.skill, change.from, "dispute", "the mark behind this change is disputed");
-        if (line) changes.push(line);
+        if (line) changes.push(found.dir === dir ? line : `${state.topic}: ${line}`);
       }
-      await this.store.saveState(dir, state);
+      await this.store.saveState(found.dir, state);
     }
+    const mine = found.dir === dir ? state : await this.store.loadState(dir, s.targetLevel);
     if (chatPath) {
       const chat = await this.store.loadChat(chatPath);
-      const record = sessionFor(chat, state, (fmStr(chat.fm, "mode", "tutor") as Mode) || "tutor");
+      const record = sessionFor(chat, mine, (fmStr(chat.fm, "mode", "tutor") as Mode) || "tutor");
       record.disputed = attemptId;
       chat.fm.session = JSON.stringify(record);
       await this.store.saveChat(chatPath, chat);
     }
-    return { state, changes };
+    return { state: mine, changes, attempt: a };
   }
 
   /**
@@ -1173,10 +1218,10 @@ export class Engine {
    * it says replaces the disputed mark; if the call fails the attempt stays set aside.
    */
   async regrade(dir: string, attemptId: string): Promise<{ state: LearnerState; attempt: Attempt; changes: string[]; usage: Usage }> {
-    const s = this.settings();
-    const state = await this.store.loadState(dir, s.targetLevel);
-    const a = state.attempts.find((x) => x.id === attemptId);
-    if (!a) throw new Error("That attempt is no longer on record.");
+    const found = await this.findAttempt(dir, attemptId);
+    if (!found) throw new Error("That attempt is no longer on record.");
+    const { state, attempt: a } = found;
+    if (found.dir !== dir) throw new Error("This answer was marked in conversation, so there is no model answer to regrade it against. Ask the tutor to look again.");
     const q = (await this.store.loadQuestions(dir)).find((x) => x.id === a.questionId);
     if (!q) throw new Error("This answer was marked in conversation, so there is no model answer to regrade it against. Ask the tutor to look again.");
     const g = await this.grade(q, a.answer, true);

@@ -42,7 +42,8 @@ export interface ChatRef {
 export interface ExternalPrereq {
   /** The subskill of this topic that has the prerequisite. */
   skill: number;
-  /** The prerequisite: its name, topic title, topic folder and number there. */
+  /** The prerequisite: its stable concept id, name, topic title, topic folder and number there. */
+  id: string;
   name: string;
   topic: string;
   dir: string;
@@ -297,7 +298,7 @@ export class Store {
         states.set(c.topic, await this.loadState(c.topic, target));
         topics.set(c.topic, await this.loadTopic(c.topic));
       }
-      out.push({ skill: mine.get(e.from)!, name: c.name, topic: c.topicTitle, dir: c.topic, n: c.n, level: states.get(c.topic)!.levels[c.n] ?? null, section: topics.get(c.topic)!.subskills.find((k) => k.n === c.n)?.section ?? "" });
+      out.push({ skill: mine.get(e.from)!, id: e.to, name: c.name, topic: c.topicTitle, dir: c.topic, n: c.n, level: states.get(c.topic)!.levels[c.n] ?? null, section: topics.get(c.topic)!.subskills.find((k) => k.n === c.n)?.section ?? "" });
     }
     return out;
   }

@@ -50,6 +50,8 @@ export class GraphScreen implements Screen {
   private nodes: GNode[] = [];
   private advice = new Map<string, Decision>();
   private fitted = false;
+  /** Whether the learner left the key open or folded. Unset until they choose. */
+  private legendOpen: boolean | undefined;
 
   constructor(private view: TutorView) {}
 
@@ -71,6 +73,8 @@ export class GraphScreen implements Screen {
     this.live = this.stage.createDiv({ cls: "st-sr-only", attr: { "aria-live": "polite" } });
     this.panel = body.createEl("aside", { cls: "st-graph-panel", attr: { "aria-label": "Concept details" } });
     this.fitted = false;
+    // The screen object outlives a visit; the last visit's concepts belong to its old canvas.
+    this.nodes = [];
     this.canvas = new GraphCanvas(canvasEl, {
       select: (id) => this.select(id),
       hover: () => {},
@@ -113,12 +117,25 @@ export class GraphScreen implements Screen {
     if (this.el) await this.load();
   }
 
+  /** The canvas paints with colours read from CSS, so a theme switch needs a fresh read. */
+  onThemeChange(): void {
+    this.apply();
+  }
+
   onResize(): void {
     if (!this.canvas || !this.stage) return;
-    this.canvas.resize(this.stage.clientWidth, this.stage.clientHeight);
-    if (!this.fitted && this.stage.clientWidth > 2 && this.nodes.length) {
+    const w = this.stage.clientWidth;
+    const h = this.stage.clientHeight;
+    // A stage that has not been laid out yet has no height. Fitting then would do nothing, so the
+    // first fit waits for the observer to report a real size.
+    if (w < 2 || h < 2) return;
+    this.canvas.resize(w, h);
+    // A view nobody has moved yet keeps fitting the stage as it settles (the details panel
+    // stacking beneath it at narrow widths, a pane being resized).
+    if (this.fitted && this.canvas.showsFit) this.canvas.fit();
+    // The first fit counts only once the canvas has this visit's concepts to fit.
+    if (!this.fitted && this.nodes.length && this.canvas.fit()) {
       this.fitted = true;
-      this.canvas.fit();
       if (this.selected) this.canvas.centreOn(this.selected, Math.max(1.3, this.canvas.cam.k));
     }
   }
@@ -165,6 +182,22 @@ export class GraphScreen implements Screen {
     this.onResize();
   }
 
+  /**
+   * Topics on the map, in the view's order, followed by any the course holds that the view has
+   * not listed yet (a topic compiled elsewhere, or synced in). Colours, counts and the legend all
+   * come from this, so a new topic is never drawn as an unlabelled grey cluster.
+   */
+  private topicList(): { dir: string; title: string }[] {
+    const list = this.view.topics.map((t) => ({ dir: t.dir, title: t.title }));
+    const seen = new Set(list.map((t) => t.dir));
+    for (const c of this.course?.concepts.values() ?? []) {
+      if (seen.has(c.topic)) continue;
+      seen.add(c.topic);
+      list.push({ dir: c.topic, title: c.topicTitle });
+    }
+    return list.filter((t) => this.nodes.some((n) => n.group === t.dir));
+  }
+
   private conceptState(c: CourseConcept) {
     const info = this.view.overview.find((t) => t.dir === c.topic);
     return info ? { info, m: mastery(info.state, c.n) } : null;
@@ -182,7 +215,8 @@ export class GraphScreen implements Screen {
     if (!course || !this.canvas) return;
     const v = this.view;
     const { get, colors } = this.cssColors();
-    const topics = v.topics.map((t) => t.dir);
+    const topicList = this.topicList();
+    const topics = topicList.map((t) => t.dir);
     const seq = (i: number) => get(`--st-seq-${Math.max(1, Math.min(6, i))}`) || colors.accent;
     for (const n of this.nodes) {
       const c = course.concepts.get(n.id)!;
@@ -230,10 +264,11 @@ export class GraphScreen implements Screen {
       visible = near;
     }
     const q = this.query.trim().toLowerCase();
-    const groups: GGroup[] = v.topics.map((t) => {
+    // Each topic's name sits just above its cluster. topicList only holds topics with concepts.
+    const groups: GGroup[] = topicList.map((t) => {
       const mine = this.nodes.filter((n) => n.group === t.dir);
-      return { id: t.dir, title: t.title, x: mine.reduce((a, n) => a + n.x, 0) / Math.max(1, mine.length), y: Math.min(...mine.map((n) => n.y), 0) - 34 };
-    }).filter((g) => this.nodes.some((n) => n.group === g.id) && (!visible || this.nodes.some((n) => n.group === g.id && visible!.has(n.id))));
+      return { id: t.dir, title: t.title, x: mine.reduce((a, n) => a + n.x, 0) / mine.length, y: Math.min(...mine.map((n) => n.y)) - 34 };
+    }).filter((g) => !visible || this.nodes.some((n) => n.group === g.id && visible!.has(n.id)));
 
     this.canvas.selected = this.selected;
     this.canvas.visible = visible;
@@ -335,12 +370,13 @@ export class GraphScreen implements Screen {
       this.apply();
     };
 
-    if (v.topics.length > 1) {
+    const topicList = this.topicList();
+    if (topicList.length > 1) {
       const topic = bar.createEl("label", { cls: "st-field" });
       topic.createSpan({ cls: "st-field-label", text: "Show" });
       const ts = topic.createEl("select", { cls: "dropdown", attr: { "aria-label": "Show topics" } });
       ts.createEl("option", { value: "", text: "All topics" });
-      for (const t of v.topics) ts.createEl("option", { value: t.dir, text: t.title });
+      for (const t of topicList) ts.createEl("option", { value: t.dir, text: t.title });
       ts.value = this.topicFilter;
       ts.onchange = () => {
         this.topicFilter = ts.value;
@@ -388,9 +424,15 @@ export class GraphScreen implements Screen {
   }
 
   private renderLegend(): void {
-    const l = this.legend;
-    const v = this.view;
-    l.empty();
+    const root = this.legend;
+    root.empty();
+    // The key folds away. On a narrow pane it starts folded, so it does not hide the map.
+    const box = root.createEl("details", { cls: "st-legend-box" });
+    const width = this.stage?.clientWidth ?? 0;
+    box.open = this.legendOpen ?? (width === 0 || width >= 560);
+    box.createEl("summary", { text: "Key" });
+    box.addEventListener("toggle", () => (this.legendOpen = box.open));
+    const l = box.createDiv({ cls: "st-legend-rows" });
     const sw = (cls: string, text: string, style = "") => {
       const row = l.createDiv({ cls: "st-legend-row" });
       row.createSpan({ cls: `st-swatch ${cls}`, attr: style ? { style } : {} });
@@ -403,9 +445,10 @@ export class GraphScreen implements Screen {
       row.createSpan({ cls: "st-meta", text: to });
     };
     if (this.mode === "topic") {
-      const shown = v.topics.filter((t) => this.nodes.some((n) => n.group === t.dir));
-      shown.slice(0, 8).forEach((t, i) => sw("", t.title.length > 30 ? t.title.slice(0, 29) + "…" : t.title, `background:var(--st-cat-${v.topics.indexOf(t) + 1 <= 8 ? v.topics.indexOf(t) + 1 : "other"})`));
-      if (v.topics.length > 8) sw("", "Other topics", "background:var(--st-cat-other)");
+      // Same order as the colours in apply(): the first eight topics get a hue each.
+      const shown = this.topicList();
+      shown.slice(0, 8).forEach((t, i) => sw("", t.title.length > 30 ? t.title.slice(0, 29) + "…" : t.title, `background:var(--st-cat-${i + 1})`));
+      if (shown.length > 8) sw("", "Other topics", "background:var(--st-cat-other)");
     } else if (this.mode === "level") {
       ramp("Level 0", "5", [1, 2, 3, 4, 5, 6]);
       sw("is-hollow", "Not placed yet");
@@ -445,7 +488,8 @@ export class GraphScreen implements Screen {
     if (!c || !course) {
       p.createDiv({ cls: "st-kicker", text: "Knowledge graph" });
       const total = course ? course.concepts.size : 0;
-      p.createDiv({ cls: "st-card-text", text: `${total} concept${total === 1 ? "" : "s"} across ${v.topics.length} topic${v.topics.length === 1 ? "" : "s"}. Select a concept to see what it rests on, what builds on it, and the evidence behind its level.` });
+      const nt = this.topicList().length;
+      p.createDiv({ cls: "st-card-text", text: `${total} concept${total === 1 ? "" : "s"} across ${nt} topic${nt === 1 ? "" : "s"}. Select a concept to see what it rests on, what builds on it, and the evidence behind its level.` });
       p.createDiv({ cls: "st-meta", text: "The map shows the course. Your progress only changes the colours." });
       return;
     }
@@ -639,7 +683,7 @@ export class GraphScreen implements Screen {
     for (const r of RELATIONS) type.createEl("option", { value: r, text: `This ${RELATION_TEXT[r].out}…` });
     const target = form.createEl("select", { cls: "dropdown", attr: { "aria-label": "The other concept" } });
     target.createEl("option", { value: "", text: "Choose a concept" });
-    for (const t of v.topics) {
+    for (const t of this.topicList()) {
       const group = target.createEl("optgroup", { attr: { label: t.title } });
       for (const o of course.concepts.values()) if (o.topic === t.dir && o.id !== c.id) group.createEl("option", { value: o.id, text: o.name });
     }

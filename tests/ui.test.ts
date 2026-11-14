@@ -75,6 +75,7 @@ function makeApp(fs: MemFS, leaves: any[], opened: string[], getPlugin: () => an
     metadataCache: { resolvedLinks: {}, getFirstLinkpathDest: () => null },
     workspace: {
       onLayoutReady: (cb: () => void) => cb(),
+      on: () => ({}),
       getLeavesOfType: () => leaves,
       getActiveFile: () => null,
       revealLeaf: async () => {},
