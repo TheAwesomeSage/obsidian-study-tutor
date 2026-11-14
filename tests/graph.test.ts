@@ -31,6 +31,14 @@ test("depth follows the longest prerequisite chain, and a loop does not hang", (
   assert.deepEqual(Object.keys(depths(nodes, [e("a", "b"), e("b", "a")])).sort(), ["a", "b", "c", "d"]);
 });
 
+test("connected reference layout is deterministic and retains all saved positions",()=>{
+  const {nodes,edges}=course(12,160);const start=performance.now();const a=layoutGraph(nodes,edges,{},"connected");
+  assert.ok(performance.now()-start<4000);assert.deepEqual(layoutGraph(nodes,edges,{},"connected"),a);
+  assert.deepEqual(layoutGraph(nodes,edges,a,"connected"),a);
+  const extra={id:"new",group:"t0"};const b=layoutGraph([...nodes,extra],edges,a,"connected");
+  for(const n of nodes)assert.deepEqual(b[n.id],a[n.id]);assert.ok(b.new.every(Number.isFinite));
+});
+
 test("the layout is deterministic, keeps clusters apart and puts foundations below what builds on them", () => {
   const { nodes, edges } = course(6, 20);
   const a = layoutGraph(nodes, edges);

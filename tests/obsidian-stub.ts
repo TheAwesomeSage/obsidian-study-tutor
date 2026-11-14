@@ -9,6 +9,8 @@ const g = globalThis as any;
 g.window = dom.window;
 g.document = dom.window.document;
 g.HTMLElement = dom.window.HTMLElement;
+g.requestAnimationFrame = (cb: FrameRequestCallback) => setTimeout(() => cb(performance.now()), 16);
+g.cancelAnimationFrame = (id: number) => clearTimeout(id);
 (dom.window as any).confirm = () => true;
 // jsdom has no canvas. The graph treats a missing context as "nothing to draw".
 (dom.window as any).HTMLCanvasElement.prototype.getContext = () => null;
@@ -132,14 +134,17 @@ export class ItemView extends Component {
 }
 
 export class Modal {
+  modalEl: any = dom.window.document.createElement("div");
   titleEl: any = dom.window.document.createElement("div");
   contentEl: any = dom.window.document.createElement("div");
   constructor(public app: any) {}
   open() {
+    this.modalEl.append(this.contentEl);dom.window.document.body.append(this.modalEl);
     (this as any).onOpen();
   }
   close() {
     (this as any).onClose?.();
+    this.modalEl.remove();
   }
 }
 

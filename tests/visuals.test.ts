@@ -80,3 +80,12 @@ test("module-owned assessment never awards independent mastery, including correc
 test("asset catalog matches actual PNG dimensions and carries CC0 provenance",()=>{
   for(const a of ASSETS){const b=readFileSync(a.path);assert.equal(b.readUInt32BE(16),a.width);assert.equal(b.readUInt32BE(20),a.height);assert.equal(a.license,"CC0-1.0");assert.match(a.source,/^https:\/\/kenney.nl\/assets\//);}
 });
+test("backend assessment follows allowed learner controls and refuses changed equations",()=>{
+  const l=copy("projectile");const settings={...l.settings,speed:12};
+  const expected=projectile(settings as unknown as ProjectileSettings).range;
+  assert.equal(assessLesson(l,{answer:expected,settings}).status,"correct");
+  assert.equal(assessLesson(l,{answer:expected,settings:{...settings,gravity:1}}).status,"invalid");
+  assert.equal(assessLesson(l,{answer:expected,settings:{...settings,speed:100}}).status,"invalid");
+  const p=copy("plot");assert.equal(assessLesson(p,{answer:4,settings:{...p.settings,pointX:2}}).status,"correct");
+  const corrupted=copy("plot");corrupted.sourceRefs[0].excerpt="changed";assert.equal(validateLesson(corrupted).valid,false);
+});

@@ -61,7 +61,8 @@ export function depths(nodes: LayoutNode[], edges: LayoutEdge[]): Record<string,
  * pinned where they were, and everything else is placed around them. With nothing saved, the
  * whole graph is laid out from scratch.
  */
-export function layoutGraph(nodes: LayoutNode[], edges: LayoutEdge[], saved: Positions = {}): Positions {
+export function layoutGraph(nodes: LayoutNode[], edges: LayoutEdge[], saved: Positions = {}, style: "clusters" | "connected" = "clusters"): Positions {
+  const connected = style === "connected";
   const n = nodes.length;
   if (!n) return {};
   const index = new Map(nodes.map((node, i) => [node.id, i]));
@@ -123,6 +124,7 @@ export function layoutGraph(nodes: LayoutNode[], edges: LayoutEdge[], saved: Pos
   }
 
   // ----- starting points for nodes with no saved position -----
+  if (connected && !anyPinned) for (const c of centre.values()) { c.x *= 0.65; c.y *= 0.65; }
   nodes.forEach((node, i) => {
     if (pinned[i]) return;
     const c = centre.get(node.group)!;
@@ -203,8 +205,8 @@ export function layoutGraph(nodes: LayoutNode[], edges: LayoutEdge[], saved: Pos
       const dx = x[l.b] - x[l.a];
       const dy = y[l.b] - y[l.a];
       const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
-      const rest = l.same ? SPACING * 1.25 : SPACING * 4;
-      const pull = (d - rest) * (l.same ? 0.07 : 0.012) * (l.orders ? 1 : 0.5);
+      const rest = l.same ? SPACING * 1.25 : SPACING * (connected ? 2 : 4);
+      const pull = (d - rest) * (l.same ? 0.07 : connected ? 0.045 : 0.012) * (l.orders ? 1 : 0.5);
       const ux = (dx / d) * pull;
       const uy = (dy / d) * pull;
       fx[l.a] += ux;
@@ -216,9 +218,9 @@ export function layoutGraph(nodes: LayoutNode[], edges: LayoutEdge[], saved: Pos
     // Each node is drawn to its topic's centre and to the height its depth gives it.
     for (let i = 0; i < n; i++) {
       const c = centre.get(nodes[i].group)!;
-      fx[i] += (c.x - x[i]) * 0.035;
+      fx[i] += (c.x - x[i]) * (connected ? 0.003 : 0.035);
       const level = c.y - ((depth[nodes[i].id] ?? 0) - c.mean) * LAYER;
-      fy[i] += (level - y[i]) * 0.09 + (c.y - y[i]) * 0.01;
+      fy[i] += (level - y[i]) * (connected ? 0.015 : 0.09) + (c.y - y[i]) * (connected ? 0.002 : 0.01);
     }
 
     const limit = 12 * alpha + 0.4;

@@ -1,55 +1,10 @@
-// The boundary between the learning backend and the visual modules.
-//
-// TEMPORARY LOCAL ADAPTER. The authoritative types are in src/visuals/contracts.ts, owned by the
-// visual workstream (committed there as fc98165 on codex/visual-player, not on this branch). The
-// shared types below match that file field for field; at integration, replace them with
-// re-exports from it. Keep `adaptRegistry`: it turns the registry's return shapes (validation
-// with `valid`, assessment with `status`) into the shapes the backend relies on, and supplies
-// defaults for the optional extras (assets, catalogue version, variants, presentation kinds).
-//
-// Nothing here executes model output. Lessons are plain JSON: a module id, bounded settings and
-// ids. Module code owns the equations, units, animation, expected answers and assessment.
-
-export type PresentationKind = "text" | "worked-example" | "diagram" | "simulation" | "game" | "external";
+// Backend adapter over the authoritative v1 visual contract.
+import type { PresentationKind, JsonObject, SourceRef, PresentationRequest, VisualLesson, ValidationError, GenerationResult, ModuleDescriptor } from "./visuals/contracts";
+export type { PresentationKind, JsonObject, SourceRef, PresentationRequest, VisualLesson, ValidationError, GenerationResult, ModuleDescriptor } from "./visuals/contracts";
+export type { Json as JsonValue } from "./visuals/contracts";
 export const PRESENTATION_KINDS: PresentationKind[] = ["text", "worked-example", "diagram", "simulation", "game", "external"];
 /** Kinds a module renders. The others are written by the tutor in the reply. */
 export const INTERACTIVE_KINDS: PresentationKind[] = ["diagram", "simulation", "game", "external"];
-
-export type JsonValue = string | number | boolean | null | JsonValue[] | { [k: string]: JsonValue };
-export type JsonObject = { [k: string]: JsonValue };
-
-export interface SourceRef {
-  /** Vault path of the note, or of the topic card when the topic has no notes. Provenance only; the player never reads it. */
-  path: string;
-  /** SHA-256 hex of the excerpt (contentHash() in formats.ts), as the contract requires. */
-  contentHash: string;
-  /** The short passage the activity is based on, quoted exactly. */
-  excerpt: string;
-}
-
-export interface PresentationRequest {
-  version: 1;
-  kind: PresentationKind;
-  /** Compact instructional reason, shown to the learner. */
-  reason: string;
-  objective: string;
-  sourceRefs: SourceRef[];
-  preferredModuleId?: string;
-}
-
-export interface VisualLesson {
-  schemaVersion: 1;
-  moduleId: string;
-  moduleVersion: string;
-  objective: string;
-  sourceRefs: SourceRef[];
-  /** Bounded configuration, validated against the module's settings schema and by the module itself. */
-  settings: JsonObject;
-  assetIds: string[];
-  assessmentId: string;
-  predictionQuestion: string;
-  hint: string;
-}
 
 /**
  * Backend record of a capability no module has yet, for a development pass. Never generated as
@@ -64,45 +19,12 @@ export interface MissingCapability {
   motivatingTask: string;
 }
 
-export interface ValidationError {
-  path: string;
-  message: string;
-}
-
-/** As in contracts.ts. */
-export type GenerationResult =
-  | { status: "ready"; lesson: VisualLesson }
-  | { status: "unsupported"; reason: string; missingCapability: string }
-  | { status: "invalid"; reason: string; validationErrors: ValidationError[] };
-
 /** "path: message" strings, as the backend records them, back into the contract's error objects. */
 export const toValidationErrors = (errors: string[]): ValidationError[] =>
   errors.map((e) => {
     const m = /^(\$[^:\s]*|[\w.[\]$-]+): (.*)$/.exec(e);
     return m ? { path: m[1], message: m[2] } : { path: "$", message: e };
   });
-
-export interface ModuleDescriptor {
-  id: string;
-  version: string;
-  /** Short phrases for what the module can teach, e.g. "binary search", "projectile range". */
-  supportedObjectives: string[];
-  /** JSON Schema for `settings`. The backend sends it to the local model and validates against it again. */
-  settingsSchema: JsonObject;
-  assessmentIds: string[];
-  /** Asset tags the module can use. Only assets with one of these tags are offered. */
-  assetTags: string[];
-  /** Optional refinement: the presentation kinds the module renders. Unset means simulation, game and diagram. */
-  kinds?: PresentationKind[];
-  /** Optional one-line description for the configuration prompt. */
-  summary?: string;
-  /**
-   * Optional refinement: the module's own prediction question per assessment id, with {setting}
-   * placeholders ("Where does binary search find {target} in {values}?"). When present it is used
-   * instead of the local model's wording, so the question asks exactly what the assessment checks.
-   */
-  questionTemplates?: Record<string, string>;
-}
 
 /** An approved asset as the configuration step sees it: an id and a description, never a path. */
 export interface AssetDescriptor {

@@ -3,6 +3,12 @@ import type { App } from "obsidian";
 import type { PlayerHandle, PlayerOptions, PresentationRequest } from "./contracts";
 import { validateLesson } from "./registry";
 import { button, el } from "./dom";
+import { join } from "path";
+import type { mountPlayer } from "./player";
+import type { mountPlot } from "./plot";
+
+const runtimes = new WeakMap<App, string>();
+export function configureVisualRuntime(app: App, directory: string): void { runtimes.set(app, directory); }
 
 /** No generator is called here. Backend gates pass already stored lesson data to this entry. */
 export class ActivityModal extends Modal {
@@ -11,10 +17,15 @@ export class ActivityModal extends Modal {
   constructor(app:App,private lesson:unknown,private options:PlayerOptions){super(app);}
   async onOpen(){
     this.closed=false;this.modalEl.classList.add("stv-modal");
-    const {mountPlayer}=await import("./player");
-    if(this.closed)return;
-    const player=await mountPlayer(this.contentEl,this.lesson,this.options);
-    if(this.closed)player.destroy();else this.player=player;
+    try {
+      const directory = runtimes.get(this.app);
+      // Node resolves explicit trusted build files. Native dynamic imports have no reliable
+      // base URL inside Obsidian's plugin evaluator. Browser previews use the ordinary ESM path.
+      const module: {mountPlayer:typeof mountPlayer} = directory ? require(join(directory,"player.js")) : await import("./player");
+      if(this.closed)return;
+      const player=await module.mountPlayer(this.contentEl,this.lesson,{...this.options, ...(directory ? {loadPlot:async()=>require(join(directory,"plot.js")) as {mountPlot:typeof mountPlot}} : {})});
+      if(this.closed)player.destroy();else this.player=player;
+    } catch(error) { el(this.contentEl,"p",`The activity could not load. Reinstall the complete release folder. ${(error as Error).message}`); }
   }
   onClose(){this.closed=true;this.player?.destroy();this.player=null;}
 }

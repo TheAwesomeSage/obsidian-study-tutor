@@ -8,6 +8,7 @@ import { menus, notices } from "./obsidian-stub";
 import StudyTutorPlugin from "../src/main";
 import { parseCompileOutput, parseState } from "../src/formats";
 import { MemFS } from "./memfs";
+import { FIXTURES } from "../src/visuals/fixtures";
 
 const COMPILED = `# Linear maps
 subject: linear-algebra
@@ -182,7 +183,7 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal(calls[0].model, "sonnet");
   // The open question is pinned above the answer area, and help sits in a fixed place.
   assert.match($(root, ".st-pending").textContent, /Open questionIs \$f\(x\)=x\+1\$ linear\?/);
-  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent, b.disabled]), [["Hint", false], ["Explain", false], ["Skip", false]]);
+  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent, b.disabled]), [["Hint", false], ["Explain", false], ["Skip", false], ["Visual activity", false]]);
   // The reasoning behind the action is one click away.
   button(root, "Why this?").click();
   assert.match($(root, ".st-why-detail").textContent, /Definition of a linear map[\s\S]*Policy version 3\. Scores only rank what to study next\./);
@@ -526,4 +527,24 @@ test("a chat saved by an older version reopens with its question open, and nothi
   const jointAttempt = (await plugin.store.loadState(dir, 4)).attempts.at(-1);
   assert.equal(jointAttempt.concept, a.id, "joint practice assesses the selected concept even if a model tags the other one");
   assert.equal(jointAttempt.question, jointQuestion);
+});
+
+test("normal study entry mounts the real player, caches configurations and records helped evidence", async () => {
+  const fs=new MemFS(), leaves:any[]=[], opened:string[]=[];let plugin:any=null;
+  const app=makeApp(fs,leaves,opened,()=>plugin);plugin=new (StudyTutorPlugin as any)(app,{id:"study-tutor"});await plugin.onload();await tick();
+  const dir=await plugin.store.saveCompiled({title:"Numeric array indexing",fm:{subject:"computing"},topicBody:"# Numeric array indexing\n\n## Subskills\n\n### 1. Zero-based numeric array indexing\nprerequisites: none\n- Read an element using its zero-based numeric array index.\n\n### 2. Linear search\nprerequisites: 1\n- Compare each numeric array element with a target.",questionsBody:"",target:4});
+  let localCalls=0,claudeCalls=0;
+  plugin.engine.call=async()=>{claudeCalls++;throw new Error("No paid model in this path");};
+  plugin.engine.local={model:"qwen2.5:3b",chatJson:async()=>{localCalls++;return {text:JSON.stringify({fits:true,objective:"Read an element using its zero-based numeric array index",settings:{algorithm:"index",values:[4,7,9],index:1,target:0},assetIds:[],assessmentId:"trace-result",predictionQuestion:"What value does the numeric array contain at index 1?",hint:"Count positions starting with zero.",missingOperation:""}),model:"qwen2.5:3b",doneReason:"stop",timing:{wallMs:1,loadMs:0,promptTokens:1,promptMs:0,evalTokens:1,evalMs:0,totalMs:1}};}};
+  const view:any=await plugin.activateView();await view.reload();view.go("graph");await tick(60);view.go("topic");await tick();assert.equal(localCalls,0,"navigation never generates an activity");
+  view.go("study");await view.study.send("Show me a simulation of zero-based numeric array indexing.");await tick(80);
+  const player=document.querySelector<HTMLElement>(".stv-player")!;assert.ok(player,"production ActivityModal mounts production player");assert.equal(localCalls,1);assert.equal(claudeCalls,0);
+  labelled(player,"Your prediction").value="7 because index 1 is the second element";button(player,"Save prediction").click();button(player,"Step").click();button(player,"Step").click();
+  assert.match(player.textContent!,/result 7/);
+  const reflection=player.querySelector(".stv-reflection")!;(reflection.querySelector("textarea") as HTMLTextAreaElement).value="Zero-based indices put the second value at index one.";(reflection.querySelector("input") as HTMLInputElement).value="7";button(reflection,"Check practice answer").click();await tick(100);
+  const state=await plugin.store.loadState(dir,4);assert.equal(state.attempts.length,1);assert.equal(state.attempts[0].assisted,true);assert.equal(state.attempts[0].result,"correct");assert.equal(state.attempts[0].taskType,"interactive");
+  const again=await plugin.engine.requestActivity(dir,{kind:"simulation",concept:1,chatPath:view.chatPath});assert.ok(again.cacheHit);assert.equal(localCalls,1);assert.equal(claudeCalls,0);
+  assert.ok(plugin.commands.find((c:any)=>c.id==="open-saved-activity"));
+  assert.equal(FIXTURES.projectile.moduleId,"projectile");
+  player.parentElement?.remove();await view.onClose();
 });

@@ -1,6 +1,7 @@
 import type { AssessmentResponse, AssessmentResult, JsonObject, LessonValidation, ModuleDescriptor, ValidationError, VisualLesson } from "./contracts";
 import { evaluate, plotSegments, rangeBounds, traceAlgorithm, type AlgorithmSettings, type PlotSettings, type ProjectileSettings } from "./models";
 import { ASSETS } from "./assets";
+import { contentHash } from "../formats";
 
 const num = (minimum: number, maximum: number) => ({ type: "number", minimum, maximum });
 const pair = (minimum: number, maximum: number) => ({ type: "array", items: num(minimum, maximum), minItems: 2, maxItems: 2 });
@@ -66,6 +67,7 @@ export function validateLesson(value: unknown): LessonValidation {
     check(r.path, { type: "string", minLength: 1, maxLength: 1024 }, `sourceRefs[${i}].path`, errors);
     check(r.excerpt, { type: "string", minLength: 1, maxLength: 12000 }, `sourceRefs[${i}].excerpt`, errors);
     if (typeof r.contentHash !== "string" || !/^[a-f0-9]{64}$/i.test(r.contentHash)) fail(`sourceRefs[${i}].contentHash`, "Use a SHA-256 hex digest");
+    else if (typeof r.excerpt === "string" && r.contentHash.toLowerCase() !== contentHash(r.excerpt)) fail(`sourceRefs[${i}].contentHash`, "Hash does not match the source excerpt");
   });
   if (!Array.isArray(value.assetIds) || value.assetIds.length > 8 || value.assetIds.some(id => typeof id !== "string" || !ASSETS.some(a => a.id === id))) fail("assetIds", "Unknown asset ID or more than 8 assets");
   const descriptor = descriptors.find(d => d.id === value.moduleId);

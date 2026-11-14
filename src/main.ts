@@ -7,7 +7,10 @@ import { DEFAULT_LOCAL_MODEL, DEFAULT_OLLAMA_URL, OllamaClient } from "./ollama"
 import { FS, Store } from "./store";
 import { SympyWorker } from "./sympy";
 import { TutorView, VIEW_TYPE } from "./view";
-import { SavedActivityModal } from "./visuals/obsidian";
+import { SavedActivityModal, configureVisualRuntime } from "./visuals/obsidian";
+import { join } from "path";
+import * as visualRegistry from "./visuals/registry";
+import { adaptRegistry } from "./visualcontract";
 
 export interface TutorSettings extends EngineSettings {
   root: string;
@@ -90,6 +93,8 @@ export default class StudyTutorPlugin extends Plugin {
   }
 
   async onload(): Promise<void> {
+    const adapter = this.app.vault.adapter as unknown as {getBasePath?:()=>string};
+    if (adapter.getBasePath && this.manifest.dir) configureVisualRuntime(this.app,join(adapter.getBasePath(),this.manifest.dir));
     const saved = ((await this.loadData()) ?? {}) as Partial<PluginData>;
     this.data = { settings: { ...DEFAULTS, ...(saved.settings ?? {}) }, activeTopic: saved.activeTopic ?? "", activeChat: saved.activeChat ?? {}, skills: saved.skills ?? {}, settingsVersion: saved.settingsVersion ?? 1, drafts: saved.drafts ?? {}, graphLayout: saved.graphLayout ?? {} };
     // Settings saved by an older version have no weights; a partly filled set is completed from the defaults.
@@ -145,8 +150,7 @@ export default class StudyTutorPlugin extends Plugin {
       return { path: f.path, text: splitFrontmatter(await this.app.vault.cachedRead(f)).body };
     };
     this.buildLocal();
-    // The visual module registry is attached by the visual workstream (src/visuals); until then
-    // engine.visuals stays null and no interactive is ever offered.
+    this.engine.visuals = adaptRegistry(visualRegistry as unknown as Record<string, unknown>);
   }
 
   /** The local model client, from the settings. Nothing is contacted until an activity is configured. */

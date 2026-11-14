@@ -4,3 +4,4 @@
 .theme-dark .stv-player{--stv-accent:#68b9a8}.theme-dark .stv-toolbar .stv-button:first-child{color:#102c27}
 @media(max-width:760px){.stv-layout{grid-template-columns:1fr;gap:20px}.stv-reflection{grid-template-columns:1fr}.stv-side{display:block}.stv-stage{padding:12px}.stv-board{height:280px}.stv-reflection .stv-status{margin-top:10px}.stv-player{border-radius:10px}.stv-telemetry{gap:8px}.stv-cell{min-width:36px}.stv-cell strong{font-size:18px;padding:10px 4px}}
 @media(prefers-reduced-motion:reduce){.stv-player *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+.stv-scene{overflow-x:auto;border-radius:8px}.stv-scene>svg{display:block;width:100%;min-width:560px;height:auto}.stv-scene:focus-visible{outline:2px solid #428ac1;outline-offset:2px}

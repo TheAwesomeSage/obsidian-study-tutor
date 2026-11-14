@@ -7,7 +7,7 @@
 
 import { Notice, TFile, setIcon } from "obsidian";
 import { addUsage } from "./claude";
-import { Material, TurnResult } from "./engine";
+import { Material, TurnResult, PresentationOutcome } from "./engine";
 import { Attempt, gradingLabel } from "./evidence";
 import { Mode, fmStr, splitFrontmatter } from "./formats";
 import { ACTION_LABEL, Action, POLICY_VERSION } from "./policy";
@@ -28,6 +28,7 @@ export class StudyScreen implements Screen {
   private error = "";
   private stopped = false;
   private last: TurnResult | null = null;
+  private activity: { outcome: PresentationOutcome; dir: string; chatPath: string } | null = null;
   private changes: string[] = [];
   /** The attempt marked on the last turn, shown with how it was checked and a way to dispute it. */
   private marked: Attempt | null = null;
@@ -345,6 +346,26 @@ export class StudyScreen implements Screen {
 
     if (this.changes.length) chip(tail, `Progress updated: ${this.changes.join("; ")}`, "good", "trending-up");
     if (this.marked) this.feedback(tail, this.marked);
+    const activity = this.activity;
+    if (activity && activity.dir === v.dir && activity.chatPath === v.chatPath) {
+      const out = activity.outcome;
+      const card = tail.createDiv({ cls: "st-notice st-activity-offer" });
+      card.createDiv({ cls: "st-meta", text: out.decision.reason });
+      if (out.lesson) button(card, { label: "Reopen activity", icon: "play", onClick: () => this.openActivity(out, activity.dir, activity.chatPath) });
+      else if (out.decision.status === "offer") {
+        const open = button(card, { label: `Open ${out.decision.kind}`, icon: "play" });
+        open.disabled = this.busy;
+        open.onclick = async () => {
+          open.disabled = true; open.setText("Preparing activity…");
+          try {
+            const next = await v.plugin.engine.requestActivity(activity.dir, { kind: out.decision.kind, concept: v.state?.focus ?? undefined, chatPath: activity.chatPath, preferredModuleId: out.decision.moduleId ?? undefined });
+            activity.outcome = next;
+            if (v.dir === activity.dir && v.chatPath === activity.chatPath) this.openActivity(next, activity.dir, activity.chatPath);
+          } catch (error) { new Notice((error as Error).message); }
+          finally { this.sync(); }
+        };
+      } else card.createDiv({ cls: "st-meta", text: out.activity?.reason || "This topic needs a different representation. Continue with the explanation." });
+    }
 
     if (this.busy) this.thinking(tail);
     else if (this.error) this.problem(tail);
@@ -362,6 +383,24 @@ export class StudyScreen implements Screen {
     const t = parent.createDiv({ cls: "st-thinking", attr: { role: "status" } });
     t.createSpan({ cls: "st-dots" });
     t.createSpan({ text: "Working on a reply…" });
+  }
+
+  private openActivity(outcome: PresentationOutcome, dir: string, chatPath: string): void {
+    const v = this.view;
+    if (!outcome.lesson) return;
+    const request = outcome.request ?? { version: 1 as const, kind: outcome.decision.kind, reason: outcome.decision.reason, objective: outcome.lesson.objective, sourceRefs: outcome.lesson.sourceRefs };
+    let hintUsed = false;
+    // Serialize writes so rapid checks cannot overwrite each other's evidence records.
+    let recording = Promise.resolve();
+    v.presentActivity(outcome.lesson, request, event => {
+      if (event.type === "hint") hintUsed = true;
+      if (event.type !== "assessment" || !outcome.activity) return;
+      const activityId = outcome.activity.id;
+      recording = recording.then(async () => {
+        const marked = await v.plugin.engine.recordActivityResult(dir, activityId, event.response, { chatPath, hintUsed });
+        if (v.dir === dir) { this.marked = marked.attempt; this.changes = marked.changes; await v.loadState(); await v.stateChanged(); this.sync(); }
+      }).catch(error => { new Notice(`The practice result could not be saved: ${(error as Error).message}`); });
+    });
   }
 
   private problem(parent: HTMLElement): void {
@@ -472,6 +511,8 @@ export class StudyScreen implements Screen {
       quick("Hint", "life-buoy", "Hint please.", "Ask for a hint. The answer will then count as helped.");
       quick("Explain", "book-open", "Explain this to me.", "Ask for an explanation. The answer will then count as helped.");
       quick("Skip", "skip-forward", "skip", "Skip this question and see the answer. It is recorded as skipped.");
+      const activity = button(q, { label: "Visual activity", icon: "play", tone: "ghost", title: "Explicitly request a suitable simulation. Uses a saved activity or local Qwen configuration.", onClick: () => void this.send("Show me a simulation for this concept.") });
+      activity.disabled = this.busy;
     }
 
     this.input.placeholder = asking ? "Ask a question…  (Enter to send, Shift+Enter for a new line)" : question ? "Your answer…  (Enter to send, Shift+Enter for a new line)" : "Message…  (Enter to send, Shift+Enter for a new line)";
@@ -586,6 +627,10 @@ export class StudyScreen implements Screen {
         await v.openChat(r.rotatedTo ?? chatPath);
         if (r.rotatedTo) new Notice("This chat was getting long, so the finished part was summarised and the chat continues in a new file. The full transcript is linked from the summary.", 8000);
         await v.stateChanged(r.state);
+        if (r.presentation) {
+          this.activity = { outcome: r.presentation, dir, chatPath: r.rotatedTo ?? chatPath };
+          if (this.el && v.screen === "study") this.openActivity(r.presentation, dir, r.rotatedTo ?? chatPath);
+        }
       }
     } catch (e) {
       this.error = (e as Error).message || String(e);

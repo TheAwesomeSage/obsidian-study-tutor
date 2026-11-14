@@ -193,7 +193,7 @@ export class GraphCanvas {
   // ---------- input ----------
 
   private radius(n: GNode): number {
-    return (3.6 + Math.min(3.2, Math.sqrt(n.degree) * 0.9)) * Math.max(0.75, Math.min(1.9, Math.pow(this.cam.k, 0.45)));
+    return (3.6 + Math.min(3.2, Math.sqrt(n.degree) * 0.9)) * Math.max(this.nodes.length > 300 ? 0.32 : 0.65, Math.min(1.9, Math.pow(this.cam.k, 0.65)));
   }
 
   private pick(px: number, py: number): GNode | null {

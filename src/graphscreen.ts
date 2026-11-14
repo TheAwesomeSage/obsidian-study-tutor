@@ -164,6 +164,7 @@ export class GraphScreen implements Screen {
       concepts.map((c) => ({ id: c.id, group: c.topic })),
       this.course.edges.filter((e) => e.status !== "rejected").map((e) => ({ from: e.from, to: e.to, orders: e.type === "requires" })),
       known ? saved : {},
+      "connected",
     );
     if (known !== concepts.length || Object.keys(saved).length !== concepts.length) {
       v.plugin.data.graphLayout = pos;

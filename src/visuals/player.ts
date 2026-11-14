@@ -5,7 +5,7 @@ import { el, button, slider, svgEl } from "./dom";
 import { ART } from "./art";
 
 /** Stored JSON only. This module has no inference, vault, network or code evaluation interface. */
-export async function mountPlayer(host: HTMLElement, value: unknown, options: PlayerOptions): Promise<PlayerHandle> {
+export async function mountPlayer(host: HTMLElement, value: unknown, options: PlayerOptions & {loadPlot?:()=>Promise<typeof import("./plot")>}): Promise<PlayerHandle> {
   const root = el(host, "section", "", "stv-player");
   const valid = validateLesson(value);
   if (!valid.valid) {
@@ -62,7 +62,8 @@ export async function mountPlayer(host: HTMLElement, value: unknown, options: Pl
 
   if (lesson.moduleId === "projectile") {
     const s = lesson.settings as unknown as ProjectileSettings, initial = structuredClone(s);
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); svg.setAttribute("viewBox", "0 0 800 420"); svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "Projectile trajectory, velocity and acceleration components"); stage.append(svg);
+    const scene = el(stage,"div","","stv-scene"); scene.tabIndex=0;scene.setAttribute("role","region");scene.setAttribute("aria-label","Projectile diagram; scroll horizontally on narrow screens");
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); svg.setAttribute("viewBox", "0 0 800 450"); svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "Projectile trajectory, velocity and acceleration components"); scene.append(svg);
     const telemetry = el(stage, "div", "", "stv-telemetry");
     const [lo, hi] = rangeBounds(s);
     // Fixed camera from the full permitted controls, never refitted during an attempt.
@@ -90,11 +91,11 @@ export async function mountPlayer(host: HTMLElement, value: unknown, options: Pl
         const y = worldH*i/5; svgEl(svg,"text",{x:42,y:py(y)+4,"text-anchor":"end",fill:"var(--stv-muted)","font-size":12},y.toFixed(1));
       }
       svgEl(svg,"line",{x1:50,y1:350,x2:760,y2:350,stroke:"var(--stv-muted)","stroke-width":2});
-      svgEl(svg,"text",{x:400,y:408,fill:"var(--stv-muted)","text-anchor":"middle"},"Horizontal distance (m)");
+      svgEl(svg,"text",{x:400,y:438,fill:"var(--stv-muted)","text-anchor":"middle"},"Horizontal distance (m)");
       svgEl(svg,"text",{x:50,y:24,fill:"var(--stv-muted)","font-size":13},"Height (m)");
       svgEl(svg,"rect",{x:px(s.target-s.tolerance),y:344,width:Math.max(2,px(s.target+s.tolerance)-px(s.target-s.tolerance)),height:12,rx:3,fill:"#d78a34"});
       if(lesson.assetIds.includes("kenney.physics.flag-blue"))svgEl(svg,"image",{href:ART["kenney.physics.flag-blue"],x:px(s.target),y:308,width:38,height:38,"aria-hidden":"true"});
-      svgEl(svg,"text",{x:Math.min(700,px(s.target)),y:326,fill:"var(--stv-text)","text-anchor":"middle","font-size":13},`Target ${s.target.toFixed(2)} ± ${s.tolerance} m`);
+      svgEl(svg,"text",{x:Math.min(700,px(s.target)),y:298,fill:"var(--stv-text)","text-anchor":"middle","font-size":13},`Target ${s.target.toFixed(2)} ± ${s.tolerance} m`);
       const points = Array.from({length:81},(_,i)=>{const q=projectile(s,p.t*i/80); return `${px(q.x)},${py(q.y)}`;}).join(" ");
       svgEl(svg,"polyline",{points,fill:"none",stroke:"#397bbd","stroke-width":3});
       const x=px(p.x), y=py(p.y);
@@ -126,7 +127,7 @@ export async function mountPlayer(host: HTMLElement, value: unknown, options: Pl
     };
     completedResponse=()=>({result:trace[trace.length-1].result as Json, events:trace.length});
   } else if (lesson.moduleId === "function-plotter") {
-    try { const {mountPlot}=await import("./plot"); const plot=mountPlot(stage,controls,lesson.settings as unknown as PlotSettings,settings); resetModule=plot.reset;freeModule=plot.destroy; }
+    try { const {mountPlot}=await (options.loadPlot ? options.loadPlot() : import("./plot")); const plot=mountPlot(stage,controls,lesson.settings as unknown as PlotSettings,settings); resetModule=plot.reset;freeModule=plot.destroy; }
     catch (error) { el(stage,"p",`Plot could not load: ${(error as Error).message}`); }
   } else {
     const s=lesson.settings;
