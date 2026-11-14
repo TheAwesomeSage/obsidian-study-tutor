@@ -118,6 +118,16 @@ npm run build     # writes main.js
 MIT. See `LICENSE`. `NOTICE.md` lists the sources the teaching method draws on.
 
 
+## Version 0.5.2
+
+Fixes found by running 0.5.1 in Obsidian 1.15.1 and in scripted live sessions (`npm run test:session`).
+
+- A quick check on a prerequisite from another topic is recorded against that prerequisite, in its own topic. Before, a wrong answer counted as a failure on the concept being studied, and a hint in between relabelled the check as guided practice. After a revealed or skipped check, the tutor's mark may name the prerequisite its next question tested; only a real prerequisite of the concept is accepted, and otherwise the answer counts for the concept being studied. A worked example on the prerequisite no longer counts as a lesson on that concept. A disputed answer is found in whichever topic keeps it.
+- The Knowledge Graph opens fitted to the pane, and keeps fitting as the pane settles until you pan or zoom. Every topic gets its colour, name and count, including one compiled since the view opened. Topic names sit above their own cluster. Switching between light and dark repaints the map. Maps of 40 concepts or fewer label every concept, and the key folds away (folded at first on a narrow pane).
+- Home: study tiles are left-aligned when stacked.
+
+Measured in four live sessions: the first turn of a chat with a cold cache reads nothing from it; later turns read 42–57% of prompt tokens from the cache (the fixed instructions, about 2.5–2.8k tokens). An 8–9 turn session cost $0.12–0.14.
+
 ## Version 0.5.1
 
 The Home screen brings together resume, topic search, review, study modes and the course graph. The study composer has an initially unset confidence slider. Adaptive mode chooses teaching, local practice and checking; Learn mode stays within guided learning. Session records and exact working survive interruption and rotation. Attempts retain grading provenance and assistance; unsupported level changes are refused.
