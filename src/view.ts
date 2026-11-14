@@ -16,6 +16,8 @@ import { ChatRef, TopicRef } from "./store";
 import { StudyScreen } from "./study";
 import { TopicScreen } from "./topicscreen";
 import { MODE_INFO, iconButton } from "./ui";
+import type { PresentationRequest, PlayerEvent } from "./visuals/contracts";
+import { presentActivity } from "./visuals/obsidian";
 
 export const VIEW_TYPE = "study-tutor-view";
 
@@ -91,6 +93,11 @@ export class TutorView extends ItemView {
   }
   get study(): StudyScreen {
     return this.screens.study as StudyScreen;
+  }
+
+  /** Backend gate/explicit request only. Topic and graph navigation never call this. */
+  presentActivity(lesson: unknown, request: PresentationRequest, onEvent?: (event: PlayerEvent) => void): void {
+    presentActivity(this.app, lesson, request, { onEvent });
   }
 
   async onOpen(): Promise<void> {

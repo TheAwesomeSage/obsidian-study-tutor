@@ -1,5 +1,9 @@
 node_modules/
 main.js
+player.js
+plot.js
+playwright-report/
+test-results/
 tests/out/
 *.map
 release/

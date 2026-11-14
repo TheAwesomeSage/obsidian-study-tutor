@@ -1499,6 +1499,16 @@
 
 /* ---------- knowledge graph ---------- */
 
+.study-tutor .st-graph-heading { padding: 20px 24px 16px; border-bottom: 1px solid var(--st-line); }
+.study-tutor { --st-cat-9:#60a7b4; --st-cat-10:#a080b6; --st-cat-11:#8a9f55; --st-cat-12:#a88253; --st-cat-13:#bc7181; --st-cat-14:#62988e; --st-cat-15:#7894b6; --st-cat-16:#9691ba; }
+.study-tutor .st-legend-rows { max-height: 260px; overflow-y: auto; }
+.study-tutor .st-graph-heading h2 { margin: 5px 0 7px; font-size: clamp(20px, 2vw, 27px); letter-spacing: -.025em; }
+.study-tutor .st-graph-capability { margin: 16px 0; padding: 14px; background: var(--st-surface); border: 1px solid var(--st-line); border-radius: 10px; font-size: 13px; line-height: 1.6; }
+.study-tutor .st-graph-statistics { margin-top: 12px; font-size: 12px; }
+.study-tutor .st-graph-statistics summary { cursor: pointer; color: var(--text-muted); }
+.study-tutor .st-graph-panel { scrollbar-width: thin; }
+@media (max-width: 700px) { .study-tutor .st-graph-heading { padding: 14px 16px; } }
+
 .study-tutor .st-graph-screen {
   flex: 1 1 auto;
   min-height: 0;

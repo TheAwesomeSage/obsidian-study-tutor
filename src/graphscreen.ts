@@ -59,6 +59,10 @@ export class GraphScreen implements Screen {
     this.el = el;
     const v = this.view;
     const root = el.createDiv({ cls: "st-graph-screen" });
+    const heading = root.createDiv({ cls: "st-graph-heading" });
+    heading.createDiv({ cls: "st-kicker", text: "YOUR LEARNING MAP" });
+    heading.createEl("h2", { text: "See how your knowledge connects" });
+    heading.createDiv({ cls: "st-meta", text: "Follow a prerequisite, inspect the evidence, choose your next step." });
     if (!v.topics.length) {
       const box = emptyState(root, { icon: "git-fork", title: "The graph is empty", text: "Concepts appear here once a topic has been compiled. Each topic becomes a cluster, and prerequisites link them." });
       button(box, { label: "New topic", icon: "plus", tone: "primary", onClick: () => v.plugin.openNewTopic() });
@@ -69,7 +73,7 @@ export class GraphScreen implements Screen {
     this.stage = body.createDiv({ cls: "st-graph-stage" });
     const canvasEl = this.stage.createEl("canvas", { cls: "st-graph-canvas", attr: { tabindex: "0", role: "application", "aria-label": "Knowledge graph. Arrow keys move between concepts, plus and minus zoom, zero fits the graph, Escape clears the selection. The search box lists every concept." } });
     this.legend = this.stage.createDiv({ cls: "st-graph-legend" });
-    this.stage.createDiv({ cls: "st-graph-hint", text: "Drag to pan · scroll to zoom · click a concept" });
+    this.stage.createDiv({ cls: "st-graph-hint", text: "Drag to pan · scroll to zoom · arrows to explore · / to search" });
     this.live = this.stage.createDiv({ cls: "st-sr-only", attr: { "aria-live": "polite" } });
     this.panel = body.createEl("aside", { cls: "st-graph-panel", attr: { "aria-label": "Concept details" } });
     this.fitted = false;
@@ -108,6 +112,7 @@ export class GraphScreen implements Screen {
   unmount(): void {
     this.observer?.disconnect();
     this.observer = null;
+    this.canvas?.destroy();
     this.canvas = null;
     this.el = null;
     this.expand(false);
@@ -227,7 +232,7 @@ export class GraphScreen implements Screen {
       if (this.mode === "topic") {
         const i = topics.indexOf(c.topic);
         // Eight validated hues in a fixed order. Topics past the eighth share a neutral, and are told apart by their labels.
-        n.color = i >= 0 && i < 8 ? get(`--st-cat-${i + 1}`) : get("--st-cat-other");
+        n.color = i >= 0 ? get(`--st-cat-${i % 16 + 1}`) : get("--st-cat-other");
       } else if (this.mode === "level") {
         if (!st || st.m.level === null) n.hollow = true;
         else {
@@ -429,10 +434,11 @@ export class GraphScreen implements Screen {
     // The key folds away. On a narrow pane it starts folded, so it does not hide the map.
     const box = root.createEl("details", { cls: "st-legend-box" });
     const width = this.stage?.clientWidth ?? 0;
-    box.open = this.legendOpen ?? (width === 0 || width >= 560);
+    box.open = this.legendOpen ?? ((width === 0 || width >= 560) && this.nodes.length < 300);
     box.createEl("summary", { text: "Key" });
     box.addEventListener("toggle", () => (this.legendOpen = box.open));
     const l = box.createDiv({ cls: "st-legend-rows" });
+    l.createDiv({ cls: "st-meta", text: "Requires arrows point to prerequisites. Dashed prerequisites are inferred." });
     const sw = (cls: string, text: string, style = "") => {
       const row = l.createDiv({ cls: "st-legend-row" });
       row.createSpan({ cls: `st-swatch ${cls}`, attr: style ? { style } : {} });
@@ -447,8 +453,8 @@ export class GraphScreen implements Screen {
     if (this.mode === "topic") {
       // Same order as the colours in apply(): the first eight topics get a hue each.
       const shown = this.topicList();
-      shown.slice(0, 8).forEach((t, i) => sw("", t.title.length > 30 ? t.title.slice(0, 29) + "…" : t.title, `background:var(--st-cat-${i + 1})`));
-      if (shown.length > 8) sw("", "Other topics", "background:var(--st-cat-other)");
+      shown.forEach((t, i) => sw("", t.title.length > 30 ? t.title.slice(0, 29) + "…" : t.title, `background:var(--st-cat-${i % 16 + 1})`));
+      if (shown.length > 16) l.createDiv({ cls: "st-meta", text: "Colours repeat after 16 topics; use labels or the topic filter to distinguish them." });
     } else if (this.mode === "level") {
       ramp("Level 0", "5", [1, 2, 3, 4, 5, 6]);
       sw("is-hollow", "Not placed yet");
@@ -526,6 +532,10 @@ export class GraphScreen implements Screen {
       if (s.focus === c.n) chip(lv, "Focus", "accent");
       if (e.lapse) chip(lv, "Slipped", "warn", "alert-triangle");
       if (m.level !== null && !m.backed) p.createDiv({ cls: "st-meta st-warn-text", text: `Recorded at level ${m.level}; your answers support level ${m.supported} so far.` });
+      const capability = p.createDiv({ cls: "st-graph-capability" });
+      capability.createDiv({ cls: "st-kicker", text: "Current capability" });
+      capability.createDiv({ text: e.independent === 0 ? "Independent application has not been demonstrated yet." : `${e.independentCorrect} of ${e.independent} unaided answers were correct. ${m.backed ? "The recorded level is backed by your evidence." : "More independent evidence is needed before relying on the recorded level."}` });
+      if (e.last) capability.createDiv({ cls: "st-meta", text: `Last marked practice: ${ago(e.last, v.today)}. Helped work is counted separately.` });
 
       // The suggested activity, with its reason. Asked of the same policy the study screen uses.
       const next = p.createDiv({ cls: "st-graph-next" });
@@ -551,7 +561,10 @@ export class GraphScreen implements Screen {
       ev.createEl("h4", { text: "Evidence" });
       if (!e.graded && !e.ungraded) ev.createDiv({ cls: "st-meta", text: "No answers have been marked on this concept yet." });
       else {
-        const dl = ev.createEl("dl", { cls: "st-dl" });
+        ev.createDiv({ cls: "st-meta", text: `${e.independentCorrect} correct unaided · ${e.assistedCount} with help · ${e.exposedCount} after seeing the answer` });
+        const stats = ev.createEl("details", { cls: "st-graph-statistics" });
+        stats.createEl("summary", { text: "Inspect estimates and evidence counts" });
+        const dl = stats.createEl("dl", { cls: "st-dl" });
         const row = (k: string, val: string) => {
           dl.createEl("dt", { text: k });
           dl.createEl("dd", { text: val });

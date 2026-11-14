@@ -370,7 +370,8 @@ test("home, study, review, topic page and graph work together from the normal en
   const panel = $(root, ".st-graph-panel");
   assert.match(panel.textContent, /Kernel and imageLinear maps.*Level 2 of 4 target.*Suggested next/s);
   assert.match(panel.textContent, /Guided practice\. You can follow Kernel and image, so the next step is practice with help on hand\./);
-  assert.match(panel.textContent, /EvidenceUnaided1 of 1 correctEstimatenot shown: 1 of 3 unaided answers needed/);
+  assert.match(panel.textContent, /Evidence1 correct unaided/);
+  assert.match(panel.querySelector(".st-graph-statistics")!.textContent!, /Unaided1 of 1 correctEstimatenot shown: 1 of 3 unaided answers needed/);
   assert.match(panel.textContent, /Latest answers.*correct.*checked by the plugin/s);
   assert.match(panel.textContent, /Rests onDefinition of a linear maplevel 2 · inferred, not yet reviewed · from topic card/);
   assert.match(panel.textContent, /Other relationscontrasts with Definition of a linear map/);

@@ -21,8 +21,11 @@ export type GenerationResult =
 export interface ModuleDescriptor {
   id: string; version: string; supportedObjectives: string[];
   settingsSchema: JsonObject; assessmentIds: string[]; assetTags: string[];
+  kinds?: PresentationKind[];
+  summary?: string;
+  questionTemplates?: Record<string, string>;
 }
-export interface AssessmentResponse { answer: Json; explanation?: string; prediction?: string; hintsUsed?: boolean }
+export interface AssessmentResponse { answer: Json; explanation?: string; prediction?: string; hintsUsed?: boolean; settings?: JsonObject }
 export interface AssessmentResult {
   status: "correct" | "incorrect" | "ungraded" | "invalid";
   feedback: string;

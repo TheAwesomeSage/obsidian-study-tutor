@@ -6,6 +6,7 @@ import { DEFAULT_WEIGHTS, PolicyWeights, WEIGHT_LABELS } from "./policy";
 import { FS, Store } from "./store";
 import { SympyWorker } from "./sympy";
 import { TutorView, VIEW_TYPE } from "./view";
+import { SavedActivityModal } from "./visuals/obsidian";
 
 export interface TutorSettings extends EngineSettings {
   root: string;
@@ -98,6 +99,7 @@ export default class StudyTutorPlugin extends Plugin {
     this.addCommand({ id: "home", name: "Open home screen", callback: async () => (await this.activateView())?.go("home") });
     this.addCommand({ id: "review", name: "Review due flashcards", callback: async () => (await this.activateView())?.go("review") });
     this.addCommand({ id: "graph", name: "Open knowledge graph", callback: async () => (await this.activateView())?.go("graph") });
+    this.addCommand({ id: "open-saved-activity", name: "Open saved visual lesson", callback: () => new SavedActivityModal(this.app).open() });
     this.addSettingTab(new TutorSettingTab(this.app, this));
 
     this.app.workspace.onLayoutReady(async () => {

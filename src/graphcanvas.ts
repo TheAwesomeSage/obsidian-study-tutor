@@ -79,6 +79,7 @@ export class GraphCanvas {
   private h = 0;
   private dpr = 1;
   private frame = 0;
+  private disposed = false;
   private drag: { x: number; y: number; cx: number; cy: number; moved: boolean; id: number } | null = null;
   private pinch = new Map<number, { x: number; y: number }>();
 
@@ -321,12 +322,19 @@ export class GraphCanvas {
 
   // ---------- drawing ----------
 
+  destroy(): void {
+    this.disposed = true;
+    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(this.frame);
+    else clearTimeout(this.frame);
+    this.frame = 0;
+  }
+
   redraw(): void {
-    if (this.frame || !this.w) return;
+    if (this.disposed || this.frame || !this.w) return;
     const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : (cb: FrameRequestCallback) => setTimeout(() => cb(0), 16) as unknown as number;
     this.frame = raf(() => {
       this.frame = 0;
-      this.draw();
+      if (!this.disposed) this.draw();
     });
   }
 
@@ -357,7 +365,7 @@ export class GraphCanvas {
         ctx.globalAlpha = lit ? (lit === "near" ? 0.75 : 0.9) : sel ? 0.07 : (ordering ? 0.3 : 0.22) * (e.status === "inferred" ? 0.8 : 1);
         ctx.strokeStyle = lit === "pre" ? colors.pre : lit === "dep" ? colors.dep : lit === "near" ? colors.text : colors.edge;
         ctx.lineWidth = (lit ? 1.7 : e.status === "reviewed" ? 1.1 : 0.8) * Math.max(0.7, Math.min(1.5, Math.sqrt(k)));
-        ctx.setLineDash(ordering || (many && !lit) ? [] : DASH[e.type]);
+        ctx.setLineDash(e.status === "inferred" && ordering ? [4, 4] : ordering || (many && !lit) ? [] : DASH[e.type]);
         ctx.beginPath();
         ctx.moveTo(ax, ay);
         // A slight bow keeps parallel edges apart and gives the map its woven look.
@@ -365,6 +373,16 @@ export class GraphCanvas {
         const my = (ay + by) / 2 - (bx - ax) * 0.12;
         ctx.quadraticCurveTo(mx, my, bx, by);
         ctx.stroke();
+        // Requires points from dependent to prerequisite; symmetric relations have no arrow.
+        if ((ordering || e.type === "supports" || e.type === "applies_to" || e.type === "derived_from") && (k >= 0.6 || lit)) {
+          const t = 0.82, u = 1 - t;
+          const x = u*u*ax + 2*u*t*mx + t*t*bx, y = u*u*ay + 2*u*t*my + t*t*by;
+          const angle = Math.atan2(2*u*(my-ay)+2*t*(by-my), 2*u*(mx-ax)+2*t*(bx-mx));
+          const size = lit ? 7 : 5;
+          ctx.setLineDash([]); ctx.beginPath();
+          ctx.moveTo(x-size*Math.cos(angle-0.48),y-size*Math.sin(angle-0.48));ctx.lineTo(x,y);
+          ctx.lineTo(x-size*Math.cos(angle+0.48),y-size*Math.sin(angle+0.48));ctx.stroke();
+        }
       }
     }
     ctx.setLineDash([]);
