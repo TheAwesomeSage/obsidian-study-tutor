@@ -21,6 +21,49 @@ export function textHash(s: string): string {
   return (h >>> 0).toString(16);
 }
 
+const K256 = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+/** SHA-256 of a string's UTF-8 bytes, as 64 hex digits. Plain code, so it runs anywhere without Node or Web Crypto. */
+export function sha256(text: string): string {
+  const bytes = Array.from(new TextEncoder().encode(text));
+  const bitLen = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  for (let i = 7; i >= 0; i--) bytes.push(i >= 4 ? 0 : (bitLen >>> (i * 8)) & 0xff);
+  const h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  const w = new Array<number>(64);
+  const rot = (x: number, n: number) => (x >>> n) | (x << (32 - n));
+  for (let o = 0; o < bytes.length; o += 64) {
+    for (let i = 0; i < 16; i++) w[i] = (bytes[o + 4 * i] << 24) | (bytes[o + 4 * i + 1] << 16) | (bytes[o + 4 * i + 2] << 8) | bytes[o + 4 * i + 3];
+    for (let i = 16; i < 64; i++) {
+      const s0 = rot(w[i - 15], 7) ^ rot(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+      const s1 = rot(w[i - 2], 17) ^ rot(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+    }
+    let [a, b, c, d, e, f, g, k] = h;
+    for (let i = 0; i < 64; i++) {
+      const t1 = (k + (rot(e, 6) ^ rot(e, 11) ^ rot(e, 25)) + ((e & f) ^ (~e & g)) + K256[i] + w[i]) | 0;
+      const t2 = ((rot(a, 2) ^ rot(a, 13) ^ rot(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+      [k, g, f, e, d, c, b, a] = [g, f, e, (d + t1) | 0, c, b, a, (t1 + t2) | 0];
+    }
+    [a, b, c, d, e, f, g, k].forEach((v, i) => (h[i] = (h[i] + v) | 0));
+  }
+  return h.map((v) => (v >>> 0).toString(16).padStart(8, "0")).join("");
+}
+
+/**
+ * The fingerprint used for source provenance and cache keys: SHA-256 of the text with line
+ * endings normalised, as 64 hex digits (the visual contract checks SourceRef hashes are SHA-256).
+ */
+export function contentHash(s: string): string {
+  return sha256(s.split("\r\n").join("\n"));
+}
+
 export function ymd(d: Date = new Date()): string {
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
@@ -126,6 +169,20 @@ export interface Subskill {
   /** Notes cited in this subskill's section, as [[links]]. */
   sources: string[];
   section: string;
+  /** Specification objectives this subskill covers, by id ("objectives: O1, O3"). */
+  objectives?: string[];
+  /** Optional visual eligibility recorded at compile time ("visual: simulation | why"). Never a trigger by itself. */
+  visual?: { kind: string; reason: string } | null;
+  /** The compiled concise worked example, when the card has one. */
+  worked?: string;
+}
+
+/** One specification objective from the card's "## Objectives" section. */
+export interface Objective {
+  id: string;
+  text: string;
+  /** Where the objective comes from: a spec label, a [[note]] or a link. */
+  source: string;
 }
 export interface Topic {
   title: string;
@@ -133,7 +190,11 @@ export interface Topic {
   overview: string;
   subskills: Subskill[];
   body: string;
+  /** Objectives listed under "## Objectives". Empty on cards compiled before 0.6. */
+  objectives?: Objective[];
 }
+
+const VISUAL_KINDS = ["text", "worked-example", "diagram", "simulation", "game", "external", "none"];
 
 export function parseTopic(md: string): Topic {
   const { fm, body } = splitFrontmatter(md);
@@ -155,6 +216,11 @@ export function parseTopic(md: string): Topic {
       const m = /(requires|supports|applies[_ ]to|contrasts[_ ]with|derived[_ ]from)\s*:?\s*([\d,\s]+)/i.exec(part);
       if (m) for (const n of m[2].match(/\d+/g) ?? []) relations.push({ type: m[1].toLowerCase().replace(" ", "_") as Relation, n: Number(n) });
     }
+    const obj = /^objectives:\s*(.*)$/im.exec(sec);
+    const vis = /^visual:\s*([a-z-]+)\s*(?:[|—–:-]\s*(.*))?$/im.exec(sec);
+    const visualKind = vis ? vis[1].toLowerCase() : "";
+    // "worked example:" starts a block of lines that runs to the next "key:" line or the end.
+    const worked = /^worked example:\s*\n?([\s\S]*?)(?=^\s*(?:misconceptions|objectives|visual|prerequisites|relations):|(?![\s\S]))/im.exec(sec);
     subskills.push({
       n: h.n,
       name: h.name,
@@ -162,9 +228,19 @@ export function parseTopic(md: string): Topic {
       relations,
       sources: [...new Set([...sec.matchAll(/\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/g)].map((x) => `[[${x[1].trim()}]]`))],
       section: sec,
+      objectives: obj ? obj[1].split(/[;,]/).map((x) => x.trim()).filter((x) => x && !/^none$/i.test(x)) : [],
+      visual: VISUAL_KINDS.includes(visualKind) && visualKind !== "none" ? { kind: visualKind, reason: (vis![2] ?? "").trim().slice(0, 200) } : null,
+      worked: worked ? worked[1].trim() : "",
     });
   });
-  return { title: fmStr(fm, "title") || (h1 ? h1[1].trim() : "Untitled"), fm, overview: section(body, "Overview"), subskills, body: body.trim() };
+  const objectives: Objective[] = [];
+  for (const line of section(body, "Objectives").split(/\r?\n/)) {
+    const m = /^\s*[-*]\s+\**([A-Za-z]?[\w.]*\d[\w.]*)\**\s*[:.)-]\s*(.+)$/.exec(line);
+    if (!m) continue;
+    const src = /\s*\(([^()]*)\)\s*$/.exec(m[2]);
+    objectives.push({ id: m[1], text: (src ? m[2].slice(0, src.index) : m[2]).trim(), source: src ? src[1].trim() : "" });
+  }
+  return { title: fmStr(fm, "title") || (h1 ? h1[1].trim() : "Untitled"), fm, overview: section(body, "Overview"), subskills, body: body.trim(), objectives };
 }
 
 export interface CompileOutput {
@@ -202,9 +278,18 @@ export interface Question {
   options: string[];
   answer: string;
   explanation: string;
+  /** Question family (0.6 on): questions testing the same thing the same way share one. */
+  family?: string;
+  /** Task type: recall, application, transfer, prediction, explanation, error-finding, teach-back, edge-case. */
+  task?: string;
+  /** Expected difficulty, 1 to 5. */
+  difficulty?: number;
+  /** For open questions: what a full answer must contain, used when the answer is graded. */
+  rubric?: string;
 }
 
-const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation"] as const;
+const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation", "family", "task", "difficulty", "rubric"] as const;
+const Q_TASKS = ["recall", "application", "transfer", "prediction", "explanation", "error-finding", "teach-back", "edge-case"];
 
 const OPTION_LABEL = /^\(?[A-Za-z][.):]\s+/;
 
@@ -265,7 +350,15 @@ export function parseQuestions(md: string): Question[] {
         options = [];
       }
     } else options = [];
-    out.push({ id: parts[i], subskill: Number(get("subskill")) || 0, type, question, options, answer, explanation: get("explanation") });
+    const q: Question = { id: parts[i], subskill: Number(get("subskill")) || 0, type, question, options, answer, explanation: get("explanation") };
+    const family = get("family").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
+    const task = get("task").toLowerCase().trim();
+    const difficulty = Number(get("difficulty"));
+    if (family) q.family = family;
+    if (Q_TASKS.includes(task)) q.task = task;
+    if (Number.isInteger(difficulty) && difficulty >= 1 && difficulty <= 5) q.difficulty = difficulty;
+    if (get("rubric")) q.rubric = get("rubric").slice(0, 800);
+    out.push(q);
   }
   return out;
 }
@@ -813,8 +906,9 @@ export function nextStep(s: LearnerState, today: string, dueOverride?: number, p
     const m = mastery(s, n);
     return { action: "auto", title: "Confirm", detail: `${s.names[n]} is recorded at level ${m.level}, but the answers recorded so far support level ${m.supported}. A short unaided check will settle it.`, subskill: n };
   }
+  // Staleness is measured from unaided work: a helped answer is not fresh evidence of retention.
   const stale = ns.filter((n) => {
-    const last = skillEvidence(s.attempts, n).last;
+    const last = skillEvidence(s.attempts, n).lastIndependent;
     return !!last && addDays(last.slice(0, 10), STALE_DAYS) < today;
   });
   if (stale.length) return { action: "quiz", title: "Retrieval check", detail: `${s.names[stale[0]]} has not been practised for over ${STALE_DAYS} days. A few questions will show whether it has held.`, subskill: stale[0] };

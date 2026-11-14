@@ -157,7 +157,9 @@ export class TutorView extends ItemView {
         const state = ref.dir === this.dir && this.state ? this.state : await store.loadState(ref.dir, this.plugin.opts.targetLevel);
         const pre = await store.prereqs(ref.dir, topic);
         const sr = this.plugin.usesSr() ? await store.flashcardStats(ref.dir).catch(() => null) : null;
-        infos.push(topicInfo(ref.dir, ref.title, state, pre, this.today, sr ? sr.due : undefined));
+        // Home suggests what Adaptive study would do first, from the same policy decision.
+        const policy = await this.plugin.engine.recommendTopic(ref.dir, sr ? sr.due : undefined).catch(() => undefined);
+        infos.push(topicInfo(ref.dir, ref.title, state, pre, this.today, sr ? sr.due : undefined, policy));
       } catch (e) {
         console.error("Study Tutor: could not read topic", ref.dir, e);
       }

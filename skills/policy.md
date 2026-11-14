@@ -52,7 +52,11 @@ A retried turn has the same id as the first try, so it replaces the record inste
 | 2 | can follow along | one answer at least partly right, help allowed |
 | 3 | can do with help | two different questions answered fully correctly, help allowed |
 | 4 | can do independently | two different questions correct and unaided, one of them a transfer question on a later day than the first success, and at most one recent failure |
-| 5 | can teach it | as 4, with three such questions over two or more days and no recent failure |
+| 5 | can teach it and handle edge cases | as 4, with three such questions over two or more days, no recent failure, and, unaided, an explanation good enough to teach from (a teach-back task) and an edge case handled |
+
+Answers recorded before 0.6 have no task type, so they cannot show a teach-back or an edge case. A level 5 from before then reads as not yet backed until both are shown; nothing is deleted.
+
+A question is a transfer only if its question family has not been met before. A family already met is practice of a known kind, whatever the tutor's mark says; a family met for the first time, asked as an application on a later day than the first unaided success, counts as a transfer. Questions without a family keep the earlier rule (the tutor's transfer mark, where the app set a transfer question).
 
 Further rules:
 
@@ -77,16 +81,30 @@ Your stated confidence is compared with the same yes-or-no outcome. The Brier sc
 
 Adaptive mode and the home screen rank concepts with a score:
 
-`score = gap × (1 + exam × priority + prerequisite × dependents + errors × recent errors + uncertainty × lack of evidence + recency × time since practice + time × fit to the time you have)`
+`score = gap × (1 + exam × priority + prerequisite × dependents + errors × recent errors + uncertainty × lack of evidence + recency × time since unaided practice + time × fit to the time you have)`
 
 The weights are in settings. They only rank suggestions; they cannot change a level.
 
 Explicit rules come before the ranking, in this order:
 
 1. An open step is finished before another starts, unless you ask to move on.
-2. A concept is not taught while a prerequisite is weak. A prerequisite that has never been checked is diagnosed with one question before it is treated as weak. This applies to prerequisites in other topics too.
+2. A concept is not taught while a prerequisite is weak. A prerequisite that has never been checked is diagnosed with one question before it is treated as weak. This applies to prerequisites in other topics too: each weak one is checked once per chat, by its id, and its outcome is kept with the chat; one that fails its check is explained (as a lesson on that prerequisite, not on the concept you are studying) before the next is checked. Answering the concept itself correctly without help settles its prerequisites in use.
 3. Learn mode stays within explanation, examples and guided practice. When you look ready it suggests unaided practice and leaves the choice to you.
 4. In Adaptive mode, what plain code can mark (placement questions, bank questions) is handled without a model.
+5. Each concept has a next delayed check: 1, 3, 7, 14, 30 and then 60 days after its last unaided success, by how many separate days in a row it has been answered correctly without help, and the next day after an unaided failure. A due check is part of Adaptive study. Helped work never moves it. These intervals are a starting hypothesis, to be tuned against later unaided answers.
+6. A transfer question is set only when it can count: not on the same day as the first unaided success. A transfer question on a later day is also the delayed check.
+7. On the way to level 5, Adaptive asks you to teach the idea back and to handle an edge case.
+
+The home screen's suggestion is the decision Adaptive study would make first on that topic, so the two always agree. Flashcards are item recall, kept apart from concept evidence: they come first only when nothing pressing (a lapse, a due delayed check, an unchecked prerequisite) is waiting.
+
+## Diagrams, simulations and games
+
+They are used on demand, never on opening a topic, a note or a concept in the graph.
+
+- You can ask for one ("show me a simulation"). A saved activity opens at once; a new one is configured from a short excerpt of your notes by a small model on this computer (Ollama), and nothing calls Claude. If no module can show it, you are told so, the compiled worked example is shown instead, and the request is noted for a later development pass.
+- The guide offers one beside its reply only for a repeated difficulty whose kind is known (two recent unaided failures, diagnosed as conceptual or with a misconception recorded) on a concept the course marked as suited to it. A first error gets a narrower question instead.
+- Moving controls, playing, stepping and resetting use no model at all. An answer inside an activity is assessed by the module's own code and recorded as helped work: it can support "can do with help", and never counts as unaided evidence. Opening an activity while a question is open makes your answer to that question helped too.
+- A saved activity is reused only while the passage it rests on, the module, the asset catalogue, the configuration prompt and the local model are all unchanged. A configuration that failed its checks is saved too, so it is not tried again.
 
 Every decision is logged with what the policy saw, under `_logs/decisions.md`. "Compare policy with logged decisions" in the More menu replays that log through other weights and writes what would have changed. The policy carries a version number, bumped whenever its rules change.
 

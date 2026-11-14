@@ -4,10 +4,51 @@
 
 import { CallResult, ClaudeError, Usage, addUsage, callClaude, findClaude, zeroUsage } from "./claude";
 import { dependentCounts } from "./course";
-import { Attempt, EVIDENCE_RULES, Grading, Outcome, recordAttempt, skillEvidence } from "./evidence";
-import { Chat, Frontmatter, Grade, LearnerState, Mode, Prereqs, Question, SourceMode, Topic, addDays, answerText, applyStateUpdate, chatWords, codeMark, differentNumbers, extractStateTrailer, fmList, fmNum, fmStr, formatQuizQuestion, givesUp, looksLikeQuestion, mastery, mcqLetter, parseCompileOutput, parseMcqReply, parseQuestions, parseTopic, placementQuestions, prereqGaps, sameShortAnswer, schedule, setLevel, stateForPrompt, words, ymd } from "./formats";
-import { ACTION_GUIDE, ACTION_LABEL, Action, DEFAULT_WEIGHTS, Decision, POLICY_VERSION, PolicyInput, PolicyWeights, decide } from "./policy";
-import { GRADE_SCHEMA, buildCompileInput, buildSystem, buildTurnInput, modeFile, topicForPrompt, utilityPrompt } from "./prompts";
+import { Attempt, EVIDENCE_RULES, Grading, Outcome, TASK_TYPES, TaskType, checkDue, recordAttempt, skillEvidence } from "./evidence";
+import { Chat, Frontmatter, Grade, LearnerState, Mode, NextStep, Prereqs, Question, SourceMode, Topic, addDays, answerText, applyStateUpdate, chatWords, codeMark, contentHash, differentNumbers, extractStateTrailer, fmList, fmNum, fmStr, formatQuizQuestion, givesUp, looksLikeQuestion, mastery, mcqLetter, parseCompileOutput, parseMcqReply, parseQuestions, parseTopic, placementQuestions, prereqGaps, sameShortAnswer, schedule, setLevel, splitFrontmatter, stateForPrompt, words, ymd } from "./formats";
+import { ACTION_GUIDE, ACTION_LABEL, Action, DEFAULT_WEIGHTS, Decision, POLICY_VERSION, PolicyInput, PolicyWeights, PrereqCheck, decide, homeStep } from "./policy";
+import { ActivityRecord, CONFIG_PROMPT_VERSION, LESSON_SCHEMA_VERSION, configureActivity, toResult } from "./configure";
+import { CoursePackage, buildPackage, coverageLine, mergeRefresh, sourceChanges, subskillSections } from "./coursepkg";
+import { DEFAULT_LOCAL_MODEL, LocalModel } from "./ollama";
+import { ExplicitRequest, PRESENT_RULE, PresentationDecision, choosePresentation, extractPresent, matchModules, presentationNote, readPresentationRequest } from "./presentation";
+import { AssessmentResult, GenerationResult, ModuleDescriptor, ModuleRegistry, PresentationKind, PresentationRequest, SourceRef, VisualLesson } from "./visualcontract";
+
+/** A registry with no modules, for code decisions when the host has none. */
+const NO_MODULES: ModuleRegistry = { listModuleDescriptors: () => [], validateLesson: () => ({ ok: false, errors: ["no modules are installed"] }), assessLesson: () => ({ correct: null, score: null, feedback: "", status: "invalid", detail: {} }), listAssets: () => [], catalogVersion: () => "none", createVariant: () => null };
+
+const PREREQ_RESULTS: PrereqCheck[] = ["asked", "correct", "partial", "incorrect", "skipped", "ungraded", "taught"];
+
+/** Outside prerequisite checks this chat has made, by prerequisite id. */
+function prereqChecks(chat: Chat): Record<string, PrereqCheck> {
+  try {
+    const v = JSON.parse(fmStr(chat.fm, "prereq_checks", "{}"));
+    const out: Record<string, PrereqCheck> = {};
+    if (v && typeof v === "object" && !Array.isArray(v)) for (const [k, r] of Object.entries(v)) if (PREREQ_RESULTS.includes(r as PrereqCheck)) out[k] = r as PrereqCheck;
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function setPrereqCheck(chat: Chat, id: string, result: PrereqCheck): void {
+  chat.fm.prereq_checks = JSON.stringify({ ...prereqChecks(chat), [id]: result });
+}
+
+/**
+ * The kind of task an answered question was. The app knows when it set the question under an
+ * action; in the modes where the tutor chooses its own questions, the tutor's label is the only
+ * record, as with transfer. A transfer still needs the tutor to confirm the problem was fresh.
+ */
+function taskTypeFor(askedUnder: string, mode: Mode, tag: Record<string, unknown> | null): TaskType | "" {
+  if (askedUnder === "transfer") return tag?.transfer === true ? "transfer" : "application";
+  const set: Record<string, TaskType> = { "teach-back": "teach-back", "edge-case": "edge-case", retrieval: "recall", "independent-practice": "application", "guided-practice": "application" };
+  if (set[askedUnder]) return set[askedUnder];
+  const claimed = tag && typeof tag.task_type === "string" ? tag.task_type : "";
+  if ((mode === "tutor" || mode === "quiz") && TASK_TYPES.includes(claimed as TaskType) && claimed !== "interactive" && claimed !== "transfer") return claimed as TaskType;
+  if (askedUnder.startsWith("diagnose")) return "application";
+  return "";
+}
+import { GRADE_SCHEMA, buildCompileInput, buildRefreshInput, buildSystem, buildTurnInput, modeFile, topicForPrompt, utilityPrompt } from "./prompts";
 import { Route, routeTurn } from "./router";
 import { Intent, SESSION_RULES, SessionRecord, applyIntent, readIntent, readSessionReply, sessionFor } from "./session";
 import { ExternalPrereq, Store } from "./store";
@@ -40,6 +81,27 @@ export interface EngineSettings {
   weights?: PolicyWeights;
   /** Minutes the learner has for this sitting. */
   minutes?: number;
+  /** Configure existing visual modules with the local model when no saved configuration fits. Default on. */
+  localActivities?: boolean;
+  /** The local model's name (Ollama tag). Part of every activity cache key. */
+  localModel?: string;
+}
+
+/** What happened about presentation in one turn or one activity request. */
+export interface PresentationOutcome {
+  decision: PresentationDecision;
+  request: PresentationRequest | null;
+  /** The saved configuration (ready) or failure record, when there is one. */
+  activity: ActivityRecord | null;
+  /** The lesson to render, when one is ready. */
+  lesson: VisualLesson | null;
+  /** The contract's view of the outcome, for the player. */
+  result: GenerationResult | null;
+  /** A simpler supported explanation shown when the interactive is unavailable: the compiled worked lesson. */
+  fallback: string;
+  cacheHit: boolean;
+  /** Model calls spent on presentation: local model calls, and Claude calls (always 0). */
+  calls: { local: number; claude: 0 };
 }
 
 export interface TurnResult {
@@ -54,14 +116,20 @@ export interface TurnResult {
   local?: boolean;
   /** Which model answered and why, when routing is on. */
   route?: { route: Route; reason: string; model: string };
-  /** What SymPy did for this reply: results it computed, results it checked, whether it still disagrees, and whether a draft was rewritten. */
-  maths?: { computed: number; checked: number; disputed: boolean; corrected: boolean };
+  /**
+   * What SymPy did for this reply: results it computed, results it checked, whether it still
+   * disagrees, and whether a draft was rewritten. `unresolved` counts checks SymPy could not
+   * decide (or could not run); `numeric` counts agreements reached only at sample points.
+   */
+  maths?: { computed: number; checked: number; disputed: boolean; corrected: boolean; unresolved?: number; numeric?: number };
   /** The attempt recorded this turn, when the learner's answer was marked. */
   attempt?: Attempt;
   /** What the study policy chose for this turn, and why. */
   decision?: Decision;
   /** Tools run during this turn, with what each assumed. */
   tools?: ToolResult[];
+  /** An activity opened, offered or declined this turn, with its reason. Absent when the text alone is the format. */
+  presentation?: PresentationOutcome;
 }
 
 export interface TurnOpts {
@@ -104,6 +172,14 @@ export interface CompileResult {
   questions: number;
   usage: Usage;
   agents: number;
+  /** One line on how well the package covers its objectives. */
+  coverage?: string;
+  /** Every objective maps to a lesson and questions, and every lesson has a worked example. */
+  complete?: boolean;
+  /** Set by refresh(): whether nothing, a few subskills or the whole topic was recompiled, and why. */
+  refresh?: "unchanged" | "partial" | "full";
+  subskillsRefreshed?: number[];
+  why?: string;
 }
 
 const BATCH_WORDS = 3000;
@@ -129,6 +205,12 @@ export class Engine {
   maths: MathBackend | null = null;
   /** Reads a source note by name, when the host can. Used for short source excerpts. */
   readNote: ((name: string) => Promise<string | null>) | null = null;
+  /** Resolves a source note to its vault path and text, for activity provenance. Falls back to readNote. */
+  readSource: ((name: string) => Promise<{ path: string; text: string } | null>) | null = null;
+  /** The visual modules, when the host has them. Null means no interactive can be offered. */
+  visuals: ModuleRegistry | null = null;
+  /** The local model that configures existing modules on a cache miss. Null when off or absent. */
+  local: LocalModel | null = null;
   readonly tools = new ToolRegistry();
 
   constructor(
@@ -342,6 +424,7 @@ export class Engine {
     const dependents = dependentCounts(p.pre);
     const skills = Object.keys(state.names).map(Number).sort((a, b) => a - b).map((n) => {
       const m = mastery(state, n);
+      const e = m.evidence;
       return {
         n,
         name: state.names[n],
@@ -351,12 +434,18 @@ export class Engine {
         priority: state.priorities[n] ?? 1,
         taught: n in state.taught,
         supported: m.supported,
-        independent: m.evidence.independent,
-        independentCorrect: m.evidence.independentCorrect,
-        recentFailures: m.evidence.recentFailures,
-        lapse: m.evidence.lapse,
-        daysSince: m.evidence.last ? daysBetween(m.evidence.last, today) : null,
+        independent: e.independent,
+        independentCorrect: e.independentCorrect,
+        recentFailures: e.recentFailures,
+        lapse: e.lapse,
+        // Retention is measured from unaided work; helped answers do not renew it.
+        daysSince: e.lastIndependent ? daysBetween(e.lastIndependent, today) : null,
         bankLeft: s.bankQuiz === false ? 0 : p.questions.filter((q) => q.subskill === n && q.type !== "open" && !asked.includes(q.id) && !seenToday.has(q.id)).length,
+        checkDue: (m.level ?? 0) >= 3 && checkDue(e, today),
+        nextCheck: e.nextCheck,
+        transferReady: !e.firstIndependentDay || e.firstIndependentDay < today,
+        needsTeachBack: !e.teachBack,
+        needsEdgeCase: !e.edgeCase,
       };
     });
     return {
@@ -373,7 +462,22 @@ export class Engine {
       placementReady: s.codePlacement !== false && !p.chat.messages.length && skills.every((k) => k.level === null) && placementQuestions(p.questions, state).length > 0,
       external: p.external.map((e) => ({ skill: e.skill, name: e.name, topic: e.topic, level: e.level, id: e.id })),
       checked: fmList(p.chat.fm, "checked").map(Number),
+      prereqChecks: prereqChecks(p.chat),
     };
+  }
+
+  /** The Home suggestion for a topic: the decision Adaptive study would make on a fresh chat, as a step. */
+  async recommendTopic(dir: string, due?: number): Promise<{ step: NextStep; decision: Decision }> {
+    const s = this.settings();
+    const topic = await this.store.loadTopic(dir);
+    const state = await this.store.loadState(dir, s.targetLevel);
+    const chat: Chat = { fm: {}, summary: "", messages: [] };
+    const questions = await this.store.loadQuestions(dir);
+    const input = this.policyInput({ mode: "auto", state, pre: await this.store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions, external: await this.store.externalPrereqs(dir, state.target) });
+    const decision = decide(input);
+    const ns = Object.keys(state.names).map(Number);
+    const atTarget = ns.length > 0 && input.skills.every((k) => (k.level ?? 0) >= state.target && (k.level ?? 0) <= k.supported && !k.checkDue);
+    return { step: homeStep(decision, { due: due ?? Object.values(state.cards).filter((c) => c.due <= this.today()).length, atTarget }), decision };
   }
 
   /**
@@ -433,6 +537,292 @@ export class Engine {
     return decide(input);
   }
 
+  // ---------- presentation: on-demand activities ----------
+
+  /** Short exact passages from the concept's source notes, with provenance; the card section when there are none. */
+  private async sourceRefsFor(dir: string, topic: Topic, n: number, query: string): Promise<SourceRef[]> {
+    const sk = topic.subskills.find((k) => k.n === n);
+    if (!sk) return [];
+    const refs: SourceRef[] = [];
+    for (const link of sk.sources.slice(0, 2)) {
+      const name = link.replace(/^\[\[|\]\]$/g, "");
+      const got = this.readSource ? await this.readSource(name).catch(() => null) : this.readNote ? await this.readNote(name).then((text) => (text === null ? null : { path: `${name}.md`, text })).catch(() => null) : null;
+      if (!got) continue;
+      const paragraphs = got.text.split(/\n\s*\n/).filter((p) => words(p) >= 6);
+      const excerpt = bestExcerpts(paragraphs, query, 120).join("\n\n");
+      // The hash is of the excerpt itself: an edit elsewhere in the note leaves the activity valid,
+      // and any change to the passage it rests on makes a new one.
+      if (excerpt) refs.push({ path: got.path, contentHash: contentHash(excerpt), excerpt });
+    }
+    if (!refs.length) {
+      const excerpt = sk.section.split(/\s+/).slice(0, 120).join(" ");
+      refs.push({ path: `${dir}/topic.md`, contentHash: contentHash(excerpt), excerpt });
+    }
+    return refs;
+  }
+
+  /** The compiled worked lesson for a concept: the simpler explanation offered when an interactive is not available. */
+  private async workedLesson(dir: string, topic: Topic, n: number): Promise<string> {
+    const sk = topic.subskills.find((k) => k.n === n);
+    if (sk?.worked) return sk.worked;
+    const pkg = await this.store.loadPackage(dir).catch(() => null);
+    return pkg?.lessons.find((l) => l.n === n)?.worked ?? "";
+  }
+
+  /**
+   * Runs the presentation gate for the concept in focus and prepares what it chose. An explicit
+   * request is carried out now (a saved activity, or a local configuration on a cache miss); an
+   * offer is only recorded, and configured if the learner opens it. Returns null when the text
+   * alone is the format. Never calls Claude.
+   */
+  private async presentationFor(p: { dir: string; topic: Topic; state: LearnerState; mode: Mode; action: string | null; said: string; visualAsk: ExplicitRequest | null; tutorKind?: PresentationKind | null; chatPath?: string; concept?: number; preferredModuleId?: string; variantSeed?: number }): Promise<PresentationOutcome | null> {
+    const n = p.concept ?? p.state.focus;
+    const sk = p.topic.subskills.find((k) => k.n === n);
+    if (!sk || n === null || n === undefined) return null;
+    // Most turns have nothing to decide: no request, no proposal, and nothing the course marked.
+    if (!p.visualAsk && !p.tutorKind && !sk.visual) return null;
+    const conceptId = p.state.concepts[n] ?? "";
+    const descriptors = this.visuals ? this.visuals.listModuleDescriptors() : [];
+    const catalog = this.visuals?.catalogVersion() ?? "none";
+    const modelName = this.local?.model ?? this.settings().localModel ?? DEFAULT_LOCAL_MODEL;
+    const objective = `${sk.name}: ${(sk.section.split("\n").find((l) => /^\s*-\s+/.test(l)) ?? "").replace(/^\s*-\s+/, "").replace(/\s*\(\[\[[^\]]+\]\]\)\s*$/, "").trim()}`.replace(/:\s*$/, "");
+    // Excerpts are chosen by the concept, not by how the learner worded the request, so the same
+    // activity is found again however it is asked for.
+    const refs = await this.sourceRefsFor(p.dir, p.topic, n, objective);
+    // A saved record is reused only while its sources, module, catalogue, schema, prompt and
+    // model are all unchanged. Anything else is a miss, and the old record stays on disk.
+    const same = (a: SourceRef[]) => a.length === refs.length && a.every((x) => refs.some((y) => y.path === x.path && y.contentHash === x.contentHash));
+    const saved = (await this.store.loadActivities(p.dir)).filter((a) => a.conceptId === conceptId && a.schemaVersion === LESSON_SCHEMA_VERSION && a.promptVersion === CONFIG_PROMPT_VERSION && a.model === modelName && a.catalogVersion === catalog && same(a.sourceRefs) && (!a.moduleId || descriptors.some((d) => d.id === a.moduleId && d.version === a.moduleVersion)));
+    const e = skillEvidence(p.state.attempts, n);
+    const lastWrong = [...p.state.attempts].reverse().find((a) => a.skill === n && a.result !== "correct" && a.result !== "ungraded");
+    const decision = choosePresentation(
+      { mode: p.mode, action: p.action, message: p.said, objective, context: sk.section, recentFailures: e.recentFailures, errorType: lastWrong?.errorType ?? "", misconception: p.state.misconceptions.length > 0, eligibility: sk.visual ?? null, descriptors, saved: saved.map((a) => ({ id: a.id, kind: a.kind, moduleId: a.moduleId, status: a.status })), preferredModuleId: p.preferredModuleId },
+      p.visualAsk,
+      p.tutorKind ?? null,
+    );
+    if (decision.status === "none") return null;
+    const outcome: PresentationOutcome = { decision, request: null, activity: null, lesson: null, result: null, fallback: "", cacheHit: false, calls: { local: 0, claude: 0 } };
+    if (decision.status === "text") return outcome;
+    const t = new Date().toISOString();
+    const log = (event: string, a: ActivityRecord | null) => this.store.logActivity(p.dir, { t, activityId: a?.id ?? decision.activityId ?? "", conceptId, event, trigger: decision.trigger, reason: decision.reason, ...(p.chatPath ? { chatPath: p.chatPath } : {}) });
+    const request: PresentationRequest = { version: 1, kind: decision.kind, reason: decision.reason, objective, sourceRefs: refs, ...(decision.moduleId ? { preferredModuleId: decision.moduleId } : {}) };
+    outcome.request = request;
+    const configure = (candidates: ModuleDescriptor[], model: LocalModel | null) => configureActivity({ request, conceptId, candidates, assets: this.visuals?.listAssets() ?? [], registry: this.visuals ?? NO_MODULES, model, catalogVersion: catalog, trigger: decision.trigger, modelName });
+
+    if (decision.status === "cached") {
+      const rec = saved.find((a) => a.id === decision.activityId) ?? null;
+      outcome.activity = rec;
+      outcome.cacheHit = !!rec;
+      if (rec?.lesson) {
+        outcome.lesson = this.variant(rec.lesson, p.variantSeed) ?? rec.lesson;
+        outcome.result = { status: "ready", lesson: outcome.lesson };
+      }
+      await log(decision.trigger === "explicit" ? "reused" : "offered", rec);
+      return outcome;
+    }
+    if (decision.status === "offer") {
+      await log("offered", null);
+      return outcome;
+    }
+    if (decision.status === "unsupported") {
+      // A failure saved for this concept and kind is reused; otherwise code records the gap.
+      const known = saved.find((a) => a.status !== "ready" && a.kind === decision.kind && !a.moduleId) ?? null;
+      const rec = known ?? (await configure([], null));
+      if (!known) await this.store.saveActivity(p.dir, rec);
+      return this.declined(p.dir, p.topic, n, outcome, rec, conceptId, !!known, log);
+    }
+    // configure: a saved configuration (or saved failure) for exactly these sources and versions
+    // is reused first, so a repeated failure never runs the local model again.
+    if (!this.visuals) return this.declined(p.dir, p.topic, n, outcome, null, conceptId, false, log);
+    const candidates = matchModules(`${objective}\n${sk.section}\n${p.said}`, decision.kind, descriptors, decision.moduleId ?? undefined).map((m) => m.descriptor);
+    const hit = saved.find((a) => a.kind === decision.kind && a.moduleId === candidates[0]?.id && a.objective === objective) ?? null;
+    let rec: ActivityRecord;
+    if (hit) {
+      rec = hit;
+      outcome.cacheHit = true;
+    } else {
+      rec = await configure(candidates, this.settings().localActivities === false ? null : this.local);
+      outcome.calls.local = rec.localCalls;
+      await this.store.saveActivity(p.dir, rec);
+    }
+    outcome.activity = rec;
+    if (rec.status === "ready" && rec.lesson) {
+      outcome.lesson = this.variant(rec.lesson, p.variantSeed) ?? rec.lesson;
+      outcome.result = { status: "ready", lesson: outcome.lesson };
+      await log(hit ? "reused" : "generated", rec);
+      return outcome;
+    }
+    return this.declined(p.dir, p.topic, n, outcome, rec, conceptId, !!hit, log);
+  }
+
+  /** An interactive that cannot be given: the gap is recorded, and the compiled worked lesson is offered instead. */
+  private async declined(dir: string, topic: Topic, n: number, outcome: PresentationOutcome, rec: ActivityRecord | null, conceptId: string, known: boolean, log: (event: string, a: ActivityRecord | null) => Promise<void>): Promise<PresentationOutcome> {
+    outcome.activity = rec;
+    outcome.result = rec ? toResult(rec) : { status: "invalid", reason: "No visual modules are installed.", validationErrors: [{ path: "$", message: "no module registry" }] };
+    outcome.fallback = await this.workedLesson(dir, topic, n);
+    if (rec?.status === "unsupported" && rec.missingCapability && !known) {
+      await this.store.logCapability({ t: rec.createdAt, topic: topic.title, conceptId, kind: rec.kind, operation: rec.missingCapability.operation, objective: rec.objective, motivatingTask: rec.missingCapability.motivatingTask, sources: rec.sourceRefs.map((s) => ({ path: s.path, contentHash: s.contentHash })) });
+    }
+    await log(rec?.status === "unsupported" ? "unsupported" : "failed", rec);
+    return outcome;
+  }
+
+  /** A fresh numeric variant made and validated by module code, when the module offers one. */
+  private variant(lesson: VisualLesson, seed?: number): VisualLesson | null {
+    if (seed === undefined || !this.visuals) return null;
+    const v = this.visuals.createVariant(lesson, seed);
+    if (!v) return null;
+    const ok = this.visuals.validateLesson(v);
+    return ok.ok ? ok.lesson : null;
+  }
+
+  /** Answers an explicit request for an activity in the chat, with no model call. */
+  private async presentLocally(p: { chatPath: string; chat: Chat; state: LearnerState; session: SessionRecord; outcome: PresentationOutcome; decision: Decision | null }): Promise<TurnResult> {
+    const { outcome, session } = p;
+    const kind = outcome.decision.kind;
+    const label = kind === "game" ? "Challenge" : kind === "external" ? "External activity" : kind.charAt(0).toUpperCase() + kind.slice(1);
+    let reply: string;
+    if (outcome.lesson) {
+      reply = `**${label}** · ${outcome.decision.reason}\n\n${outcome.lesson.predictionQuestion}\n\n*Make your prediction in the activity before you run it. Moving its controls, playing and resetting use no tokens.*`;
+      session.nextAction = session.pendingQuestion ? "Answer the open question." : "Make a prediction in the activity.";
+    } else {
+      const why = outcome.activity?.reason || outcome.decision.reason;
+      reply = `**No ${kind} for this yet** · ${why}${outcome.fallback ? `\n\nHere is the worked example from your course instead:\n\n${outcome.fallback}` : ""}\n\n*Ask for an explanation in words or a diagram if you want one.*`;
+    }
+    p.chat.messages.push({ role: "tutor", text: reply });
+    session.exactExcerpts = p.chat.messages.slice(-2).map((m) => `${m.role}: ${m.text}`);
+    session.unresolvedMisconceptions = [...p.state.misconceptions];
+    p.chat.fm.session = JSON.stringify(session);
+    p.chat.fm.pending_confidence = "";
+    p.chat.fm.answered_at = "";
+    await this.store.saveChat(p.chatPath, p.chat);
+    const out: TurnResult = { reply, changes: [], state: p.state, usage: zeroUsage(), local: true, presentation: outcome };
+    if (p.decision) out.decision = p.decision;
+    return out;
+  }
+
+  /** Records, on an open question in a chat, that an activity was used for it, so the answer counts as helped. */
+  private async noteActivityHelp(chatPath: string | undefined, state: LearnerState, kind: string): Promise<void> {
+    if (!chatPath) return;
+    const chat = await this.store.loadChat(chatPath);
+    const record = sessionFor(chat, state, (fmStr(chat.fm, "mode", "tutor") as Mode) || "tutor");
+    if (!record.pendingQuestion) return;
+    const line = `learner opened an interactive ${kind} for this question`;
+    if (!record.helpGiven.includes(line)) record.helpGiven = [...record.helpGiven, line].slice(-8);
+    chat.fm.session = JSON.stringify(record);
+    if (fmStr(chat.fm, "card")) chat.fm.card_help = "yes";
+    await this.store.saveChat(chatPath, chat);
+  }
+
+  /**
+   * An explicit request from the interface, such as a "Show a simulation" button: reopens a saved
+   * activity or configures one on a cache miss. Supported activities open with no approval step
+   * and no Claude call. With `chatPath`, an open question in that chat is marked as helped.
+   */
+  async requestActivity(dir: string, o: { kind: PresentationKind; concept?: number; chatPath?: string; preferredModuleId?: string; variantSeed?: number }): Promise<PresentationOutcome> {
+    const s = this.settings();
+    const topic = await this.store.loadTopic(dir);
+    const state = await this.store.loadState(dir, s.targetLevel);
+    const said = `show me a ${o.kind}`;
+    const outcome = await this.presentationFor({ dir, topic, state, mode: "auto", action: null, said, visualAsk: { kind: o.kind, said }, chatPath: o.chatPath, concept: o.concept, preferredModuleId: o.preferredModuleId, variantSeed: o.variantSeed });
+    if (!outcome) throw new Error("Choose a concept first.");
+    if (outcome.lesson) await this.noteActivityHelp(o.chatPath, state, o.kind);
+    return outcome;
+  }
+
+  /** Reopens a saved activity by id with no model call; with a seed, a fresh variant checked by the module. */
+  async openActivity(dir: string, activityId: string, o: { chatPath?: string; variantSeed?: number } = {}): Promise<PresentationOutcome> {
+    const rec = (await this.store.loadActivities(dir)).find((a) => a.id === activityId);
+    if (!rec) throw new Error("That activity is no longer saved.");
+    const state = await this.store.loadState(dir, this.settings().targetLevel);
+    const lesson = rec.lesson ? this.variant(rec.lesson, o.variantSeed) ?? rec.lesson : null;
+    await this.store.logActivity(dir, { t: new Date().toISOString(), activityId, conceptId: rec.conceptId, event: "opened", trigger: rec.trigger, reason: rec.selectionReason, ...(o.chatPath ? { chatPath: o.chatPath } : {}) });
+    if (lesson) await this.noteActivityHelp(o.chatPath, state, rec.kind);
+    const decision: PresentationDecision = { kind: rec.kind, trigger: "explicit", status: rec.status === "ready" ? "cached" : "unsupported", reason: rec.selectionReason, moduleId: rec.moduleId || null, activityId, candidates: rec.moduleId ? [rec.moduleId] : [] };
+    return { decision, request: null, activity: rec, lesson, result: lesson ? { status: "ready", lesson } : toResult(rec), fallback: "", cacheHit: true, calls: { local: 0, claude: 0 } };
+  }
+
+  /**
+   * The learner's answer inside an activity, assessed by the module's own code. It is logged with
+   * the activity and recorded as evidence, always as helped work: an interactive shows its result
+   * as the learner works, so it can support "can do with help" and never counts as unaided
+   * retention or transfer. No model is called.
+   */
+  async recordActivityResult(dir: string, activityId: string, response: unknown, o: { hintUsed?: boolean; chatPath?: string; confidence?: number | null } = {}): Promise<{ assessment: AssessmentResult; attempt: Attempt | null; changes: string[] }> {
+    const s = this.settings();
+    if (!this.visuals) throw new Error("No visual modules are installed.");
+    const rec = (await this.store.loadActivities(dir)).find((a) => a.id === activityId);
+    if (!rec?.lesson) throw new Error("That activity is no longer saved.");
+    const assessment = this.visuals.assessLesson(rec.lesson, response);
+    // The contract's response carries its own hintsUsed flag; either source marks the hint.
+    o = { ...o, hintUsed: !!o.hintUsed || (!!response && typeof response === "object" && (response as Record<string, unknown>).hintsUsed === true) };
+    const now = new Date().toISOString();
+    const state = await this.store.loadState(dir, s.targetLevel);
+    const n = Number(Object.entries(state.concepts).find(([, id]) => id === rec.conceptId)?.[0] ?? 0);
+    let attempt: Attempt | null = null;
+    let changes: string[] = [];
+    if (assessment.correct !== null && n in state.names) {
+      const result: Outcome = assessment.correct ? "correct" : assessment.score !== null && assessment.score > 0 ? "partial" : "incorrect";
+      attempt = {
+        id: `${activityId}:${now}`,
+        v: 2,
+        skill: n,
+        concept: rec.conceptId,
+        questionId: `${activityId}:${rec.lesson.assessmentId}`,
+        question: rec.lesson.predictionQuestion,
+        answer: JSON.stringify(response ?? null).slice(0, 400),
+        activity: "interactive",
+        mode: "activity",
+        difficulty: null,
+        result,
+        errorType: "",
+        note: assessment.feedback.slice(0, 300),
+        confidence: typeof o.confidence === "number" && o.confidence >= 0 && o.confidence <= 1 ? o.confidence : null,
+        assisted: true,
+        assistance: ["interactive activity: the representation responds as the learner works", ...(o.hintUsed ? ["the activity's hint was opened"] : [])],
+        answerExposed: false,
+        transfer: false,
+        seconds: null,
+        timestamp: now,
+        grading: "deterministic",
+        verification: "verified",
+        assumptions: `assessed by ${rec.moduleId}'s own code; interactive work counts as helped, never as unaided evidence`,
+        taskType: "interactive",
+        family: `activity-${rec.moduleId}`,
+      };
+      state.attempts = recordAttempt(state.attempts, attempt);
+      changes = applyAttempt(state, attempt);
+      await this.store.saveState(dir, state);
+    }
+    await this.store.logActivity(dir, { t: now, activityId, conceptId: rec.conceptId, event: "assessed", trigger: rec.trigger, reason: rec.selectionReason, correct: assessment.correct, hintUsed: !!o.hintUsed, ...(attempt ? { attemptId: attempt.id } : {}), ...(o.chatPath ? { chatPath: o.chatPath } : {}) });
+    return { assessment, attempt, changes };
+  }
+
+  /**
+   * How activities have fared on a topic: offers never opened (unnecessary activations), local
+   * configurations, cache hits, rejected configurations, missing capabilities, and whether the
+   * next unaided answer on the concept after an activity was right (resolved) or wrong.
+   */
+  async activityReport(dir: string): Promise<{ offered: number; unopened: number; generated: number; reused: number; failed: number; unsupported: number; assessed: number; resolved: number; unresolved: number; pending: number; localCalls: number; claudeCalls: 0 }> {
+    const log = await this.store.loadActivityLog(dir);
+    const records = await this.store.loadActivities(dir);
+    const state = await this.store.loadState(dir, this.settings().targetLevel);
+    const count = (ev: string) => log.filter((e) => e.event === ev).length;
+    const offeredIds = log.filter((e) => e.event === "offered");
+    const opened = new Set(log.filter((e) => e.event === "opened" || e.event === "reused" || e.event === "generated").map((e) => e.conceptId));
+    let resolved = 0;
+    let unresolved = 0;
+    let pending = 0;
+    for (const use of log.filter((e) => e.event === "generated" || e.event === "reused" || e.event === "opened")) {
+      const n = Number(Object.entries(state.concepts).find(([, id]) => id === use.conceptId)?.[0] ?? 0);
+      const next = state.attempts.filter((a) => a.skill === n && a.timestamp > use.t && !a.assisted && !a.answerExposed && a.result !== "ungraded" && a.verification !== "disputed").sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1))[0];
+      if (!next) pending++;
+      else if (next.result === "correct") resolved++;
+      else unresolved++;
+    }
+    return { offered: offeredIds.length, unopened: offeredIds.filter((e) => !opened.has(e.conceptId)).length, generated: count("generated"), reused: count("reused") + count("opened"), failed: count("failed"), unsupported: count("unsupported"), assessed: count("assessed"), resolved, unresolved, pending, localCalls: records.reduce((a, r) => a + r.localCalls, 0), claudeCalls: 0 };
+  }
+
   /**
    * One model turn. `message` may be empty to start a chat, to continue, or to retry after a
    * failure. The learner's message is saved before the call, so nothing is lost if the call fails.
@@ -459,7 +849,11 @@ export class Engine {
 
     // What the learner's message means for the open step, read before any model is asked.
     const before = sessionFor(chat, state, mode);
-    const intent = readIntent(said, !!before.pendingQuestion);
+    // Asking for a diagram, a simulation or a game is asking for help with the open step. It is
+    // never an answer to it, and an answer given after it counts as helped.
+    const visualAsk = readPresentationRequest(said);
+    const heard = readIntent(said, !!before.pendingQuestion);
+    const intent = visualAsk && (heard === "attempt" || heard === "none") ? (before.pendingQuestion ? "hint" : "question") : heard;
     let session = applyIntent(before, intent, said);
     // The action the open question was put under. A hint turn since then does not change it.
     const askedUnder = before.askedUnder || before.action;
@@ -476,7 +870,9 @@ export class Engine {
       }
       session.action = decision.action;
       session.reason = decision.reason;
-      if (decision.action === "diagnose-prerequisite" && decision.focus !== null && external.some((e) => e.skill === decision!.focus)) chat.fm.checked = [...new Set([...fmList(chat.fm, "checked"), String(decision.focus)])];
+      // Outside prerequisite checks are kept by prerequisite id, so each weak one is reached in turn.
+      if (decision.action === "diagnose-prerequisite" && decision.assesses) setPrereqCheck(chat, decision.assesses, "asked");
+      else if (decision.action === "diagnose-prerequisite" && decision.focus !== null && external.some((e) => e.skill === decision!.focus && !e.id)) chat.fm.checked = [...new Set([...fmList(chat.fm, "checked"), String(decision.focus)])];
       void this.store.logDecision({ t: now, topic: topic.title, input, decision: { version: POLICY_VERSION, action: decision.action, focus: decision.focus, local: decision.local } });
     } else {
       session.action = intent === "attempt" ? "check" : intent === "hint" ? "hint" : "continue";
@@ -493,6 +889,15 @@ export class Engine {
     session.concept = state.focus !== null ? state.concepts[state.focus] ?? "" : "";
     session.conceptName = state.focus !== null ? state.names[state.focus] ?? "" : "";
     session.goal = session.goal || fmStr(topic.fm, "goal") || `Reach level ${state.target} in ${topic.title}`;
+
+    // Presentation, decided in code before any model is asked. An explicit request for an
+    // activity a module supports is answered here: a saved one reopens, a new one is configured
+    // by the local model, and either way Claude is not called. So is a request that cannot be
+    // met when the course has a worked lesson to offer instead.
+    const presented = await this.presentationFor({ dir, topic, state, mode, action: decision?.action ?? null, said, visualAsk, chatPath });
+    if (presented && presented.decision.trigger === "explicit" && (presented.lesson || (presented.decision.status !== "text" && presented.fallback))) {
+      return this.presentLocally({ chatPath, chat, state, session, outcome: presented, decision });
+    }
 
     // Route on the learner's latest message (also on a retry, when `message` itself is empty).
     let route = s.smartRouting ? routeTurn({ mode, message: said, attached: !!opts.attached }) : { route: "standard" as Route, reason: "routing off" };
@@ -537,6 +942,10 @@ export class Engine {
     extras.push(`# Session record\n${JSON.stringify(session)}`);
     if (decision) extras.push(`Instructional action: ${decision.action}. ${ACTION_GUIDE[decision.action]}\nWhy: ${decision.reason}${decision.suggestIndependent ? "\nThe learner looks ready to practise this unaided. Say so in one line and let them choose; stay in guided practice unless they switch." : ""}`);
     if (session.disputed) extras.push("# Disputed grading\nThe learner disputes how their last answer was marked, and the app has set that mark aside. Check that answer again step by step. If the mark was wrong, say so plainly. Do not add an <attempt> line for this re-check.");
+    const note = presented ? presentationNote(presented.decision) : "";
+    if (note) extras.push(note);
+    // The tutor may propose an interactive in the reply it is writing anyway, but only where one could exist.
+    else if (this.visuals && focusSkill?.visual && ["simulation", "game"].includes(focusSkill.visual.kind) && ["auto", "quiz", "tutor"].includes(mode)) extras.push(PRESENT_RULE);
     const input = `${buildTurnInput({ state, today: this.today(), chat, attached: opts.attached, gaps: prereqGaps(state, pre) })}\n\n${extras.join("\n\n")}\n`;
 
     let res = await this.call({ model, effort, system, input, onSpawn: opts.onSpawn });
@@ -608,6 +1017,9 @@ export class Engine {
     let elsewhere = false;
     let tagRaw: string | null = null;
     parsed.text = parsed.text.replace(/`{0,3}\s*<attempt>([\s\S]*?)<\/attempt>\s*`{0,3}/g, (_all, raw: string) => ((tagRaw = raw), "")).trim();
+    // The tutor's optional proposal of an interactive, a field in a reply it was writing anyway.
+    const proposal = extractPresent(parsed.text);
+    parsed.text = proposal.text;
     const canMark = !!said && !!before.pendingQuestion && (intent === "attempt" || intent === "skip");
     if (canMark) {
       let tag: Record<string, unknown> | null = null;
@@ -663,7 +1075,9 @@ export class Engine {
           timestamp: answeredAt,
           grading: result === "skipped" ? "deterministic" : "model",
           verification: result === "skipped" || checkedBySympy ? "verified" : "unverified",
-          assumptions: result === "skipped" ? "the learner skipped the question" : checkedBySympy ? "SymPy recomputed the results the reply states; the judgement of the reasoning is the model's" : "one model judgement, not independently checked",
+          assumptions: result === "skipped" ? "the learner skipped the question" : checkedBySympy ? `SymPy recomputed the results the reply states${report.numeric ? " (some only numerically, at sample points)" : ""}${report.unresolved ? `; ${report.unresolved} could not be checked` : ""}; the judgement of the reasoning is the model's` : "one model judgement, not independently checked",
+          taskType: taskTypeFor(askedUnder, mode, tag),
+          family: "",
         };
         // A check on a prerequisite in another topic is evidence about that concept. It is kept
         // with that topic's evidence, and counts neither for nor against the concept in focus.
@@ -678,6 +1092,8 @@ export class Engine {
           for (const line of applyAttempt(there, marked)) changes.push(`${outside.topic}: ${line}`);
           await this.store.saveState(outside.dir, there);
           elsewhere = true;
+          // The outcome is kept with the chat by prerequisite, so the next one is checked next.
+          setPrereqCheck(chat, outside.id, marked.result);
         } else {
           state.attempts = recordAttempt(state.attempts, marked);
           for (const line of applyAttempt(state, marked)) changes.push(line);
@@ -688,10 +1104,24 @@ export class Engine {
     // 6. A lesson that was delivered is exposure: it can put a subskill on the map at level 1,
     //    and no higher. What the learner can do is shown only by their answers.
     //    A worked example that answers a prerequisite check from another topic teaches that, not the focus.
-    if (decision && TEACHING.includes(decision.action) && !assesses && !stepPrereq && decision.focus !== null && decision.focus in state.names && parsed.text) {
+    if (decision && TEACHING.includes(decision.action) && !assesses && !stepPrereq && !decision.teaches && decision.focus !== null && decision.focus in state.names && parsed.text) {
       const f = decision.focus;
       if (!(f in state.taught)) state.taught[f] = this.today();
       if ((state.levels[f] ?? 0) < 1) push(setLevel(state, f, 1, "lesson", "a lesson on this was delivered", now));
+    }
+    //    An explanation of a prerequisite from another topic, after its check failed, is exposure to that concept.
+    if (decision?.teaches && parsed.text) {
+      const pre = external.find((e) => e.id === decision!.teaches);
+      if (pre) {
+        const there = await this.store.loadState(pre.dir, s.targetLevel);
+        if (pre.n in there.names) {
+          if (!(pre.n in there.taught)) there.taught[pre.n] = this.today();
+          const line = (there.levels[pre.n] ?? 0) < 1 ? setLevel(there, pre.n, 1, "lesson", "a lesson on this was delivered while studying a concept that builds on it", now) : null;
+          if (line) changes.push(`${pre.topic}: ${line}`);
+          await this.store.saveState(pre.dir, there);
+        }
+      }
+      setPrereqCheck(chat, decision.teaches, "taught");
     }
 
     // 7. The model's own proposals, within what the evidence allows. Levels are never changed on
@@ -716,7 +1146,13 @@ export class Engine {
     const out: TurnResult = { reply, changes, state, usage, route: { ...route, model }, tools: toolLog };
     if (marked) out.attempt = marked;
     if (decision) out.decision = decision;
-    if (verifying) out.maths = { computed, checked: parsed.claims.length, disputed: report.disagreed, corrected };
+    if (verifying) out.maths = { computed, checked: parsed.claims.length, disputed: report.disagreed, corrected, ...(report.unresolved ? { unresolved: report.unresolved } : {}), ...(report.numeric ? { numeric: report.numeric } : {}) };
+    if (presented) out.presentation = presented;
+    else if (proposal.kind) {
+      // The tutor's proposal can only become an offer, and only for a module that exists.
+      const offered = await this.presentationFor({ dir, topic, state, mode, action: decision?.action ?? null, said, visualAsk: null, tutorKind: proposal.kind, chatPath });
+      if (offered) out.presentation = offered;
+    }
 
     // 9. A long chat is summarised and continued in a new part, but only at a finished step:
     //    an open question or a half-done proof keeps its whole transcript.
@@ -891,6 +1327,8 @@ export class Engine {
       grading: p.grading,
       verification: p.result === "ungraded" || p.grading === "model" ? "unverified" : "verified",
       assumptions: p.assumptions,
+      taskType: (TASK_TYPES.includes(p.q.task as TaskType) ? p.q.task : p.activity === "retrieval" ? "recall" : "application") as TaskType,
+      family: p.q.family ?? "",
     };
   }
 
@@ -973,6 +1411,7 @@ export class Engine {
       throw new ClaudeError(`The compiled output was not in the expected format (${topic.subskills.length} subskills, ${questions.length} questions). It began: ${res.text.slice(0, 200)}`);
     }
     const subject = subjects.includes(parsed.subject) ? parsed.subject : "none";
+    const previous = req.existingDir ? await this.store.loadPackage(req.existingDir).catch(() => null) : null;
     const dir = await this.store.saveCompiled({
       title: req.title,
       fm: { source: req.mode, subject, goal: req.goal.trim(), research: req.research ? "yes" : "no", ...req.fm },
@@ -981,7 +1420,60 @@ export class Engine {
       target: s.targetLevel,
       existingDir: req.existingDir,
     });
-    return { dir, subskills: topic.subskills.length, questions: questions.length, usage, agents: agents + 1 };
+    const pkg = await this.writePackage(dir, req, previous);
+    return { dir, subskills: topic.subskills.length, questions: questions.length, usage, agents: agents + 1, coverage: coverageLine(pkg), complete: pkg.coverage.complete };
+  }
+
+  /** Builds and saves the course package for a compiled topic, fingerprinting its source notes. */
+  private async writePackage(dir: string, req: Pick<CompileRequest, "mode" | "material" | "research">, previous: CoursePackage | null, refreshed?: { subskills: number[]; notes: string[] }): Promise<CoursePackage> {
+    const s = this.settings();
+    const topic = await this.store.loadTopic(dir);
+    const state = await this.store.loadState(dir, s.targetLevel);
+    const sources = req.mode === "subject" ? {} : Object.fromEntries(req.material.map((m) => [m.name, contentHash(m.text)]));
+    const pkg = buildPackage({ topic, questions: await this.store.loadQuestions(dir), concepts: state.concepts, sources: refreshed && previous ? { ...previous.sources, ...sources } : sources, previous, at: new Date().toISOString(), mode: req.mode, research: !!req.research, refreshed });
+    await this.store.savePackage(dir, pkg);
+    return pkg;
+  }
+
+  /**
+   * Recompiles only what changed. Source notes are compared with the fingerprints in the course
+   * package: unchanged notes cost nothing, and a change that reaches a few subskills rewrites
+   * just those sections and their questions in one call, keeping every other section, question
+   * id and review schedule. New notes, a change reaching most of the topic, or a topic with no
+   * package yet get a full compile. Learner evidence is kept either way, through stable ids.
+   */
+  async refresh(req: CompileRequest & { existingDir: string }, onProgress: (msg: string) => void = () => {}): Promise<CompileResult & { refresh: "unchanged" | "partial" | "full"; subskillsRefreshed: number[]; why: string }> {
+    const s = this.settings();
+    const dir = req.existingDir;
+    const pkg = await this.store.loadPackage(dir).catch(() => null);
+    const full = async (why: string) => ({ ...(await this.compile(req, onProgress)), refresh: "full" as const, subskillsRefreshed: [] as number[], why });
+    if (!pkg || req.mode === "subject" || !req.material.length) return full(!pkg ? "there is no course package yet" : "a topic without notes is always compiled whole");
+    const now = Object.fromEntries(req.material.map((m) => [m.name, contentHash(m.text)]));
+    const ch = sourceChanges(pkg, now);
+    const topic = await this.store.loadTopic(dir);
+    const questions = await this.store.loadQuestions(dir);
+    if (!ch.changed.length && !ch.removed.length && !ch.added.length) return { dir, subskills: topic.subskills.length, questions: questions.length, usage: zeroUsage(), agents: 0, coverage: coverageLine(pkg), complete: pkg.coverage.complete, refresh: "unchanged", subskillsRefreshed: [], why: "no source note has changed since the last compile" };
+    if (ch.added.length) return full(`new notes (${ch.added.slice(0, 3).join(", ")}) need a full compile to place them`);
+    if (!ch.subskills.length) return full("the changed notes are not cited by any subskill");
+    if (ch.subskills.length > Math.max(1, Math.floor(pkg.lessons.length / 2))) return full(`the changes reach ${ch.subskills.length} of ${pkg.lessons.length} subskills`);
+
+    onProgress(`Refreshing ${ch.subskills.length} subskill${ch.subskills.length === 1 ? "" : "s"} from ${ch.changed.length + ch.removed.length} changed note${ch.changed.length + ch.removed.length === 1 ? "" : "s"}…`);
+    const material = req.material.filter((m) => ch.changed.includes(m.name)).map((m) => `## [[${m.name}]]\n${m.text.trim()}`).join("\n\n");
+    const res = await this.call({ model: s.compileModel, system: await this.store.skill("compile.md"), input: buildRefreshInput({ title: topic.title, goal: req.goal, subjects: await this.store.subjectNames(), card: topic.body, subskills: ch.subskills, removed: ch.removed, material }), timeoutMs: 600000 });
+    const parsed = parseCompileOutput(res.text);
+    const sections = subskillSections(parsed.topicBody);
+    const missing = ch.subskills.filter((n) => !sections.has(n));
+    if (missing.length) throw new ClaudeError(`The refresh did not return subskill ${missing.join(", ")}. Nothing was changed; recompile the whole topic instead.`);
+    const qRaw = splitFrontmatter(await this.store.readQuestionsRaw(dir)).body;
+    const merged = mergeRefresh({ topicBody: topic.body, questionsBody: qRaw, sections, questions: parsed.questionsBody, subskills: ch.subskills });
+    const check = parseTopic(merged.topicBody);
+    if (check.subskills.length !== topic.subskills.length) throw new ClaudeError("The refreshed card did not keep the same subskills. Nothing was changed; recompile the whole topic instead.");
+    const kept = parseQuestions(merged.questionsBody).filter((q) => !merged.replaced.includes(q.subskill)).map((q) => q.id);
+    const fm: Frontmatter = { ...topic.fm };
+    delete fm.compiled;
+    await this.store.saveCompiled({ title: topic.title, fm, topicBody: merged.topicBody, questionsBody: merged.questionsBody, target: s.targetLevel, existingDir: dir, keepCards: kept });
+    const next = await this.writePackage(dir, req, pkg, { subskills: merged.replaced, notes: [...ch.changed, ...ch.removed] });
+    return { dir, subskills: check.subskills.length, questions: parseQuestions(merged.questionsBody).length, usage: res.usage, agents: 1, coverage: coverageLine(next), complete: next.coverage.complete, refresh: "partial", subskillsRefreshed: merged.replaced, why: `${[...ch.changed, ...ch.removed].join(", ")} changed` };
   }
 
   /**
@@ -1003,7 +1495,8 @@ export class Engine {
     const pending = questions.find((q) => q.id === fmStr(chat.fm, "card"));
     const text = message.trim();
     const last = chat.messages[chat.messages.length - 1];
-    const asksTutor = (t: string) => looksLikeQuestion(t) && !givesUp(t);
+    // A question, or a request for a diagram or simulation, goes to the tutor as help with the open question.
+    const asksTutor = (t: string) => (looksLikeQuestion(t) || !!readPresentationRequest(t)) && !givesUp(t);
     const tools: ToolResult[] = [];
     // A bank quiz may need SymPy for the next typed answer; load it while the learner reads.
     if (questions.some((q) => q.type === "short")) this.warmMaths();
@@ -1117,7 +1610,9 @@ export class Engine {
     let next: Question | null = null;
     if (opts.adaptive) {
       if (!decision || verdict) decision = await this.planFrom(dir, chat, state, mode, attempt && attempt.result === "correct" && attempt.skill ? attempt.skill : null);
-      if (decision.local === "bank" && decision.focus !== null) next = pickQuizQuestion(questions.filter((q) => q.subskill === decision!.focus && q.type !== "open"), state, asked, today);
+      // Transfer questions are kept fresh for assessment: practice does not use them up.
+      const assessing = decision.action === "transfer" || decision.action === "retrieval";
+      if (decision.local === "bank" && decision.focus !== null) next = pickQuizQuestion(questions.filter((q) => q.subskill === decision!.focus && q.type !== "open" && (assessing || q.task !== "transfer")), state, asked, today);
     } else next = pickQuizQuestion(questions, state, asked, today);
     if (!next && !verdict) return this.turn(dir, chatPath, message, opts);
 
@@ -1266,7 +1761,7 @@ export class Engine {
       model: strong ? s.chatModel : s.utilityModel,
       effort: careful ? s.hardEffort || s.effort || undefined : strong ? s.effort || undefined : undefined,
       system: utilityPrompt(await this.store.skill("utility.md"), "grade"),
-      input: `Question: ${q.question}\n\nModel answer: ${q.answer}\n${q.explanation ? `Explanation: ${q.explanation}\n` : ""}\nLearner's answer: ${answer.trim() || "(blank)"}`,
+      input: `Question: ${q.question}\n\nModel answer: ${q.answer}\n${q.explanation ? `Explanation: ${q.explanation}\n` : ""}${q.rubric ? `Rubric: ${q.rubric}\n` : ""}\nLearner's answer: ${answer.trim() || "(blank)"}`,
       jsonSchema: GRADE_SCHEMA,
     });
     let o = res.structured as { grade?: string; feedback?: string } | undefined;

@@ -139,7 +139,8 @@ test("home, study, review, topic page and graph work together from the normal en
   plugin.opts.codePlacement = false; // placement has its own tests; here the first turn is the model's
   view.go("home");
   await view.reload();
-  assert.match($(root, ".st-next").textContent, /Suggested next.*Learn · Linear maps.*Start with a lesson on Definition of a linear map/s);
+  // Home suggests exactly what Adaptive study would do first (0.6): one diagnostic question, not a separate ranking.
+  assert.match($(root, ".st-next").textContent, /Suggested next.*Diagnosis · Linear maps.*no evidence on Definition of a linear map yet, so one question finds your starting point.*Start: Diagnosis/s);
   assert.equal($(root, ".st-resume"), null, "nothing to resume yet");
   assert.deepEqual($$(root, ".st-tile-label").map((e: any) => e.textContent), ["Adaptive study", "Learn", "Practise", "Review", "Ask", "Knowledge graph"]);
   assert.match($(root, ".st-topics .st-row-item").textContent, /Linear maps0%.*2 concepts · 0 secured · practised not yet/s);
@@ -184,7 +185,7 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent, b.disabled]), [["Hint", false], ["Explain", false], ["Skip", false]]);
   // The reasoning behind the action is one click away.
   button(root, "Why this?").click();
-  assert.match($(root, ".st-why-detail").textContent, /Definition of a linear map[\s\S]*Policy version 2\. Scores only rank what to study next\./);
+  assert.match($(root, ".st-why-detail").textContent, /Definition of a linear map[\s\S]*Policy version 3\. Scores only rank what to study next\./);
   button(root, "Hide details").click();
 
   // The slider: unset until deliberately moved, readable, clearable by keyboard.

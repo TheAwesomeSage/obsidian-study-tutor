@@ -3,7 +3,7 @@
 // replayed. Weights only rank what to study next. They cannot change a level: levels move
 // through the evidence rules in evidence.ts and nowhere else.
 
-import type { Mode } from "./formats";
+import type { Mode, NextStep } from "./formats";
 import type { Intent } from "./session";
 
 /**
@@ -11,8 +11,11 @@ import type { Intent } from "./session";
  * across versions.
  *   1  0.5.0: priority × distance from level 5, one fixed ladder of actions
  *   2  0.5.1: weighted components, explicit constraints, local dispatch, Learn-mode limits
+ *   3  0.6.0: concept-level delayed checks; recency from unaided work only; no transfer question
+ *      on the day it cannot count; prerequisites in other topics checked one by one with their
+ *      outcomes; teach-back and edge-case steps toward level 5; Home uses the same decision
  */
-export const POLICY_VERSION = 2;
+export const POLICY_VERSION = 3;
 
 export interface PolicyWeights {
   /** Exam relevance: the study priority set per concept. */
@@ -55,6 +58,8 @@ export type Action =
   | "independent-practice"
   | "transfer"
   | "retrieval"
+  | "teach-back"
+  | "edge-case"
   | "check"
   | "continue";
 
@@ -70,6 +75,8 @@ export const ACTION_LABEL: Record<Action, string> = {
   "independent-practice": "Independent practice",
   transfer: "Transfer question",
   retrieval: "Retrieval check",
+  "teach-back": "Teach it back",
+  "edge-case": "Edge case",
   check: "Checking your answer",
   continue: "Continuing",
 };
@@ -82,11 +89,13 @@ export const ACTION_GUIDE: Record<Action, string> = {
   explain: "Teach the idea: why it matters, the idea in plain words and then in notation, one fully worked example, then one question for the learner to try.",
   "worked-example": "Show a different, fully worked example with each step justified, then ask the learner to do a similar one.",
   "re-explain": "Explain it again in a different representation from before (numbers, a picture in words, code, or an analogy with its limits stated), then check with one question.",
-  hint: "Give the smallest hint that lets the learner take the next step. Do not give the answer. If this is a second request, be more direct.",
+  hint: "Help in steps, one step per request: first point to the step that is going wrong, then give a conceptual hint, then show that one step worked, and only then explain fully. Do not give the answer to the pending question. After full help, the next question should be a fresh one answered without help.",
   "guided-practice": "Set one problem and support the learner through it, giving graduated hints only when asked or when they are stuck.",
   "independent-practice": "Set one fresh problem. Give no hint, example or method before the attempt.",
   transfer: "Set one unfamiliar problem that uses the idea in a new setting. Give no hints.",
   retrieval: "Ask one recall question on this material without warning and without hints.",
+  "teach-back": "Ask the learner to explain the idea as if teaching a classmate: what it says, why it holds, and one example of their own. Give no explanation or example before the attempt. When marking, judge accuracy, completeness and whether someone could learn from it.",
+  "edge-case": "Set one boundary or degenerate case where the usual method needs care (an empty or extreme input, a limit, an exception to the rule). Give no hint. When marking, ask for the reason, not only the result.",
   check: "The learner has answered the pending question. Check the answer step by step, say plainly whether it is right, and record the attempt.",
   continue: "Carry on with the current step and keep the pending question open.",
 };
@@ -111,11 +120,30 @@ export interface SkillInput {
   independentCorrect: number;
   recentFailures: number;
   lapse: boolean;
-  /** Days since the last marked attempt. Null when there is none. */
+  /** Days since the last unaided attempt. Helped work does not count as renewed retention. Null when there is none. */
   daysSince: number | null;
   /** Bank questions on this subskill that code can mark and this chat has not asked. */
   bankLeft: number;
+  /** A delayed independent check on this concept falls due today or earlier. */
+  checkDue?: boolean;
+  /** When that check falls due (yyyy-mm-dd), for the reason shown. */
+  nextCheck?: string | null;
+  /**
+   * A transfer question answered today could count: the first unaided success was on an earlier
+   * day. False means a transfer today cannot satisfy the delayed requirement. Unset means true.
+   */
+  transferReady?: boolean;
+  /** Level 5 still needs an unaided teach-back, or an unaided edge case. */
+  needsTeachBack?: boolean;
+  needsEdgeCase?: boolean;
 }
+
+/**
+ * How a prerequisite check in another topic came out in this chat, by the prerequisite's id.
+ * "asked" means the question was put and not marked; "taught" means it was explained after a
+ * failed check. Missing means not yet checked.
+ */
+export type PrereqCheck = "asked" | "correct" | "partial" | "incorrect" | "skipped" | "ungraded" | "taught";
 
 export interface PolicyInput {
   mode: Mode;
@@ -134,8 +162,10 @@ export interface PolicyInput {
   placementReady: boolean;
   /** Prerequisites in other topics of each subskill, with the level held there. */
   external: { skill: number; name: string; topic: string; level: number | null; id?: string }[];
-  /** Subskills whose outside prerequisites this chat has already checked. */
+  /** Subskills whose outside prerequisites a chat from before 0.6 recorded as all checked. */
   checked: number[];
+  /** Outside prerequisite checks in this chat, by prerequisite id, with their outcome. */
+  prereqChecks?: Record<string, PrereqCheck>;
   /** The subskill of a run of unaided bank practice whose last answer was right, when one is under way. */
   continuing?: number | null;
 }
@@ -164,6 +194,11 @@ export interface Decision {
    * prerequisite check across topics, whose answer is evidence about that concept, not the focus.
    */
   assesses?: string;
+  /**
+   * Stable id of a concept in another topic that this turn explains, after a failed check on it.
+   * The lesson is exposure to that concept, not to the focus.
+   */
+  teaches?: string;
 }
 
 /** Level a prerequisite must hold before what builds on it is taught. */
@@ -182,6 +217,8 @@ export function scoreSkills(p: PolicyInput): Score[] {
       let gap = Math.max(0, p.target - level) / Math.max(1, p.target);
       // At target on paper, without the evidence to hold it: worth a check, less than a real gap.
       if (gap === 0 && !backed) gap = 0.25;
+      // A delayed check that has fallen due is worth doing even at target.
+      if (s.checkDue && level >= 3) gap = Math.max(gap, 0.4);
       if (s.lapse) gap = Math.max(gap, 0.5);
       const below = p.skills.filter((o) => o.n !== s.n && (o.level ?? 0) < p.target && rests(o.n, s.n, by)).length;
       const parts = {
@@ -247,7 +284,7 @@ export function decide(p: PolicyInput): Decision {
     let a = action;
     if (p.mode === "teach" && !LEARN_ACTIONS.includes(a)) {
       // Learn mode teaches. Anything that would examine becomes supported practice, with a suggestion.
-      suggestIndependent = a === "independent-practice" || a === "transfer" || a === "retrieval";
+      suggestIndependent = a === "independent-practice" || a === "transfer" || a === "retrieval" || a === "teach-back" || a === "edge-case";
       a = a === "diagnose" ? "explain" : a === "diagnose-error" ? "re-explain" : "guided-practice";
       constraint = constraint || "Learn mode stays within explanation, examples and guided practice";
     }
@@ -273,12 +310,18 @@ export function decide(p: PolicyInput): Decision {
     return out("independent-practice", run.n, `${run.name} needs ${left} more correct answer${left === 1 ? "" : "s"} without help before it can move up.`, "a run of unaided practice continues until it has the answers it needs", "bank");
   }
 
+  // A concept waiting only for a transfer question that cannot count today is parked: asking it
+  // now would spend a question on something the delayed rule cannot accept.
+  const parked = (k: SkillInput): boolean => (k.level ?? 0) >= 3 && k.independentCorrect >= 2 && k.supported < 4 && k.transferReady === false && !k.checkDue && !k.lapse && k.recentFailures < 2;
+
   // Which subskill: stay with the focus while its step is unfinished, otherwise take the top of the ranking.
-  const top = scores[0];
+  const open = scores.filter((x) => !parked(by.get(x.n)!));
+  const ranked = open.length ? open : scores;
+  const top = ranked[0];
   const focusSkill = p.focus !== null ? by.get(p.focus) : undefined;
   const focusScore = scores.find((s) => s.n === p.focus)?.score ?? 0;
-  const stay = !!focusSkill && p.intent !== "switch" && !p.completedStep && focusScore > 0;
-  const wanted = stay ? focusSkill!.n : p.intent === "switch" && focusSkill && top.n === focusSkill.n && scores[1] ? scores[1].n : top.n;
+  const stay = !!focusSkill && p.intent !== "switch" && !p.completedStep && focusScore > 0 && !(open.length && parked(focusSkill));
+  const wanted = stay ? focusSkill!.n : p.intent === "switch" && focusSkill && top.n === focusSkill.n && ranked[1] ? ranked[1].n : top.n;
   const why = stay ? "" : whyChosen(scores.find((s) => s.n === wanted) ?? top, p);
 
   // 2. Prerequisites inside the topic.
@@ -294,12 +337,24 @@ export function decide(p: PolicyInput): Decision {
   }
   const s = by.get(wanted)!;
 
-  // Prerequisites in other topics: checked once per chat, never assumed.
+  // Prerequisites in other topics: each weak or unknown one is checked once per chat, by its id,
+  // and one whose check failed is explained before going on, so every unresolved prerequisite
+  // is reached in turn. Answering this concept correctly without help shows the prerequisite in
+  // use, which settles it without a separate check.
   const outside = p.external.filter((e) => e.skill === s.n && (e.level === null || e.level < UNLOCK));
-  if (outside.length && !p.checked.includes(s.n)) {
-    const e = outside[0];
-    const d = out("diagnose-prerequisite", s.n, `${s.name} builds on ${e.name} from ${e.topic}, where your level is ${e.level === null ? "not known" : `only ${e.level}`}. One short question checks it before going on.`, "a suspected prerequisite weakness is diagnosed before it is treated as established");
-    return e.id ? { ...d, assesses: e.id } : d;
+  if (outside.length && !p.checked.includes(s.n) && s.independentCorrect === 0) {
+    const results = p.prereqChecks ?? {};
+    const failed = outside.find((e) => !!e.id && ["incorrect", "partial", "skipped"].includes(results[e.id] ?? ""));
+    if (failed) {
+      const r = results[failed.id!];
+      const how = r === "skipped" ? "was skipped" : r === "partial" ? "was only partly right" : "was not answered correctly";
+      return { ...out("explain", s.n, `${s.name} builds on ${failed.name} from ${failed.topic}, and the check on it ${how}. A short explanation of ${failed.name} comes first.`, "a prerequisite that failed its check is taught before what builds on it"), teaches: failed.id };
+    }
+    const e = outside.find((x) => !x.id || !(x.id in results));
+    if (e) {
+      const d = out("diagnose-prerequisite", s.n, `${s.name} builds on ${e.name} from ${e.topic}, where your level is ${e.level === null ? "not known" : `only ${e.level}`}. One short question checks it before going on.`, "a suspected prerequisite weakness is diagnosed before it is treated as established");
+      return e.id ? { ...d, assesses: e.id } : d;
+    }
   }
 
   const level = s.level;
@@ -311,13 +366,41 @@ export function decide(p: PolicyInput): Decision {
   if (s.lapse || s.recentFailures >= 2) return out("diagnose-error", s.n, `${why}Your recent unaided answers on ${s.name} were wrong, so the cause is found before more practice.`);
   if (level === 2) return out("guided-practice", s.n, `${why}You can follow ${s.name}, so the next step is practice with help on hand.`);
   const backed = level <= s.supported;
+  const bank = s.bankLeft > 0 ? "bank" : null;
+  const delayed = () => out("retrieval", s.n, `${why}A delayed check on ${s.name} is due${s.nextCheck ? ` (from ${s.nextCheck})` : ""}. One question without help shows whether it has held.`, "a delayed independent check is taken when it falls due", bank);
   if (level >= p.target && backed) {
-    return out("retrieval", s.n, `${why}${s.name} is at target. A recall question checks that it has held.`, "", s.bankLeft > 0 ? "bank" : null);
+    if (s.checkDue) return delayed();
+    return out("retrieval", s.n, `${why}${s.name} is at target. A recall question checks that it has held.`, "", bank);
   }
   if (s.independentCorrect < 2) {
-    return out("independent-practice", s.n, `${why}${s.name} needs ${2 - s.independentCorrect} more correct answer${2 - s.independentCorrect === 1 ? "" : "s"} without help before it can move up.`, "", s.bankLeft > 0 ? "bank" : null);
+    return out("independent-practice", s.n, `${why}${s.name} needs ${2 - s.independentCorrect} more correct answer${2 - s.independentCorrect === 1 ? "" : "s"} without help before it can move up.`, "", bank);
   }
+  if (s.supported < 4) {
+    if (s.transferReady === false) {
+      return out("independent-practice", s.n, `${why}${s.name} now needs a transfer question on a later day than your first unaided success, so that is due from tomorrow. Practice today keeps it going but cannot raise the level.`, "a transfer question is set only when it can count", bank);
+    }
+    // A transfer question on a later day is also the delayed check, so it is set instead of a recall question.
+    return out("transfer", s.n, `${why}You have answered ${s.name} correctly without help. A new kind of problem shows whether it transfers.`);
+  }
+  if (s.checkDue) return delayed();
+  // Level 4 is held. "Can teach it and handle edge cases" needs exactly that, shown without help.
+  if (p.target >= 5 && s.needsTeachBack) return out("teach-back", s.n, `${why}${s.name} is held at level 4. Level 5 needs an explanation of it, without help, good enough to teach from.`, "level 5 needs a teach-back and an edge case");
+  if (p.target >= 5 && s.needsEdgeCase) return out("edge-case", s.n, `${why}${s.name} is held at level 4. Level 5 also needs an edge case handled without help.`, "level 5 needs a teach-back and an edge case");
   return out("transfer", s.n, `${why}You have answered ${s.name} correctly without help. A new kind of problem shows whether it transfers.`);
+}
+
+/**
+ * The Home screen's suggestion for one topic, taken from the same decision Adaptive study would
+ * make on a fresh chat, so the two never disagree about the concept or the step. Following it
+ * opens Adaptive study on that concept. Flashcards are item recall, kept apart from concept
+ * evidence: they come first only when the policy has nothing pressing (a lapse, a due delayed
+ * check, an unchecked prerequisite).
+ */
+export function homeStep(d: Decision, opts: { due: number; atTarget: boolean }): NextStep {
+  const pressing = d.action === "diagnose-error" || d.action === "diagnose-prerequisite" || (d.action === "retrieval" && /delayed independent check/.test(d.constraint));
+  if (!pressing && opts.due > 0) return { action: "review", title: "Review", detail: `${opts.due} flashcard${opts.due === 1 ? " is" : "s are"} due. Reviewing uses no tokens.` };
+  if (opts.atTarget && !pressing) return { action: "done", title: "At target", detail: "Every concept is at your target level, your unaided answers back that up, and no delayed check is due." };
+  return { action: "auto", title: ACTION_LABEL[d.action], detail: d.reason, ...(d.focus !== null ? { subskill: d.focus } : {}) };
 }
 
 function whyChosen(score: Score, p: PolicyInput): string {

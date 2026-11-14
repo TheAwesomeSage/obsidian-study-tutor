@@ -528,13 +528,23 @@ export interface CheckReport {
   disagreed: boolean;
   /** One line per check with its outcome, for sending back to the model. */
   findings: string[];
+  /** Stated results SymPy could not decide, or could not check at all. They stay unchecked. */
+  unresolved?: number;
+  /** Agreements reached numerically (sample points or the digits written), not symbolically. */
+  numeric?: number;
 }
+
+/** A SymPy agreement reached by numbers rather than by algebra. */
+const NUMERIC_DETAIL = /test point|digits given|decimal places|sample/i;
 
 /** Says how the checks came out, and how many results SymPy computed for the reply. */
 export function checkReport(claims: Claim[], results: ClaimResult[], opts: { computed?: number; corrected?: boolean } = {}): CheckReport {
   const computed = opts.computed ?? 0;
   const did = computed ? `computed ${computed} result${computed === 1 ? "" : "s"} for this reply` : "";
-  if (!claims.length || results.length !== claims.length) return { line: did ? `*SymPy ${did}.*` : "", disagreed: false, findings: [] };
+  const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
+  if (!claims.length) return { line: did ? `*SymPy ${did}.*` : "", disagreed: false, findings: [] };
+  // Stated results that were never checked are said to be unchecked, never left to look checked.
+  if (results.length !== claims.length) return { line: `*${did ? `SymPy ${did}, but ` : ""}SymPy was unavailable, so ${claims.length} stated ${plural(claims.length, "result is", "results are")} unchecked.*`, disagreed: false, findings: [], unresolved: claims.length };
   const describe = (c: Claim): string => {
     if (c.type === "equal") return `${c.a} ${c.expect === false ? "≠" : "="} ${c.b}`;
     if (c.type === "derivative") return `d/d${c.var} of ${c.f} = ${c.result}`;
@@ -546,6 +556,7 @@ export function checkReport(claims: Claim[], results: ClaimResult[], opts: { com
   const findings: string[] = [];
   let agreed = 0;
   let undecided = 0;
+  let numeric = 0;
   claims.forEach((c, i) => {
     const r = results[i];
     if (r.ok === null) {
@@ -553,18 +564,21 @@ export function checkReport(claims: Claim[], results: ClaimResult[], opts: { com
       findings.push(`- ${describe(c)}: SymPy could not decide (${r.detail}).`);
     } else if (r.ok === (c.expect !== false)) {
       agreed++;
-      findings.push(`- ${describe(c)}: SymPy agrees.`);
+      if (NUMERIC_DETAIL.test(r.detail)) numeric++;
+      findings.push(`- ${describe(c)}: SymPy agrees${NUMERIC_DETAIL.test(r.detail) ? ` numerically (${r.detail})` : ""}.`);
     } else {
       const why = c.expect === false ? "SymPy finds them equal" : r.detail;
       bad.push(`\`${describe(c)}\` (${why})`);
       findings.push(`- ${describe(c)}: SymPy DISAGREES (${why}).`);
     }
   });
-  if (bad.length) return { line: `**SymPy disagrees** with ${bad.length === 1 ? "this result" : "these results"}: ${bad.join("; ")}. Treat that step with care.`, disagreed: true, findings };
-  if (!agreed) return { line: did ? `*SymPy ${did}.*` : "", disagreed: false, findings };
+  const extra = { ...(undecided ? { unresolved: undecided } : {}), ...(numeric ? { numeric } : {}) };
+  if (bad.length) return { line: `**SymPy disagrees** with ${bad.length === 1 ? "this result" : "these results"}: ${bad.join("; ")}. Treat that step with care.`, disagreed: true, findings, ...extra };
+  if (!agreed) return { line: `*${did ? `SymPy ${did}, but it ` : "SymPy "}could not decide ${undecided} stated ${plural(undecided, "result, so it is", "results, so they are")} unchecked.*`, disagreed: false, findings, ...extra };
   const checked = `checked ${agreed} result${agreed === 1 ? "" : "s"}: ${agreed === 1 ? "it agrees" : "all agree"}`;
-  const tail = `${undecided ? `; ${undecided} could not be checked` : ""}${opts.corrected ? " (after it caught an error in a first draft, which was rewritten)" : ""}`;
-  return { line: `*SymPy ${did ? `${did} and ` : ""}${checked}${tail}.*`, disagreed: false, findings };
+  const how = numeric ? ` (${numeric === agreed ? (agreed === 1 ? "numerically" : "all numerically") : `${numeric} only numerically`}, at sample points or to the digits written, not a proof)` : "";
+  const tail = `${how}${undecided ? `; ${undecided} could not be checked` : ""}${opts.corrected ? " (after it caught an error in a first draft, which was rewritten)" : ""}`;
+  return { line: `*SymPy ${did ? `${did} and ` : ""}${checked}${tail}.*`, disagreed: false, findings, ...extra };
 }
 
 /** The results of a compute request, as the model is shown them. */

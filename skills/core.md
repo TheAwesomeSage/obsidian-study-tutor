@@ -20,7 +20,7 @@ Levels are earned, not given. The app enforces this from the attempts it has rec
 - Levels 1 and 2 describe exposure and following along. Level 3 needs two different questions answered fully correctly, with or without help.
 - Level 4 needs two different questions answered correctly without help, at least one of them unprompted recall (not straight after being told the answer).
 - Level 4 also needs a correct answer, on a later day, to a transfer problem that has not appeared in this chat or the notes.
-- Level 5 needs an edge case or adversarial question handled, and an explanation clear enough to teach from.
+- Level 5 needs both, without help: an explanation clear enough to teach from (mark it task_type teach-back) and an edge case handled (task_type edge-case).
 - A vague or partly right answer is not right. Probe until you know which it is.
 - A failed re-test of an earlier subskill lowers its level by one.
 - When the learner state lists a prerequisite gap, trouble with the later subskill often comes from the earlier one. Test the earlier one before going on.

@@ -2,6 +2,7 @@
 // Pure functions, no Obsidian imports.
 
 import { LearnerState, NextStep, Prereqs, dueCount, mastery, nextStep, progress } from "./formats";
+import type { Decision } from "./policy";
 
 export interface TopicInfo {
   dir: string;
@@ -20,9 +21,15 @@ export interface TopicInfo {
   /** Timestamp of the last marked answer, or null. */
   last: string | null;
   step: NextStep;
+  /** The study policy's decision behind `step`, when the step came from it (0.6 on). */
+  decision?: Decision;
 }
 
-export function topicInfo(dir: string, title: string, state: LearnerState, pre: Prereqs, today: string, srDue?: number): TopicInfo {
+/**
+ * What Home knows about a topic. With `policy` (the engine's recommendTopic result) the step is
+ * the one Adaptive study would take; without it, the older guided path is used.
+ */
+export function topicInfo(dir: string, title: string, state: LearnerState, pre: Prereqs, today: string, srDue?: number, policy?: { step: NextStep; decision: Decision }): TopicInfo {
   const ns = Object.keys(state.names).map(Number);
   const ms = ns.map((n) => mastery(state, n));
   const last = state.attempts.reduce<string | null>((a, x) => (!a || x.timestamp > a ? x.timestamp : a), null);
@@ -37,11 +44,22 @@ export function topicInfo(dir: string, title: string, state: LearnerState, pre: 
     secured: ms.filter((m) => m.level !== null && m.level >= state.target && m.backed).length,
     unbacked: ms.filter((m) => m.level !== null && m.level > 0 && !m.backed).length,
     last,
-    step: nextStep(state, today, srDue, pre),
+    step: policy?.step ?? nextStep(state, today, srDue, pre),
+    ...(policy ? { decision: policy.decision } : {}),
   };
 }
 
 const WEIGHT: Record<string, number> = { Revisit: 100, Review: 80, Learn: 60, Practise: 55, Master: 50, Confirm: 40, "Retrieval check": 30 };
+
+/** How strongly a policy decision presses, for choosing between topics. Same order as the policy's own rules. */
+function pressure(d: Decision): number {
+  if (d.action === "diagnose-error") return 100;
+  if (d.action === "retrieval" && /delayed independent check/.test(d.constraint)) return 90;
+  if (d.action === "diagnose-prerequisite" || d.local === "placement") return 70;
+  // Otherwise the policy's own score for the concept it chose, so topics compare on one scale.
+  const top = d.scores.find((s) => s.n === d.focus)?.score ?? 0;
+  return 20 + Math.min(40, top * 20);
+}
 
 /**
  * The one thing to suggest across every topic. A lapse comes first, then due reviews, then the
@@ -53,14 +71,17 @@ export function recommend(infos: TopicInfo[], activeDir: string | null, minutes:
   for (const info of infos) {
     const title = info.step.title;
     if (info.step.action === "done") continue;
-    let score = WEIGHT[title] ?? 20;
-    if (minutes <= 10 && (title === "Review" || title === "Practise" || title === "Retrieval check")) score += 30;
-    if (minutes <= 10 && title === "Learn") score -= 20;
+    const policy = info.decision && info.step.action !== "review" ? info.decision : null;
+    let score = policy ? pressure(policy) : WEIGHT[title] ?? 20;
+    const quickWork = title === "Review" || title === "Practise" || title === "Retrieval check" || (!!policy && (policy.local === "bank" || policy.action === "retrieval"));
+    const lesson = title === "Learn" || (!!policy && ["explain", "worked-example", "re-explain"].includes(policy.action));
+    if (minutes <= 10 && quickWork) score += 30;
+    if (minutes <= 10 && lesson) score -= 20;
     if (info.dir === activeDir) score += 5;
     if (!best || score > best.score) best = { info, score };
   }
   if (!best) return null;
-  const quick = minutes <= 10 && /Review|Practise|Retrieval/.test(best.info.step.title) ? " It fits the time you have." : "";
+  const quick = minutes <= 10 && (/Review|Practise|Retrieval/.test(best.info.step.title) || best.info.decision?.local === "bank") ? " It fits the time you have." : "";
   return { info: best.info, step: best.info.step, why: best.info.step.detail + quick };
 }
 

@@ -89,6 +89,25 @@ export function buildCompileInput(p: { title: string; mode: SourceMode; goal: st
   return [`TITLE: ${p.title}`, `SOURCE MODE: ${p.mode}`, `GOAL: ${p.goal.trim() || "(none given)"}`, `SUBJECT CARDS: ${p.subjects.join(", ") || "none"}`, `RESEARCH: ${p.research ? "on" : "off"}`, "", "MATERIAL:", p.material.trim() || "(none)"].join("\n");
 }
 
+/** A partial refresh: the current card for context, the subskills to rewrite, and only the changed notes. */
+export function buildRefreshInput(p: { title: string; goal: string; subjects: string[]; card: string; subskills: number[]; removed: string[]; material: string }): string {
+  return [
+    `TITLE: ${p.title}`,
+    "SOURCE MODE: notes",
+    `GOAL: ${p.goal.trim() || "(none given)"}`,
+    `SUBJECT CARDS: ${p.subjects.join(", ") || "none"}`,
+    "RESEARCH: off",
+    `REFRESH: ${p.subskills.join(", ")}`,
+    ...(p.removed.length ? [`REMOVED NOTES: ${p.removed.map((r) => `[[${r}]]`).join(", ")}`] : []),
+    "",
+    "CURRENT CARD:",
+    p.card.trim(),
+    "",
+    "MATERIAL (the changed notes only):",
+    p.material.trim() || "(none: the notes were removed)",
+  ].join("\n");
+}
+
 export const modeFile = (m: Mode): string => `mode-${m}.md`;
 
 export const GRADE_SCHEMA = {

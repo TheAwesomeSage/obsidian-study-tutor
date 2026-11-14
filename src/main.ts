@@ -3,6 +3,7 @@ import { ClaudeError, callClaude, findClaude, usageLine } from "./claude";
 import { CompileResult, Engine, EngineSettings, Material } from "./engine";
 import { Frontmatter, SourceMode, fmList, fmStr, splitFrontmatter, words } from "./formats";
 import { DEFAULT_WEIGHTS, PolicyWeights, WEIGHT_LABELS } from "./policy";
+import { DEFAULT_LOCAL_MODEL, DEFAULT_OLLAMA_URL, OllamaClient } from "./ollama";
 import { FS, Store } from "./store";
 import { SympyWorker } from "./sympy";
 import { TutorView, VIEW_TYPE } from "./view";
@@ -23,6 +24,12 @@ export interface TutorSettings extends EngineSettings {
   weights: PolicyWeights;
   /** Minutes available for this sitting, chosen on the home screen. */
   minutes: number;
+  /** Configure existing visual modules with a local Ollama model when no saved configuration fits. */
+  localActivities: boolean;
+  /** The local model, an Ollama tag. */
+  localModel: string;
+  /** The local Ollama server. Only loopback addresses are used. */
+  ollamaUrl: string;
 }
 
 interface PluginData {
@@ -59,6 +66,9 @@ const DEFAULTS: TutorSettings = {
   hardEffort: "high",
   weights: { ...DEFAULT_WEIGHTS },
   minutes: 25,
+  localActivities: true,
+  localModel: DEFAULT_LOCAL_MODEL,
+  ollamaUrl: DEFAULT_OLLAMA_URL,
 };
 
 const SR_PLUGIN = "obsidian-spaced-repetition";
@@ -128,6 +138,20 @@ export default class StudyTutorPlugin extends Plugin {
       if (!f || f.extension !== "md" || f.path.startsWith(this.store.root + "/")) return null;
       return splitFrontmatter(await this.app.vault.cachedRead(f)).body;
     };
+    // The same, with the note's vault path, for the provenance of activities. Read only.
+    this.engine.readSource = async (name: string) => {
+      const f = this.app.metadataCache.getFirstLinkpathDest(name, "");
+      if (!f || f.extension !== "md" || f.path.startsWith(this.store.root + "/")) return null;
+      return { path: f.path, text: splitFrontmatter(await this.app.vault.cachedRead(f)).body };
+    };
+    this.buildLocal();
+    // The visual module registry is attached by the visual workstream (src/visuals); until then
+    // engine.visuals stays null and no interactive is ever offered.
+  }
+
+  /** The local model client, from the settings. Nothing is contacted until an activity is configured. */
+  buildLocal(): void {
+    this.engine.local = this.opts.localActivities ? new OllamaClient({ model: this.opts.localModel || DEFAULT_LOCAL_MODEL, baseUrl: this.opts.ollamaUrl || DEFAULT_OLLAMA_URL }) : null;
   }
 
   /** Opens Obsidian's settings on this plugin's tab. The settings API is not typed, so every step is guarded. */
@@ -254,9 +278,13 @@ export default class StudyTutorPlugin extends Plugin {
     const notice = new Notice("Study Tutor: gathering notes…", 0);
     try {
       const g = await this.gather(p.kind, p.folder, p.sources);
-      const res = await this.engine.compile({ title: p.title, mode: g.mode, goal: p.goal, material: g.material, fm: g.fm, existingDir: p.existingDir, research: p.research }, (msg) => notice.setMessage(`Study Tutor: ${msg}`));
+      const req = { title: p.title, mode: g.mode, goal: p.goal, material: g.material, fm: g.fm, existingDir: p.existingDir, research: p.research };
+      const progress = (msg: string) => notice.setMessage(`Study Tutor: ${msg}`);
+      // Recompiling a topic first tries a partial refresh: only subskills whose notes changed are rewritten.
+      const res = p.existingDir && !g.truncated ? await this.engine.refresh({ ...req, existingDir: p.existingDir }, progress) : await this.engine.compile(req, progress);
       notice.hide();
-      new Notice(`Topic ready: ${res.subskills} subskills, ${res.questions} questions.${g.truncated ? " Some notes were left out (size limit)." : ""}\n${usageLine(res.usage)} in ${res.usage.calls} call(s)`, 10000);
+      const how = res.refresh === "unchanged" ? `Nothing changed (${res.why}); no model was called.` : res.refresh === "partial" ? `Refreshed subskill ${(res.subskillsRefreshed ?? []).join(", ")} (${res.why}).` : res.refresh === "full" ? `Compiled in full: ${res.why}.` : "";
+      new Notice(`Topic ready: ${res.subskills} subskills, ${res.questions} questions.${g.truncated ? " Some notes were left out (size limit)." : ""}${how ? `\n${how}` : ""}${res.coverage ? `\n${res.coverage}` : ""}\n${usageLine(res.usage)} in ${res.usage.calls} call(s)`, 12000);
       this.data.activeTopic = res.dir;
       await this.save();
       // Keep the flashcard note in step with the new question bank; existing schedules are kept.
@@ -491,6 +519,38 @@ class TutorSettingTab extends PluginSettingTab {
           if (r.length === 2 && r[0].ok && r[1].ok) new Notice(`SymPy works. It integrated x·eˣ to ${r[0].value} and confirmed the result by differentiating it (${secs}s).`, 10000);
           else new Notice(`SymPy could not be used: ${sympy.status()}. Maths falls back to the model.`, 12000);
           this.display();
+        }),
+      );
+
+    new Setting(containerEl).setName("Interactive activities").setHeading();
+    new Setting(containerEl)
+      .setName("Configure activities with a local model")
+      .setDesc("When you ask for a diagram, simulation or game, or the tutor offers one and you open it, an existing module is configured from a short excerpt of your notes by a small model on this computer, through Ollama. Saved activities reopen with no model at all, and moving their controls never calls a model. Nothing here ever calls Claude. Off: only saved activities open.")
+      .addToggle((t) =>
+        t.setValue(s.localActivities).onChange(async (v) => {
+          s.localActivities = v;
+          await this.plugin.save();
+          this.plugin.buildLocal();
+        }),
+      );
+    new Setting(containerEl)
+      .setName("Local model")
+      .setDesc(`An Ollama model tag. ${DEFAULT_LOCAL_MODEL} is the tested default; qwen3:1.7b is a smaller option to compare.`)
+      .addText((t) =>
+        t.setValue(s.localModel).onChange(async (v) => {
+          s.localModel = v.trim() || DEFAULT_LOCAL_MODEL;
+          await this.plugin.save();
+          this.plugin.buildLocal();
+        }),
+      )
+      .addButton((b) =>
+        b.setButtonText("Test").onClick(async () => {
+          b.setDisabled(true);
+          const st = await new OllamaClient({ model: s.localModel, baseUrl: s.ollamaUrl }).status();
+          b.setDisabled(false);
+          if (!st.ok) new Notice(`Ollama is not reachable: ${st.error || "no answer"}. Start Ollama, or switch local activities off.`, 12000);
+          else if (!st.hasModel) new Notice(`Ollama ${st.version} is running, but ${s.localModel} is not installed. Run: ollama pull ${s.localModel}`, 12000);
+          else new Notice(`Ollama ${st.version} is running with ${s.localModel}.`, 8000);
         }),
       );
 

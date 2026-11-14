@@ -18,6 +18,22 @@ export type Grading = "deterministic" | "symbolic" | "numeric" | "model" | "self
 /** verified: decided or confirmed by code. unverified: one judgement, unchecked. disputed: the learner contests it. */
 export type Verification = "verified" | "unverified" | "disputed";
 
+/**
+ * What kind of task the question was. Recorded from 0.6 on; earlier attempts have none, and
+ * cannot show the evidence that needs one (teach-back and edge cases for level 5).
+ *   recall         say back a fact, definition or rule
+ *   application    use the idea on a problem of a familiar kind
+ *   transfer       use it in an unfamiliar setting
+ *   prediction     say what will happen before seeing it
+ *   explanation    say why something holds
+ *   error-finding  find the mistake in a worked claim
+ *   teach-back     explain the idea well enough to teach it
+ *   edge-case      handle a boundary or degenerate case
+ *   interactive    a prediction or challenge inside an interactive activity
+ */
+export type TaskType = "recall" | "application" | "transfer" | "prediction" | "explanation" | "error-finding" | "teach-back" | "edge-case" | "interactive";
+export const TASK_TYPES: TaskType[] = ["recall", "application", "transfer", "prediction", "explanation", "error-finding", "teach-back", "edge-case", "interactive"];
+
 export interface Attempt {
   id: string;
   v: 2;
@@ -54,6 +70,10 @@ export interface Attempt {
   verification: Verification;
   /** What the check assumed, for example "sampled at random points; not a proof". */
   assumptions: string;
+  /** The kind of task, when it was recorded (0.6 on). Empty for older attempts. */
+  taskType?: TaskType | "";
+  /** The question family: questions that test the same thing the same way. Empty when unknown. */
+  family?: string;
 }
 
 /** One change of level, with what caused it. Every change is logged so it can be explained later. */
@@ -129,6 +149,8 @@ export function normaliseAttempt(raw: unknown): Attempt | null {
     grading,
     verification,
     assumptions: str("assumptions"),
+    taskType: TASK_TYPES.includes(r.taskType as TaskType) ? (r.taskType as TaskType) : "",
+    family: str("family").slice(0, 80),
   };
 }
 
@@ -176,7 +198,38 @@ export interface SkillEvidence {
   selfCount: number;
   ungraded: number;
   disputed: number;
+  /** Timestamp of the last independent data point. Helped work never moves it. */
+  lastIndependent: string | null;
+  /** Timestamp of the last independent fully correct answer. */
+  lastIndependentSuccess: string | null;
+  /** Day of the first independent success, or null. A transfer counts only on a later day. */
+  firstIndependentDay: string | null;
+  /** Day the next delayed independent check on this concept falls due, or null before any independent success. */
+  nextCheck: string | null;
+  /** Distinct days in a row (since the last independent failure) with an independent success. */
+  streakDays: number;
+  /** An independent correct answer to a teach-back task: an explanation good enough to teach from. */
+  teachBack: boolean;
+  /** An independent correct answer to an edge-case task. */
+  edgeCase: boolean;
+  /** Independent correct answers recorded before task types were (0.6), which cannot show teach-back or edge cases. */
+  untyped: number;
+  /** Question families with an independent success. */
+  families: number;
 }
+
+/**
+ * Days until the next delayed check, by how many separate days in a row the concept has been
+ * answered correctly without help. A failure starts the ladder again. These are product
+ * hypotheses to be tuned against later unaided answers, not established intervals.
+ */
+export const CHECK_INTERVALS = [1, 3, 7, 14, 30, 60];
+
+const addDaysIso = (day: string, n: number): string => {
+  const [y, m, d] = day.split("-").map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d + n));
+  return t.toISOString().slice(0, 10);
+};
 
 /** Below this many independent data points an estimate is not shown as a number. */
 export const MIN_ESTIMATE_N = 3;
@@ -200,13 +253,16 @@ export const PREDICTION_TARGET = "the next unassisted first answer on this conce
  */
 export function skillEvidence(attempts: Attempt[], skill: number): SkillEvidence {
   const mine = attempts.filter((a) => a.skill === skill).sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
-  const e: SkillEvidence = { graded: 0, correctAny: 0, partialAny: 0, independent: 0, independentCorrect: 0, independentDays: 0, delayedTransfer: false, recentFailures: 0, lapse: false, delayedLapse: false, estimate: null, brier: null, rated: 0, calibrationGap: null, last: null, lastResult: null, errors: {}, assistedCount: 0, exposedCount: 0, selfCount: 0, ungraded: 0, disputed: 0 };
+  const e: SkillEvidence = { graded: 0, correctAny: 0, partialAny: 0, independent: 0, independentCorrect: 0, independentDays: 0, delayedTransfer: false, recentFailures: 0, lapse: false, delayedLapse: false, estimate: null, brier: null, rated: 0, calibrationGap: null, last: null, lastResult: null, errors: {}, assistedCount: 0, exposedCount: 0, selfCount: 0, ungraded: 0, disputed: 0, lastIndependent: null, lastIndependentSuccess: null, firstIndependentDay: null, nextCheck: null, streakDays: 0, teachBack: false, edgeCase: false, untyped: 0, families: 0 };
   const exposedOn = new Map<string, string>();
   const correctQs = new Set<string>();
   const partialQs = new Set<string>();
   const indCorrectQs = new Set<string>();
   const indDays = new Set<string>();
-  const points: { ok: boolean; day: string; transfer: boolean; confidence: number | null }[] = [];
+  /** Families met in any graded attempt so far. A question from one of them is not a transfer. */
+  const familiesSeen = new Set<string>();
+  const familiesWon = new Set<string>();
+  const points: { ok: boolean; day: string; transfer: boolean; confidence: number | null; at: string }[] = [];
   for (const a of mine) {
     const d = day(a.timestamp);
     if (a.verification === "disputed") {
@@ -232,17 +288,29 @@ export function skillEvidence(attempts: Attempt[], skill: number): SkillEvidence
     }
     const seen = exposedOn.get(a.questionId);
     const independent = a.grading !== "self" && !a.assisted && !a.answerExposed && (seen === undefined || d > seen);
+    const family = a.family ?? "";
     if (independent) {
       const ok = a.result === "correct";
-      points.push({ ok, day: d, transfer: a.transfer, confidence: a.confidence });
+      // A question from a family already met is practice of a known kind, whatever the mark
+      // says. A family never met before, asked as an application, is a fresh one.
+      const familiar = !!family && familiesSeen.has(family);
+      const freshFamily = !!family && !familiar && (a.taskType === "application" || a.taskType === "transfer" || a.taskType === "prediction" || a.taskType === "error-finding");
+      const transfer = !familiar && (a.transfer || a.taskType === "transfer" || freshFamily);
+      points.push({ ok, day: d, transfer, confidence: a.confidence, at: a.timestamp });
       if (ok) {
         indCorrectQs.add(a.questionId);
         indDays.add(d);
+        if (a.taskType === "teach-back") e.teachBack = true;
+        if (a.taskType === "edge-case") e.edgeCase = true;
+        if (!a.taskType) e.untyped++;
+        if (family) familiesWon.add(family);
       }
     }
+    if (family) familiesSeen.add(family);
     // Marking an answer tells the learner what the answer is, right or wrong.
     exposedOn.set(a.questionId, d);
   }
+  e.families = familiesWon.size;
   e.correctAny = correctQs.size;
   e.partialAny = [...partialQs].filter((q) => !correctQs.has(q)).length;
   e.independent = points.length;
@@ -262,8 +330,26 @@ export function skillEvidence(attempts: Attempt[], skill: number): SkillEvidence
     e.brier = rated.reduce((sum, p) => sum + (p.confidence! - (p.ok ? 1 : 0)) ** 2, 0) / rated.length;
     e.calibrationGap = rated.reduce((sum, p) => sum + p.confidence!, 0) / rated.length - rated.filter((p) => p.ok).length / rated.length;
   }
+  // Retention is judged from independent work alone: a helped answer is not a fresh recall.
+  e.lastIndependent = lastPoint?.at ?? null;
+  e.lastIndependentSuccess = [...points].reverse().find((p) => p.ok)?.at ?? null;
+  e.firstIndependentDay = firstOk?.day ?? null;
+  if (e.lastIndependentSuccess) {
+    // Separate success days since the last independent failure set the next interval.
+    const days: string[] = [];
+    for (const p of points) {
+      if (!p.ok) days.length = 0;
+      else if (days[days.length - 1] !== p.day) days.push(p.day);
+    }
+    e.streakDays = days.length;
+    if (lastPoint && !lastPoint.ok) e.nextCheck = addDaysIso(lastPoint.day, CHECK_INTERVALS[0]);
+    else e.nextCheck = addDaysIso(day(e.lastIndependentSuccess), CHECK_INTERVALS[Math.min(CHECK_INTERVALS.length - 1, Math.max(0, days.length - 1))]);
+  }
   return e;
 }
+
+/** True when a delayed independent check on the concept is due on `today`. */
+export const checkDue = (e: SkillEvidence, today: string): boolean => !!e.nextCheck && e.nextCheck <= today;
 
 /**
  * The highest level the evidence can hold. Levels 1 and 2 describe exposure and following
@@ -275,7 +361,10 @@ export function skillEvidence(attempts: Attempt[], skill: number): SkillEvidence
  *   3  two different questions answered fully correctly (help allowed)
  *   4  two different questions answered correctly without help, one of them a transfer question
  *      on a later day than the first success, and no more than one recent failure
- *   5  as 4, with three such questions over two or more days and no recent failure
+ *   5  "can teach it and handle edge cases": as 4, with three such questions over two or more
+ *      days, no recent failure, and, without help, an explanation good enough to teach from
+ *      (a teach-back task) and an edge case handled. Attempts recorded before task types were
+ *      cannot show the last two, so an older level 5 reads as not yet backed until they are shown.
  */
 export function supportedLevel(e: SkillEvidence, taught = false): number {
   let level = 0;
@@ -283,7 +372,7 @@ export function supportedLevel(e: SkillEvidence, taught = false): number {
   if (e.correctAny + e.partialAny >= 1) level = 2;
   if (e.correctAny >= 2) level = 3;
   if (level === 3 && e.independentCorrect >= 2 && e.delayedTransfer && e.recentFailures < 2) level = 4;
-  if (level === 4 && e.independentCorrect >= 3 && e.independentDays >= 2 && e.recentFailures === 0) level = 5;
+  if (level === 4 && e.independentCorrect >= 3 && e.independentDays >= 2 && e.recentFailures === 0 && e.teachBack && e.edgeCase) level = 5;
   return level;
 }
 
@@ -300,6 +389,12 @@ export function missingFor(e: SkillEvidence, level: number, taught = false): str
   if (!e.delayedTransfer) need.push("a correct transfer question on a later day");
   if (level === 5 && e.independentDays < 2) need.push("unaided success on two different days");
   if (e.recentFailures >= (level === 4 ? 2 : 1)) need.push("recent unaided answers to come out right");
+  if (level === 5) {
+    if (!e.teachBack) need.push("an unaided explanation good enough to teach from");
+    if (!e.edgeCase) need.push("an unaided answer to an edge case");
+    // Honest about history: answers from before task types were recorded cannot show these.
+    if ((!e.teachBack || !e.edgeCase) && e.untyped > 0) need.push(`(${e.untyped} earlier unaided answer${e.untyped === 1 ? " was" : "s were"} recorded before the kind of task was, so ${e.untyped === 1 ? "it cannot" : "they cannot"} count for this)`);
+  }
   return need.join(", ");
 }
 
@@ -311,5 +406,6 @@ export function gradingLabel(a: Pick<Attempt, "grading" | "verification">): stri
   return base;
 }
 
-export const EVIDENCE_RULES = `If your reply grades an actual attempt by the learner at the pending question, add <attempt>{"skill":1,"result":"correct|partial|incorrect|ungraded","assisted":true,"transfer":false,"error_type":"conceptual|procedural|arithmetic|notation|prerequisite|careless|","error":"specific error or empty","difficulty":3}</attempt>.
+export const EVIDENCE_RULES = `If your reply grades an actual attempt by the learner at the pending question, add <attempt>{"skill":1,"result":"correct|partial|incorrect|ungraded","assisted":true,"transfer":false,"task_type":"recall|application|transfer|prediction|explanation|error-finding|teach-back|edge-case","error_type":"conceptual|procedural|arithmetic|notation|prerequisite|careless|","error":"specific error or empty","difficulty":3}</attempt>.
+task_type says what the question asked for. Use teach-back only for a request to explain the idea as if teaching it, and edge-case only for a boundary or degenerate case.
 If the question tested a prerequisite listed under Cross-topic prerequisites, not a subskill of this topic, add "external":"<that prerequisite's name>" to the attempt. Use ungraded when you are not sure. Assisted is true if a hint, a worked step or the answer helped with this question. Transfer is true only for a fresh application the learner has not seen. Difficulty is 1 to 5. Never treat a request, an agreement or an explanation you supplied as a performance by the learner. The app decides which levels the recorded attempts support; a level you propose beyond that is ignored.`;

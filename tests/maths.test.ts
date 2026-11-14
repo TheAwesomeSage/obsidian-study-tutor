@@ -178,8 +178,14 @@ test("the report says what SymPy computed, checked and disputed", () => {
   // The tutor said "wrong" and SymPy finds the two equal: that is a disagreement too.
   assert.equal(checkReport([{ ...eq, expect: false }], [yes]).disagreed, true);
   assert.equal(checkReport([{ ...eq, expect: false }], [no]).disagreed, false);
-  assert.deepEqual(checkReport([eq], []), { line: "", disagreed: false, findings: [] }, "no results means SymPy was unavailable: say nothing");
-  assert.equal(checkReport([eq], [{ ok: null, detail: "could not be evaluated" }]).line, "");
+  // Unchecked results are said to be unchecked; silence would look like a pass.
+  assert.deepEqual(checkReport([eq], []), { line: "*SymPy was unavailable, so 1 stated result is unchecked.*", disagreed: false, findings: [], unresolved: 1 }, "no results means SymPy was unavailable");
+  const undecided = checkReport([eq], [{ ok: null, detail: "could not be evaluated" }]);
+  assert.deepEqual([undecided.line, undecided.unresolved], ["*SymPy could not decide 1 stated result, so it is unchecked.*", 1]);
+  // Agreement at sample points is labelled numeric, not presented as a symbolic proof.
+  const sampled = checkReport([eq, eq], [yes, { ok: true, detail: "equal at every test point" }]);
+  assert.equal(sampled.line, "*SymPy checked 2 results: all agree (1 only numerically, at sample points or to the digits written, not a proof).*");
+  assert.equal(sampled.numeric, 1);
   assert.match(computeBlock([{ type: "compute", expr: "1+1", name: "r1" }], []), /not available/);
   assert.equal(computeBlock([{ type: "compute", expr: "1+1", name: "r1" }], [{ ok: true, detail: "computed", value: "2" }]), "r1 = 1+1  →  2");
 });

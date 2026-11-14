@@ -282,5 +282,10 @@ test("the next step follows learn, practise, master", () => {
   assert.deepEqual([confirm.action, confirm.title], ["auto", "Confirm"], "levels at target with no answers behind them are checked, not announced");
   const ok = (id: string, skill: number, at: string, transfer = false) => ({ id, v: 2 as const, skill, concept: "", questionId: id, question: id, answer: "a", activity: "quiz", mode: "quiz", difficulty: null, result: "correct" as const, errorType: "", note: "", confidence: null, assisted: false, assistance: [], answerExposed: false, transfer, seconds: null, timestamp: at, grading: "deterministic" as const, verification: "verified" as const, assumptions: "" });
   s.attempts = [1, 2].flatMap((k) => [ok(`a${k}`, k, "2026-11-08T10:00:00Z"), ok(`b${k}`, k, "2026-11-08T11:00:00Z"), ok(`c${k}`, k, "2026-11-10T10:00:00Z", true)]);
+  // A level 5 recorded without an unaided teach-back and edge case is not taken on trust.
+  const unbacked5 = F.nextStep(s, day);
+  assert.deepEqual([unbacked5.title, unbacked5.subskill], ["Confirm", 2]);
+  assert.match(unbacked5.detail, /recorded at level 5, but the answers recorded so far support level 4/);
+  s.levels = { 1: 4, 2: 4 };
   assert.equal(F.nextStep(s, day).action, "done");
 });

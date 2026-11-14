@@ -8,6 +8,50 @@ import { SrStats, buildSrNote, srStats } from "./formats";
 import { Chat, Frontmatter, LearnerState, Mode, Prereqs, Question, Topic, fmNum, fmStr, newState, parseChat, parseQuestions, parseState, parseTopic, serializeChat, serializeState, textHash, withFrontmatter, ymd } from "./formats";
 import type { PolicyCase } from "./policy";
 import { SessionRecord, sessionMarkdown } from "./session";
+import type { ActivityRecord } from "./configure";
+import type { CoursePackage } from "./coursepkg";
+
+/** One learner interaction with an activity. Kept apart from evidence.md; only an assessed answer also becomes an attempt there. */
+export interface ActivityEvent {
+  t: string;
+  activityId: string;
+  conceptId: string;
+  /** offered, opened, generated, reused, failed, unsupported, assessed. Slider moves, playback and resets are never logged. */
+  event: string;
+  trigger: string;
+  reason: string;
+  /** For assessed events: the module's verdict, and whether a hint was opened first. */
+  correct?: boolean | null;
+  hintUsed?: boolean;
+  attemptId?: string;
+  chatPath?: string;
+}
+
+/** A capability that no module has, with what motivated it, for a separate development pass. */
+export interface CapabilityRequest {
+  t: string;
+  topic: string;
+  conceptId: string;
+  kind: string;
+  operation: string;
+  objective: string;
+  motivatingTask: string;
+  sources: { path: string; contentHash: string }[];
+  count: number;
+}
+
+const jsonl = (md: string): Record<string, unknown>[] => {
+  const out: Record<string, unknown>[] = [];
+  for (const line of md.split(/\r?\n/)) {
+    if (!line.startsWith("{")) continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch {
+      /* one damaged line does not cost the rest */
+    }
+  }
+  return out;
+};
 
 export interface FS {
   read(path: string): Promise<string>;
@@ -420,7 +464,7 @@ export class Store {
    * concept ids, so levels, attempts, priorities and relations follow a subskill that was
    * renumbered or renamed. Relations from other topics point at ids, so they follow too.
    */
-  async saveCompiled(p: { title: string; fm: Frontmatter; topicBody: string; questionsBody: string; target: number; existingDir?: string }): Promise<string> {
+  async saveCompiled(p: { title: string; fm: Frontmatter; topicBody: string; questionsBody: string; target: number; existingDir?: string; keepCards?: string[] }): Promise<string> {
     let dir = p.existingDir;
     if (!dir) {
       const name = safeName(p.title);
@@ -439,9 +483,16 @@ export class Store {
     await this.writeFile(this.graphPath(dir), serializeTopicGraph(topic.title, graph));
     const next = newState(topic, p.target, previous, previous && oldGraph ? remap : undefined);
     for (const c of graph.concepts) if (!c.retired) next.concepts[c.n] = c.id;
-    // The question bank is new, so its card schedule starts again. Everything else is kept.
+    // A new question bank starts its card schedule again. A partial refresh keeps the schedule
+    // of every question it left untouched. Everything else is kept either way.
+    if (previous && p.keepCards) for (const id of p.keepCards) if (previous.cards[id]) next.cards[id] = previous.cards[id];
     await this.saveState(dir, next);
     return dir;
+  }
+
+  async readQuestionsRaw(dir: string): Promise<string> {
+    const p = `${dir}/questions.md`;
+    return (await this.fs.exists(p)) ? await this.fs.read(p) : "";
   }
 
   // ----- chats: one markdown file per part; only the active part is ever loaded -----
@@ -606,6 +657,95 @@ export class Store {
       }
     }
     return out;
+  }
+
+  // ----- activities: saved configurations, and the learner's interactions with them -----
+
+  activitiesPath(dir: string): string {
+    return `${dir}/activities.md`;
+  }
+
+  /** Saved activity configurations and failures for a topic. Learner work is not in here. */
+  async loadActivities(dir: string): Promise<ActivityRecord[]> {
+    const p = this.activitiesPath(dir);
+    if (!(await this.fs.exists(p))) return [];
+    return jsonl(await this.fs.read(p)).filter((r) => typeof r.id === "string" && r.v === 1) as unknown as ActivityRecord[];
+  }
+
+  /** Adds or replaces one record by id. Transient failures are never saved. */
+  async saveActivity(dir: string, rec: ActivityRecord): Promise<void> {
+    if (rec.transient) return;
+    const all = (await this.loadActivities(dir)).filter((r) => r.id !== rec.id);
+    all.push(rec);
+    const head = "Interactive activities configured for this topic, one per line. Each is bounded settings for an existing module, with its sources, versions and how it was made. Your answers in them are in activity-log.md and, when assessed, evidence.md.";
+    await this.writeFile(this.activitiesPath(dir), withFrontmatter({ tutor: "activities", count: all.length }, `${head}\n\n${FENCE}jsonl\n${all.map((r) => JSON.stringify(r)).join("\n")}\n${FENCE}\n`));
+  }
+
+  async logActivity(dir: string, ev: ActivityEvent): Promise<void> {
+    try {
+      const p = `${dir}/activity-log.md`;
+      const old = (await this.fs.exists(p)) ? (await this.fs.read(p)).split(/\r?\n/).filter((l) => l.startsWith("{")) : [];
+      const lines = [...old, JSON.stringify(ev)].slice(-1000);
+      await this.writeFile(p, withFrontmatter({ tutor: "activity-log" }, `What happened with interactive activities on this topic, newest last: why each was chosen, whether it was opened, and any assessed answer.\n\n${FENCE}jsonl\n${lines.join("\n")}\n${FENCE}\n`));
+    } catch {
+      /* logging must never break a turn */
+    }
+  }
+
+  async loadActivityLog(dir: string): Promise<ActivityEvent[]> {
+    const p = `${dir}/activity-log.md`;
+    if (!(await this.fs.exists(p))) return [];
+    return jsonl(await this.fs.read(p)) as unknown as ActivityEvent[];
+  }
+
+  private get capabilitiesPath(): string {
+    return `${this.root}/_logs/capability-requests.md`;
+  }
+
+  /** Records a missing capability once per concept and operation, counting repeats. */
+  async logCapability(req: Omit<CapabilityRequest, "count">): Promise<void> {
+    try {
+      const p = this.capabilitiesPath;
+      const all = (await this.fs.exists(p)) ? (jsonl(await this.fs.read(p)) as unknown as CapabilityRequest[]) : [];
+      const same = all.find((r) => r.conceptId === req.conceptId && r.kind === req.kind && r.operation.toLowerCase() === req.operation.toLowerCase());
+      if (same) {
+        same.count += 1;
+        same.t = req.t;
+      } else all.push({ ...req, count: 1 });
+      await this.writeFile(p, `Capabilities learners asked for that no visual module has yet, for a development pass. Ordinary study never builds them.\n\n${FENCE}jsonl\n${all.slice(-500).map((r) => JSON.stringify(r)).join("\n")}\n${FENCE}\n`);
+    } catch {
+      /* logging must never break a turn */
+    }
+  }
+
+  async loadCapabilities(): Promise<CapabilityRequest[]> {
+    const p = this.capabilitiesPath;
+    return (await this.fs.exists(p)) ? (jsonl(await this.fs.read(p)) as unknown as CapabilityRequest[]) : [];
+  }
+
+  // ----- the course package: the versioned, reusable form of a compiled topic -----
+
+  packagePath(dir: string): string {
+    return `${dir}/package.md`;
+  }
+
+  async loadPackage(dir: string): Promise<CoursePackage | null> {
+    const p = this.packagePath(dir);
+    if (!(await this.fs.exists(p))) return null;
+    const m = /```json\s*\n([\s\S]*?)\n```/.exec(await this.fs.read(p));
+    if (!m) return null;
+    try {
+      const v = JSON.parse(m[1]);
+      return v && v.format === "study-tutor-course" ? (v as CoursePackage) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async savePackage(dir: string, pkg: CoursePackage): Promise<void> {
+    const missing = pkg.coverage.missing.length ? `\n\nNot yet covered: ${pkg.coverage.missing.join(", ")}.` : "";
+    const head = `The course package for this topic, revision ${pkg.revision}: objectives and what covers them, worked lessons, question families, rubrics, sources and optional visual eligibility. Study Tutor writes it when the topic is compiled or refreshed.${missing}`;
+    await this.writeFile(this.packagePath(dir), withFrontmatter({ tutor: "package", topic: pkg.topic, revision: pkg.revision, complete: pkg.coverage.complete ? "yes" : "no" }, `${head}\n\n${FENCE}json\n${JSON.stringify(pkg, null, 1)}\n${FENCE}\n`));
   }
 
   /** Writes a note under the tutor folder and returns its path. */

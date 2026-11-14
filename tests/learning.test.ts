@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as F from "../src/formats";
-import { Attempt, normaliseAttempt, recordAttempt, skillEvidence, supportedLevel } from "../src/evidence";
+import { Attempt, missingFor, normaliseAttempt, recordAttempt, skillEvidence, supportedLevel } from "../src/evidence";
 import { effectivePrereqs, parseTopicGraph, syncTopicGraph, wouldCycle } from "../src/course";
 import { DEFAULT_WEIGHTS, LEARN_ACTIONS, PolicyInput, SkillInput, V1_WEIGHTS, decide, replay, scoreSkills } from "../src/policy";
 import { openQuestion, readIntent, readSessionReply, sessionFor } from "../src/session";
@@ -140,7 +140,12 @@ test("levels 4 and 5 need unaided work, a delayed transfer question and no recen
   const delayed = [...base, attempt({ id: "3", transfer: true, timestamp: "2026-11-12T10:00:00.000Z" })];
   const e = skillEvidence(delayed, 1);
   assert.equal(e.delayedTransfer, true);
-  assert.equal(supportedLevel(e), 5, "three unaided successes over two days with a delayed transfer");
+  assert.equal(supportedLevel(e), 4, "three unaided successes over two days with a delayed transfer, but no teach-back or edge case");
+  assert.match(missingFor(e, 5), /explanation good enough to teach from.*edge case.*3 earlier unaided answers were recorded before the kind of task was/);
+  const taught = [...delayed, attempt({ id: "tb", taskType: "teach-back", timestamp: "2026-11-12T11:00:00.000Z" }), attempt({ id: "ec", taskType: "edge-case", timestamp: "2026-11-12T12:00:00.000Z" })];
+  assert.equal(supportedLevel(skillEvidence(taught, 1)), 5, "with an unaided teach-back and an unaided edge case, level 5");
+  const helpedTeach = [...delayed, attempt({ id: "tb", taskType: "teach-back", assisted: true, timestamp: "2026-11-12T11:00:00.000Z" }), attempt({ id: "ec", taskType: "edge-case", timestamp: "2026-11-12T12:00:00.000Z" })];
+  assert.equal(supportedLevel(skillEvidence(helpedTeach, 1)), 4, "a helped teach-back does not count");
   const slipping = [...delayed, attempt({ id: "4", result: "incorrect", timestamp: "2026-11-13T10:00:00.000Z" })];
   assert.equal(supportedLevel(skillEvidence(slipping, 1)), 4, "one recent failure holds it at 4");
   const failing = [...slipping, attempt({ id: "5", result: "incorrect", timestamp: "2026-11-13T11:00:00.000Z" })];
@@ -430,7 +435,14 @@ test("in Adaptive mode unaided practice comes from the bank and is marked by cod
   assert.deepEqual([r.attempt!.result, r.attempt!.grading, r.attempt!.activity, r.attempt!.assisted, r.attempt!.confidence], ["correct", "deterministic", "independent-practice", false, 0.6]);
   assert.match(r.reply, /^\*\*Correct\.\*\*[\s\S]*Differentiate \$x\^3\$/, "the policy still wants unaided practice, so the next bank question follows");
   r = await t.engine.study(t.dir, chat, "3x^2");
-  assert.match(r.reply, /Press \*\*Continue\*\*/, "the run has its two unaided successes, so the guide moves to what needs work most, which the bank cannot do");
+  // The run has its two unaided successes. Limits, a foundation at level 4, last succeeded
+  // unaided on 2026-11-03, so its 7-day delayed check fell due on 2026-11-10 and comes next.
+  assert.deepEqual([r.decision!.action, r.decision!.focus, r.decision!.local], ["retrieval", 1, "bank"]);
+  assert.match(r.decision!.reason, /delayed check on Limits is due \(from 2026-11-10\)/);
+  assert.match(r.reply, /What is the limit of 1\/x/);
+  r = await t.engine.study(t.dir, chat, "B");
+  assert.deepEqual([r.attempt!.result, r.attempt!.activity, r.attempt!.taskType], ["correct", "retrieval", "recall"]);
+  assert.match(r.reply, /Press \*\*Continue\*\*/, "the check is done and moves the next one out, so the guide moves to what needs work most, which the bank cannot do");
   assert.deepEqual([r.decision!.action, r.decision!.focus, r.decision!.local], ["guided-practice", 3, null]);
   saved = await t.store.loadChat(chat);
   assert.equal(saved.fm.await_continue, "yes");
