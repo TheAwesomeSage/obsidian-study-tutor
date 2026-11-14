@@ -5,7 +5,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { menus, notices } from "./obsidian-stub";
-import StudyTutorPlugin from "../src/main";
+import StudyTutorPlugin, { readSympyBundle } from "../src/main";
+import nodefs from "node:fs";
+import nodeos from "node:os";
+import nodepath from "node:path";
+import { createHash } from "node:crypto";
 import { parseCompileOutput, parseState } from "../src/formats";
 import { MemFS } from "./memfs";
 import { FIXTURES } from "../src/visuals/fixtures";
@@ -476,10 +480,14 @@ test("home, study, review, topic page and graph work together from the normal en
   await errors.onchange();
   assert.equal(plugin.opts.weights.errors, 2, "an invalid weight is ignored");
   const sympySetting = () => item(/Compute and check maths with SymPy/);
-  assert.match(sympySetting().textContent, /Status: not loaded yet\./);
-  assert.equal(plugin.opts.mathCheck, false, "off until asked for, because the first use downloads SymPy");
-  // There are no web workers under jsdom: switching it on must fail quietly, never throw.
+  // This test vault has no plugin folder, so there is no bundled copy, and the setting says so.
+  assert.match(sympySetting().textContent, /The bundled copy was not found[\s\S]*Status: not loaded yet\./);
+  assert.equal(plugin.opts.mathCheck, true, "on by default: SymPy ships with the plugin");
+  // There are no web workers under jsdom: switching it off and on again must fail quietly, never throw.
   const toggle = $(sympySetting(), "input[type=checkbox]");
+  toggle.checked = false;
+  await toggle.onchange();
+  assert.equal(plugin.opts.mathCheck, false);
   toggle.checked = true;
   await toggle.onchange();
   assert.equal(plugin.opts.mathCheck, true);
@@ -510,6 +518,62 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.match(await fs.read(`${dir}/flashcards.md`), /<!--SR:!2020-01-01,3,250-->/, "syncing the note keeps the review history");
   plugin.opts.useSpacedRepetition = false;
   assert.equal(plugin.usesSr(), false, "the setting switches back to the built-in review");
+});
+
+test("SymPy ships with the plugin: its files are read and checked, and an older install has it switched on once", async () => {
+  const base = nodefs.mkdtempSync(nodepath.join(nodeos.tmpdir(), "study-tutor-bundle-"));
+  try {
+    const pluginDir = ".obsidian/plugins/study-tutor";
+    const folder = nodepath.join(base, pluginDir, "pyodide");
+    nodefs.mkdirSync(folder, { recursive: true });
+    const content: Record<string, string> = { "pyodide.js": "self.loadPyodide = () => {};", "sympy-1.12-py3-none-any.whl": "a wheel" };
+    const sha = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
+    for (const [n, c] of Object.entries(content)) nodefs.writeFileSync(nodepath.join(folder, n), c);
+    nodefs.writeFileSync(nodepath.join(folder, "bundle.json"), JSON.stringify({ files: Object.fromEntries(Object.entries(content).map(([n, c]) => [n, sha(c)])) }));
+
+    // The files are read whole, as memory the worker can own, and checked against their hashes.
+    const files = await readSympyBundle(folder);
+    assert.deepEqual(Object.keys(files!).sort(), Object.keys(content).sort());
+    assert.equal(Buffer.from(files!["pyodide.js"]).toString(), content["pyodide.js"]);
+    assert.ok(files!["pyodide.js"] instanceof ArrayBuffer);
+    assert.equal(await readSympyBundle(nodepath.join(base, "no such folder")), null, "no folder: no bundle, not an error");
+    const wheel = nodepath.join(folder, "sympy-1.12-py3-none-any.whl");
+    nodefs.writeFileSync(wheel, "a damaged wheel");
+    await assert.rejects(readSympyBundle(folder), /sympy-1\.12-py3-none-any\.whl is damaged/);
+    nodefs.rmSync(wheel);
+    await assert.rejects(readSympyBundle(folder), /is missing/);
+    nodefs.writeFileSync(wheel, content["sympy-1.12-py3-none-any.whl"]);
+
+    // An install from before SymPy shipped, with it off: switched on once, with a notice.
+    const load = async (saved: unknown, adapterBase: string) => {
+      const fs = new MemFS();
+      let p: any = null;
+      const app = makeApp(fs, [], [], () => p);
+      (app.vault.adapter as any).getBasePath = () => adapterBase;
+      p = new (StudyTutorPlugin as any)(app, { id: "study-tutor", dir: pluginDir });
+      if (saved) await p.saveData(saved);
+      await p.onload();
+      return p;
+    };
+    notices.length = 0;
+    const old = await load({ settings: { mathCheck: false }, settingsVersion: 2 }, base);
+    assert.equal(old.opts.mathCheck, true);
+    assert.equal(old.sympy.hasBundle(), true);
+    assert.equal((await old.loadData()).settingsVersion, 3);
+    assert.ok(notices.some((n) => /SymPy now ships with the plugin and runs offline/.test(n)), notices.join(" | "));
+    // Turned off again afterwards, it stays off.
+    const chosen = await load({ settings: { mathCheck: false }, settingsVersion: 3 }, base);
+    assert.equal(chosen.opts.mathCheck, false);
+    // Without the bundled copy, an older install is left as it was; nothing would download unasked.
+    const bare = await load({ settings: { mathCheck: false }, settingsVersion: 2 }, nodepath.join(base, "elsewhere"));
+    assert.equal(bare.opts.mathCheck, false);
+    assert.equal(bare.sympy.hasBundle(), false);
+    // A fresh install starts with it on.
+    assert.equal((await load(null, base)).opts.mathCheck, true);
+    for (const p of [old, chosen, bare]) p.onunload();
+  } finally {
+    nodefs.rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test("a chat saved by an older version reopens with its question open, and nothing in the vault is lost", async () => {

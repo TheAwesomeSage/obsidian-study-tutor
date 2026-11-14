@@ -1,9 +1,11 @@
 // Maths checking with SymPy, running inside the plugin.
 //
 // SymPy is a Python library, so it runs here through Pyodide (Python compiled to WebAssembly)
-// in a Web Worker. Nothing needs installing: the first check downloads the Pyodide runtime and
-// SymPy from the jsDelivr CDN, and the browser cache keeps them. The expressions being checked
-// never leave the machine; only that download touches the network.
+// in a Web Worker. Nothing needs installing: the runtime and SymPy ship in the plugin's
+// `pyodide` folder (see scripts/vendor-pyodide.mjs). The plugin reads those files and hands them
+// to the worker, which serves them to Pyodide from memory and refuses every network request, so
+// it works offline. Only an install without that folder falls back to downloading the same
+// files from the jsDelivr CDN. The expressions being checked never leave the machine.
 //
 // The model and the learner both produce the strings that get parsed, and SymPy's parser
 // evaluates Python. So every string passes `safeExpr` first (no attribute access, no dunders,
@@ -53,6 +55,15 @@ export interface MathBackend {
 }
 
 const PYODIDE_INDEX = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/";
+/**
+ * Where the bundled files appear to come from inside the worker. They are served from memory;
+ * the `.invalid` domain can never resolve, so a request the bundle cannot answer fails instead of
+ * reaching the network.
+ */
+const BUNDLED_INDEX = "https://bundled.invalid/pyodide/";
+
+/** The files of the bundled runtime, by name, as read from the plugin's `pyodide` folder. */
+export type BundleFiles = Record<string, ArrayBuffer>;
 
 const BANNED = /(__|\b(import|lambda|eval|exec|compile|open|globals|locals|getattr|setattr|delattr|vars|dir|input|breakpoint|help|exit|quit|print|type|object|super|classmethod|staticmethod|memoryview|bytearray|bytes|js|pyodide|os|sys|subprocess|builtins)\b)/;
 
@@ -402,19 +413,58 @@ for (const name of ["process", "require", "module", "exports", "global", "Buffer
   try { delete self[name]; } catch (e) {}
   try { if (typeof self[name] !== "undefined") self[name] = undefined; } catch (e) {}
 }
-const INDEX = ${JSON.stringify(PYODIDE_INDEX)};
+const CDN = ${JSON.stringify(PYODIDE_INDEX)};
+const LOCAL = ${JSON.stringify(BUNDLED_INDEX)};
 const PYTHON = ${JSON.stringify(PYTHON)};
 let run = null;
+// The first message says where the runtime comes from: the bundled files, or the CDN.
+let gotInit;
+const init = new Promise((resolve) => (gotInit = resolve));
+const nameOf = (u) => {
+  const s = String(u && typeof u === "object" && "url" in u ? u.url : u);
+  return s.startsWith(LOCAL) ? s.slice(LOCAL.length).split(/[?#]/)[0] : null;
+};
+const typeOf = (n) => (n.endsWith(".wasm") ? "application/wasm" : n.endsWith(".json") ? "application/json" : n.endsWith(".js") ? "text/javascript" : "application/octet-stream");
 const ready = (async () => {
   // Fail closed: if Node is somehow still reachable, SymPy stays off and the model does the maths.
   if (typeof process !== "undefined" || typeof require !== "undefined") throw new Error("Node could not be removed from the worker");
-  importScripts(INDEX + "pyodide.js");
-  const py = await loadPyodide({ indexURL: INDEX });
+  const { files } = await init;
+  let index = CDN;
+  if (files) {
+    // Pyodide asks for its files with fetch and importScripts. Both are answered from memory, and
+    // anything that is not in the bundle is refused, so nothing here touches the network.
+    index = LOCAL;
+    let held = files;
+    const missing = (u) => new TypeError("not part of the bundled SymPy runtime: " + String(u && typeof u === "object" && "url" in u ? u.url : u));
+    const realImport = self.importScripts.bind(self);
+    self.fetch = async (input) => {
+      const name = nameOf(input);
+      if (!held || name === null || !held[name]) throw missing(input);
+      return new Response(held[name], { status: 200, headers: { "Content-Type": typeOf(name) } });
+    };
+    self.importScripts = (...urls) => {
+      const blobs = urls.map((u) => {
+        const name = nameOf(u);
+        if (!held || name === null || !held[name]) throw missing(u);
+        return URL.createObjectURL(new Blob([held[name]], { type: "text/javascript" }));
+      });
+      try { realImport(...blobs); } finally { blobs.forEach((b) => URL.revokeObjectURL(b)); }
+    };
+    self.__releaseBundle = () => { held = null; };
+  }
+  importScripts(index + "pyodide.js");
+  const py = await loadPyodide({ indexURL: index });
   await py.loadPackage("sympy");
   py.runPython(PYTHON);
   run = py.globals.get("run");
+  // Everything is loaded; the 30 MB of files are no longer needed in memory.
+  if (self.__releaseBundle) self.__releaseBundle();
 })();
 self.onmessage = async (e) => {
+  if (e.data && e.data.type === "init") {
+    gotInit(e.data);
+    return;
+  }
   try {
     await ready;
     self.postMessage({ id: e.data.id, results: JSON.parse(run(JSON.stringify(e.data.claims))) });
@@ -434,11 +484,28 @@ export class SympyWorker implements MathBackend {
   private failed = "";
   private nextId = 1;
   private waiting = new Map<number, { resolve: (r: ClaimResult[]) => void; timer: number }>();
+  /** Reads the bundled runtime; null (or no reader) means it is not installed. */
+  private readBundle: (() => Promise<BundleFiles | null>) | null = null;
+  private origin: "" | "bundled" | "cdn" = "";
+
+  /** Uses the runtime shipped with the plugin instead of downloading it. */
+  useBundle(read: () => Promise<BundleFiles | null>): void {
+    this.readBundle = read;
+  }
+
+  hasBundle(): boolean {
+    return !!this.readBundle;
+  }
 
   status(): string {
     if (this.failed) return `unavailable: ${this.failed}`;
     if (this.loaded) return "ready";
     return this.worker ? "loading" : "not loaded yet";
+  }
+
+  /** Where the running copy came from, once that is known. */
+  source(): string {
+    return this.origin === "bundled" ? "included with the plugin, offline" : this.origin === "cdn" ? "downloaded from the jsDelivr CDN" : "";
   }
 
   warm(): void {
@@ -466,11 +533,27 @@ export class SympyWorker implements MathBackend {
       };
       w.onerror = (e: ErrorEvent) => this.fail(e.message || "the worker could not start");
       this.worker = w;
+      void this.sendRuntime(w);
       return w;
     } catch (e) {
       this.fail((e as Error).message || "workers are not available");
       return null;
     }
+  }
+
+  /** Tells a new worker where its runtime comes from: the bundled files (moved, not copied), or the CDN. */
+  private async sendRuntime(w: Worker): Promise<void> {
+    let files: BundleFiles | null = null;
+    try {
+      files = this.readBundle ? await this.readBundle() : null;
+    } catch (e) {
+      // A damaged bundle is reported, not quietly replaced by a download.
+      if (this.worker === w) this.fail((e as Error).message || "the bundled SymPy could not be read");
+      return;
+    }
+    if (this.worker !== w) return; // stopped while the files were being read
+    this.origin = files ? "bundled" : "cdn";
+    w.postMessage({ type: "init", files }, files ? Object.values(files) : []);
   }
 
   private fail(reason: string): void {
@@ -511,7 +594,7 @@ export class SympyWorker implements MathBackend {
           // A check that never returns (some simplifications do not terminate) takes the worker with it.
           const slowLoad = !this.loaded;
           this.stop();
-          if (slowLoad) this.failed = "SymPy took too long to download";
+          if (slowLoad) this.failed = this.origin === "bundled" ? "SymPy took too long to start" : "SymPy took too long to download";
           resolve([]);
         },
         this.loaded ? CHECK_MS : FIRST_LOAD_MS,

@@ -8,6 +8,8 @@ The teaching method in `skills/` draws on these projects. The text was rewritten
 - **meta-agentic/meta-discipline-math** (MIT). The shape of the subject cards: method, checks and typical traps.
 - **G. Polya, How to Solve It**. The problem-solving card.
 
+The release's `pyodide` folder redistributes, unmodified, Pyodide 0.26.4 (Mozilla Public License 2.0), the Python standard library as built by Pyodide (Python Software Foundation License), SymPy 1.12 and mpmath 1.3.0 (BSD licences, whose texts are inside their wheels). `pyodide/NOTICE.md` lists the files.
+
 ## Licence of janestreet/agent_skills
 
 The MIT License

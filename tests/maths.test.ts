@@ -190,7 +190,31 @@ test("the report says what SymPy computed, checked and disputed", () => {
   assert.equal(computeBlock([{ type: "compute", expr: "1+1", name: "r1" }], [{ ok: true, detail: "computed", value: "2" }]), "r1 = 1+1  →  2");
 });
 
-// ---------- the real thing, when this machine has it ----------
+// ---------- the real thing ----------
+//
+// The checker's Python runs for real on the runtime the plugin ships: Pyodide and SymPy from
+// vendor/pyodide (built by scripts/vendor-pyodide.mjs), loaded in Node from those files with no
+// download. Without that folder, a system Python with SymPy is used; without either, the test is
+// skipped.
+
+const BUNDLE = path.resolve("vendor/pyodide");
+const bundled = nodefs.existsSync(path.join(BUNDLE, "bundle.json"));
+
+/** Runs batches through the same Python source the worker runs, on the bundled Pyodide and SymPy. */
+async function runBundled(batches: Claim[][]): Promise<ClaimResult[][]> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { loadPyodide } = require("pyodide") as typeof import("pyodide");
+  const dir = BUNDLE + path.sep;
+  const names = Object.keys(JSON.parse(nodefs.readFileSync(path.join(BUNDLE, "bundle.json"), "utf8")).files);
+  for (const n of names) assert.ok(nodefs.existsSync(path.join(BUNDLE, n)), `${n} is in the bundle`);
+  const py = await loadPyodide({ indexURL: dir, packageCacheDir: dir, lockFileURL: path.join(BUNDLE, "pyodide-lock.json"), stdout: () => {}, stderr: () => {} });
+  const loaded: string[] = [];
+  await py.loadPackage("sympy", { messageCallback: (m: string) => loaded.push(m), errorCallback: (m: string) => loaded.push(m) });
+  assert.ok(!loaded.some((m) => /download|http/i.test(m)), `loaded from the bundle, not the network: ${loaded.join(" | ")}`);
+  py.runPython(PYTHON);
+  const run = py.globals.get("run") as (s: string) => string;
+  return batches.map((b) => JSON.parse(run(JSON.stringify(b))) as ClaimResult[]);
+}
 
 function findPython(): string | null {
   for (const cmd of [process.env.SYMPY_PYTHON, "python", "python3"]) {
@@ -204,7 +228,7 @@ function findPython(): string | null {
   return null;
 }
 
-const python = findPython();
+const python = bundled ? null : findPython();
 
 /** Runs batches through the same Python source the worker runs, in one process. */
 function runPython(batches: Claim[][]): ClaimResult[][] {
@@ -219,8 +243,9 @@ function runPython(batches: Claim[][]): ClaimResult[][] {
   }
 }
 
-test("SymPy itself gives the labelled outcome for every check and every chain", { skip: python ? false : "no Python with SymPy on this machine" }, () => {
-  const [single, ...chains] = runPython([cleanClaims(CASES.map(([, c]) => c), 100), ...CHAINS.map(([, batch]) => batch)]);
+test("SymPy itself gives the labelled outcome for every check and every chain", { skip: bundled || python ? false : "no bundled SymPy (run node scripts/vendor-pyodide.mjs) and no Python with SymPy", timeout: 300000 }, async () => {
+  const batches = [cleanClaims(CASES.map(([, c]) => c), 100), ...CHAINS.map(([, batch]) => batch)];
+  const [single, ...chains] = bundled ? await runBundled(batches) : runPython(batches);
   CASES.forEach(([name, , want], i) => assert.equal(single[i].ok, want, `${name}: ${single[i].detail}`));
   CHAINS.forEach(([name, , want], b) => {
     want.forEach((w, i) => {

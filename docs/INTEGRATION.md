@@ -19,9 +19,10 @@ The visual workstream's own checkout was not modified.
 ## Install and set up
 
 1. `npm install`, then `npm run build`. Copy the whole `release/study-tutor/` folder (`main.js`,
-   `manifest.json`, `styles.css`, `player.js`, `plot.js`, `assets/`) to
+   `manifest.json`, `styles.css`, `player.js`, `plot.js`, `assets/`, `pyodide/`) to
    `<vault>/.obsidian/plugins/study-tutor/`, and enable Study Tutor. `player.js` and `plot.js` load
-   only when an activity opens; without them the rest of the plugin still works. Obsidian's own
+   only when an activity opens, and `pyodide/` (Python and SymPy, about 30 MB) only when maths is
+   checked; without them the rest of the plugin still works. Obsidian's own
    updater fetches only the first three files, so update by copying the folder.
 2. For new activities: install [Ollama](https://ollama.com), run `ollama pull qwen2.5:3b`, and keep
    Ollama running. Settings → Study Tutor → **Interactive activities** → **Test** checks it. Saved
@@ -67,9 +68,20 @@ build behaved the same); the script now sends the window the focus event a real 
 trust prompt can appear after 8 s, so it is waited for up to 25 s, and the theme is switched with
 `app.changeTheme` when the theme command does not take.
 
+## SymPy bundled with the plugin (0.8.0)
+
+Checked with a probe over the same isolated profile and vault, maths checking switched on:
+
+| Run | Result |
+|---|---|
+| Bundle present, online | Loaded from the plugin folder ("included with the plugin, offline") in about 7 s; `integrate(x*exp(x), x)` gave `(x - 1)*exp(x)` and its derivative check passed; `0.5` = `1/2` accepted, `(x+1)^2 + 1` for `x^2+2x+1` rejected |
+| Bundle present, network cut (dead proxy) | Same results in about 11 s; the page's own test fetch to the CDN failed, as intended |
+| No bundle, network cut | "unavailable: … importScripts … cdn.jsdelivr.net … failed to load", the behaviour 0.7.0 had |
+
 ## Tests
 
-- `npm test`: 131 tests, 130 pass, 1 skipped (native SymPy; no Python with SymPy on this machine).
+- `npm test`: 132 tests, 132 pass. The SymPy test runs the checker's Python on the bundled
+  Pyodide runtime (`vendor/pyodide/`) in Node, with no download.
 - `npm run test:visual-browser` (Playwright in Edge): 6 of 6 pass: projectile (exact landing,
   pause, reset), plotter (JSXGraph, slider, tangent), algorithm (real trace, reduced motion),
   graph light and dark (keyboard, details), dense graph (1,920 concepts) and 390 px player without

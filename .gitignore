@@ -8,3 +8,4 @@ tests/out/
 *.map
 release/
 bench/out/
+vendor/

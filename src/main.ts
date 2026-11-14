@@ -5,10 +5,12 @@ import { Frontmatter, SourceMode, fmList, fmStr, splitFrontmatter, words } from 
 import { DEFAULT_WEIGHTS, PolicyWeights, WEIGHT_LABELS } from "./policy";
 import { DEFAULT_LOCAL_MODEL, DEFAULT_OLLAMA_URL, OllamaClient } from "./ollama";
 import { FS, Store } from "./store";
-import { SympyWorker } from "./sympy";
+import { BundleFiles, SympyWorker } from "./sympy";
 import { TutorView, VIEW_TYPE } from "./view";
 import { SavedActivityModal, configureVisualRuntime } from "./visuals/obsidian";
 import { join } from "path";
+import { existsSync, promises as fsp } from "fs";
+import { createHash } from "crypto";
 import * as visualRegistry from "./visuals/registry";
 import { adaptRegistry } from "./visualcontract";
 
@@ -19,7 +21,7 @@ export interface TutorSettings extends EngineSettings {
   bankQuiz: boolean;
   /** Hand flashcard review and scheduling to the Spaced Repetition community plugin when it is enabled. */
   useSpacedRepetition: boolean;
-  /** Compute and check maths with SymPy. Off by default because the first use downloads SymPy from a CDN. */
+  /** Compute and check maths with SymPy. On by default: SymPy ships with the plugin and runs offline. */
   mathCheck: boolean;
   /** A new learner is placed with bank questions marked by code, not model turns. */
   codePlacement: boolean;
@@ -63,7 +65,7 @@ const DEFAULTS: TutorSettings = {
   newCardsPerDay: 10,
   bankQuiz: true,
   useSpacedRepetition: true,
-  mathCheck: false,
+  mathCheck: true,
   codePlacement: true,
   smartRouting: true,
   hardEffort: "high",
@@ -75,6 +77,32 @@ const DEFAULTS: TutorSettings = {
 };
 
 const SR_PLUGIN = "obsidian-spaced-repetition";
+
+/**
+ * Reads the SymPy runtime shipped in the plugin's `pyodide` folder (listed with SHA-256 hashes in
+ * its bundle.json). Null when the folder is not there; an error when a file is missing or damaged,
+ * so a broken install says so instead of failing somewhere inside Python.
+ */
+export async function readSympyBundle(dir: string): Promise<BundleFiles | null> {
+  let list: { files?: Record<string, string> };
+  try {
+    list = JSON.parse(await fsp.readFile(join(dir, "bundle.json"), "utf8"));
+  } catch {
+    return null;
+  }
+  const entries = Object.entries(list.files ?? {});
+  if (!entries.some(([name]) => name === "pyodide.js")) return null;
+  const out: BundleFiles = {};
+  for (const [name, sha] of entries) {
+    if (!/^[\w.+-]+$/.test(name)) throw new Error(`the bundled SymPy list names "${name}", which is not a plain file name`);
+    const data = await fsp.readFile(join(dir, name)).catch(() => null);
+    if (!data) throw new Error(`the bundled SymPy file ${name} is missing; reinstall the whole plugin folder`);
+    if (createHash("sha256").update(data).digest("hex") !== sha) throw new Error(`the bundled SymPy file ${name} is damaged; reinstall the whole plugin folder`);
+    // A copy that owns its memory, so it can be moved to the worker.
+    out[name] = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+  }
+  return out;
+}
 
 export type SourceKind = "links" | "active" | "folder" | "spec" | "subject";
 
@@ -94,17 +122,30 @@ export default class StudyTutorPlugin extends Plugin {
 
   async onload(): Promise<void> {
     const adapter = this.app.vault.adapter as unknown as {getBasePath?:()=>string};
-    if (adapter.getBasePath && this.manifest.dir) configureVisualRuntime(this.app,join(adapter.getBasePath(),this.manifest.dir));
+    const pluginDir = adapter.getBasePath && this.manifest.dir ? join(adapter.getBasePath(), this.manifest.dir) : "";
+    if (pluginDir) configureVisualRuntime(this.app, pluginDir);
+    // SymPy ships in the plugin folder; the worker is given those files instead of downloading them.
+    const bundled = !!pluginDir && existsSync(join(pluginDir, "pyodide", "bundle.json"));
+    if (bundled) this.sympy.useBundle(() => readSympyBundle(join(pluginDir, "pyodide")));
     const saved = ((await this.loadData()) ?? {}) as Partial<PluginData>;
     this.data = { settings: { ...DEFAULTS, ...(saved.settings ?? {}) }, activeTopic: saved.activeTopic ?? "", activeChat: saved.activeChat ?? {}, skills: saved.skills ?? {}, settingsVersion: saved.settingsVersion ?? 1, drafts: saved.drafts ?? {}, graphLayout: saved.graphLayout ?? {} };
     // Settings saved by an older version have no weights; a partly filled set is completed from the defaults.
     this.data.settings.weights = { ...DEFAULT_WEIGHTS, ...(saved.settings?.weights ?? {}) };
+    const before = this.data.settingsVersion;
     if (this.data.settingsVersion < 2) {
       // 0.1 shipped with 1,200-word chat parts. Move anyone still on that default to 600.
       if (this.data.settings.maxChatWords === 1200) this.data.settings.maxChatWords = 600;
       this.data.settingsVersion = 2;
-      if (saved.settings) await this.saveData(this.data);
     }
+    let sympyOn = false;
+    if (this.data.settingsVersion < 3) {
+      // Up to 0.7 SymPy was off by default because switching it on downloaded it. Now it ships with
+      // the plugin, so it is switched on once, where the bundled copy is actually installed.
+      if (bundled && !this.data.settings.mathCheck) this.data.settings.mathCheck = sympyOn = true;
+      this.data.settingsVersion = 3;
+    }
+    if (saved.settings && this.data.settingsVersion !== before) await this.saveData(this.data);
+    if (sympyOn && saved.settings) new Notice("Study Tutor: SymPy now ships with the plugin and runs offline, so maths checking is switched on. You can turn it off in Settings → Study Tutor → Maths.", 12000);
     this.buildStore();
 
     this.registerView(VIEW_TYPE, (leaf: WorkspaceLeaf) => new TutorView(leaf, this));
@@ -494,8 +535,10 @@ class TutorSettingTab extends PluginSettingTab {
       .setName("Compute and check maths with SymPy")
       .setDesc(
         "Runs SymPy, a computer algebra system, inside the plugin. Typed answers in quizzes, placement and review are compared by SymPy with no model call, so 1/2 is accepted for 0.5. In chats on mathematical topics the tutor hands its computations to SymPy and every result it states is checked; if SymPy disagrees, the reply is rewritten once before you see it. " +
-          "The first use downloads Python and SymPy (about 20 MB) from the jsDelivr CDN and needs an internet connection; your maths is never sent anywhere. " +
-          `Status: ${sympy.status()}.`,
+          (sympy.hasBundle()
+            ? "Python and SymPy are included with the plugin (its pyodide folder) and run offline: nothing is downloaded, and your maths is never sent anywhere. "
+            : "The bundled copy was not found (the plugin's pyodide folder), so the first use downloads Python and SymPy (about 20 MB) from the jsDelivr CDN; your maths is never sent anywhere. Reinstall the whole release folder to run it offline. ") +
+          `Status: ${sympy.status()}${sympy.status() === "ready" && sympy.source() ? `, ${sympy.source()}` : ""}.`,
       )
       .addToggle((t) =>
         t.setValue(s.mathCheck).onChange(async (v) => {
@@ -520,7 +563,7 @@ class TutorSettingTab extends PluginSettingTab {
             { type: "derivative", f: "r1", var: "x", result: "x*exp(x)" },
           ]);
           const secs = ((Date.now() - t0) / 1000).toFixed(1);
-          if (r.length === 2 && r[0].ok && r[1].ok) new Notice(`SymPy works. It integrated x·eˣ to ${r[0].value} and confirmed the result by differentiating it (${secs}s).`, 10000);
+          if (r.length === 2 && r[0].ok && r[1].ok) new Notice(`SymPy works (${sympy.source()}). It integrated x·eˣ to ${r[0].value} and confirmed the result by differentiating it (${secs}s).`, 10000);
           else new Notice(`SymPy could not be used: ${sympy.status()}. Maths falls back to the model.`, 12000);
           this.display();
         }),

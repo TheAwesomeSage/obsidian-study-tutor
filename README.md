@@ -7,7 +7,7 @@ Desktop only: it starts the `claude` program, which mobile Obsidian cannot do.
 ## Install
 
 1. Install [Claude Code](https://claude.com/claude-code) and sign in once by running `claude` in a terminal.
-2. Download `main.js`, `manifest.json`, `styles.css`, `player.js`, `plot.js` and the `assets` folder from the [latest release](https://github.com/TheAwesomeSage/obsidian-study-tutor/releases/latest) and put them in `<your vault>/.obsidian/plugins/study-tutor/`. To build them yourself instead, run `npm install` and then `npm run build`; the whole folder is written to `release/study-tutor/`, so copy all of it. `player.js` and `plot.js` hold the activity player and the function plotter (JSXGraph); they are loaded only when an activity opens, and without them everything else still works. Obsidian's own plugin updater fetches only the first three files, so update by copying the folder.
+2. Download `study-tutor-<version>.zip` from the [latest release](https://github.com/TheAwesomeSage/obsidian-study-tutor/releases/latest) and unzip it into `<your vault>/.obsidian/plugins/`, so that you get `<your vault>/.obsidian/plugins/study-tutor/` with `main.js`, `manifest.json`, `styles.css`, `player.js`, `plot.js`, and the `assets` and `pyodide` folders. To build it yourself instead, run `npm install` and then `npm run build`; the whole folder is written to `release/study-tutor/`, so copy all of it. `player.js` and `plot.js` hold the activity player and the function plotter (JSXGraph), and `pyodide` holds Python and SymPy for the maths checks (about 30 MB). Each is loaded only when it is needed, and without them everything else still works. Obsidian's own plugin updater fetches only the first three files, so update by copying the folder.
 3. In Obsidian: Settings → Community plugins → enable **Study Tutor**.
 4. Settings → Study Tutor → **Test** checks that the CLI is found and shows the overhead of one call.
 
@@ -92,14 +92,14 @@ The **⋯** menu opens the topic overview, topic card, question bank and evidenc
 
 ## Maths with SymPy
 
-Switch on **Compute and check maths with SymPy** in the settings and the plugin runs [SymPy](https://www.sympy.org), a computer algebra system, for anything that is computation. The model does the reasoning and the teaching; SymPy does the algebra.
+With **Compute and check maths with SymPy** switched on (the default; it is under Settings → Study Tutor → Maths), the plugin runs [SymPy](https://www.sympy.org), a computer algebra system, for anything that is computation. The model does the reasoning and the teaching; SymPy does the algebra.
 
 - **Typed answers cost nothing.** In quizzes, placement and the built-in review, an answer that does not match the expected one exactly is compared by SymPy: `1/2` is accepted for `0.5`, `(x+1)^2` for `x^2+2x+1`. No model is called. If SymPy cannot decide (a sentence, an equation, a different letter), the answer goes to the model as before.
 - **The tutor hands over its computing.** On a topic with maths in it, the tutor can reply with a list of computations instead of an answer: an integral, a transform, a system to solve, a matrix inverse. Later items can use earlier results, so a chain of simple steps solves a harder problem. The plugin runs them and calls the model once more with the results. This costs one extra round, with the system prompt read from cache.
 - **Every stated result is checked.** A reply that judges your expression or states a result ends with a hidden list of checks. If SymPy disagrees, the reply is rewritten once, with more thinking, before you see it; if it still disagrees you see the reply with a warning and no level changes. A line under the reply says what was computed and checked.
 - **Less thinking where SymPy can decide.** An answer that is a bare expression gets the chat model's normal effort instead of extra thinking, because SymPy does the comparing.
 
-SymPy is Python, so it runs through [Pyodide](https://pyodide.org) (Python compiled to WebAssembly) in a background worker. Nothing needs installing. The first use downloads about 20 MB from the jsDelivr CDN and needs a connection; after that it is cached. The expressions themselves never leave your machine. Every string is filtered before it is parsed (no attribute access, no imports, no names beginning with an underscore), the worker has no access to Node or the vault, and a computation that runs too long is stopped. SymPy checks results, not the steps of a derivation or a proof: those stay with the model.
+SymPy is Python, so it runs through [Pyodide](https://pyodide.org) (Python compiled to WebAssembly) in a background worker. Nothing needs installing and no connection is needed: Pyodide 0.26.4 (Python 3.12), SymPy 1.12 and mpmath 1.3.0 ship in the plugin's `pyodide` folder, and the plugin checks every file against its SHA-256 in `pyodide/bundle.json` before starting it. The worker is handed those files and refuses to fetch anything else. The first check after Obsidian starts takes a few seconds while Python loads (about 7–11 s on an i5-1335U); later checks are quick. Settings → Study Tutor → Maths → **Test** says where SymPy was loaded from. If the `pyodide` folder is missing (for example only `main.js` was copied), the first use downloads the same files, about 20 MB, from the jsDelivr CDN instead. The expressions themselves never leave your machine. Every string is filtered before it is parsed (no attribute access, no imports, no names beginning with an underscore), the worker has no access to Node or the vault, and a computation that runs too long is stopped. SymPy checks results, not the steps of a derivation or a proof: those stay with the model.
 
 ## How usage is kept low
 
@@ -167,12 +167,12 @@ npm run test:live # end-to-end against the real CLI; spends a little usage
 npm run test:features # live check of research, lessons, quiz and summaries; spends more
 npm run test:session # a scripted live study session: hints, reveals, a restart, a dispute, a cross-topic prerequisite, cache use per turn
 npm run preview   # writes tests/out/preview.html, light and dark previews at wide and narrow widths
-npm run build     # writes main.js
+npm run build     # writes main.js, and the whole plugin folder to release/study-tutor/
 STUDY_VAULT=<vault> VISUAL_REGISTRY=<bundled registry.cjs> npm run bench:qwen
                   # local-model benchmark on ten real excerpts listed in bench/; needs Ollama
 ```
 
-`npm test` also runs the SymPy checker's Python against a labelled set of checks when a Python with SymPy is on the machine (set `SYMPY_PYTHON` to choose one); without it that one test is skipped. To run the same set through the real in-browser worker, serve `tests/out/` over HTTP after `npm run preview` and open `sympy.html`; the page title ends as "SYMPY PASSED".
+`npm run build` first runs `scripts/vendor-pyodide.mjs`, which assembles `vendor/pyodide/` from the pinned `pyodide` npm package and the SymPy and mpmath wheels for that version (downloaded once, each checked against the SHA-256 in Pyodide's lock file); the build copies it into the release folder. `npm test` runs the SymPy checker's Python against a labelled set of checks on that bundled runtime, or on a local Python with SymPy (set `SYMPY_PYTHON` to choose one) when the bundle has not been built; with neither, that one test is skipped. To run the same set through the real in-browser worker, serve `tests/out/` over HTTP after `npm run preview` and open `sympy.html`; the page title ends as "SYMPY PASSED".
 
 ## Limits
 
@@ -186,6 +186,17 @@ STUDY_VAULT=<vault> VISUAL_REGISTRY=<bundled registry.cjs> npm run bench:qwen
 
 MIT. See `LICENSE`. `NOTICE.md` lists the sources the teaching method draws on.
 
+
+## Version 0.8.0
+
+SymPy now ships with the plugin and works offline.
+
+- **Why it did not work before.** Maths checking was off by default, and switching it on made the first use download Python and SymPy (about 20 MB) from the jsDelivr CDN, so it failed without a connection or when the CDN was blocked.
+- **Now** Pyodide 0.26.4 (Python 3.12), SymPy 1.12 and mpmath 1.3.0 are in the release's `pyodide` folder (about 30 MB). The plugin checks each file's SHA-256, hands the files to the SymPy worker, and the worker fetches nothing from the network. A damaged or missing file is reported in Settings → Study Tutor → Maths instead of being replaced by a download.
+- **On by default.** Maths checking is switched on for new installs, and switched on once for an earlier install that has the `pyodide` folder (a notice says so; switch it off under Maths if you prefer). The CDN is used only when the folder is missing.
+- The SymPy test in `npm test` now runs on the bundled runtime, so it is no longer skipped.
+
+Verified in Obsidian 1.15.1 with an isolated vault: with the bundle, SymPy loaded from the plugin folder in about 7 s and with the network cut in about 11 s, computed and checked `integrate(x*exp(x), x)`, accepted `1/2` for `0.5` and rejected `(x+1)^2 + 1` for `x^2+2x+1`; without the bundle and with the network cut it fails as 0.7.0 did. Unit tests: 132 of 132 pass. Install by unzipping `study-tutor-0.8.0.zip` into `<vault>/.obsidian/plugins/`; the `pyodide` folder must come too.
 
 ## Version 0.7.0
 
