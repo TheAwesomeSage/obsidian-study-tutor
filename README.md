@@ -15,23 +15,69 @@ The plugin works in any vault. On first load it creates one folder (default `Tut
 
 ## Use
 
-- **New topic** (ribbon icon, or the command "Study Tutor: New topic"). Choose what to teach from:
-  - the active note and the notes it links to,
-  - the active note only,
-  - a folder of notes,
-  - a spec or syllabus note,
-  - the subject alone, with no notes.
-- Give a level in the Goal box (for example "second-year university"). With a spec or a bare subject you can switch on **Research on the web**: the compile step then searches for what courses at that level cover and cites its sources. This is the only time any tool is enabled, and only web search and fetch.
-- The topic is **compiled once** into a topic card (subskills, key claims with links back to your notes, common misconceptions) and a question bank.
-- The header shows your progress and a suggested **next step**, following the cheapest sensible order: learn a subskill, practise it with code-marked questions, then master it with the tutor. It never suggests a subskill while something it builds on is still weak; it sends you to the weak prerequisite first.
-- **Chat** tab: pick a mode. The modes are laid out as that path: Learn (Teacher), Practise (Quizzer), Master (Tutor), with Ask (Expert) available at any time.
-  - *Tutor* places you with a short diagnostic, then teaches one question at a time and only raises a level on demonstrated performance.
-  - *Teacher* explains one subskill at a time: why it matters, the idea, a worked example, a diagram where it helps, the common pitfall, then a problem for you. It opens with a short plan and closes with a summary.
-  - *Quizzer* asks from the question bank first, weakest subskills first. Multiple-choice and exact short answers are marked by the plugin with no tokens. Only an answer that needs judgement costs a small grading call, and when the bank runs out the model writes fresh questions.
-  - *Expert* answers questions directly, grounded in your notes.
-- **Review** tab: with the Spaced Repetition plugin enabled, a launcher for its review of this topic. Otherwise, built-in spaced flashcards from the question bank. Multiple choice and exact short answers are marked by the plugin. For anything else you grade yourself, or ask Claude to grade one answer.
-- **Skill map** tab: the concept graph, levels 0 to 5 per subskill, tracked misconceptions, recompile, flashcard export, and "Write summary note", which saves a revision summary with a concept map into the topic folder.
-  - The **concept graph** draws every subskill as a box, prerequisites above what they unlock, shaded by your level (the level is also written in each box). A dashed arrow marks a prerequisite that is behind something built on it; a faded box is one whose prerequisites you have not learned yet. Select a box to see what it builds on and leads to, and to start a lesson or tutoring on it. It is drawn by the plugin from the topic card, so it uses no tokens. The tutor is told about the same gaps.
+Open Study Tutor from the ribbon (the graduation cap) or with the command "Study Tutor: Open tutor". It opens in the main workspace. Along the top are **Home**, **Study**, **Review** and **Graph**; on the right are the current topic, **+** for a new topic, the settings, and a **⋯** menu.
+
+### Making a topic
+
+Use **New topic** (the **+**, a button on Home, or the command "Study Tutor: New topic"). Choose what to teach from:
+
+- the active note and the notes it links to,
+- the active note only,
+- a folder of notes,
+- a spec or syllabus note,
+- the subject alone, with no notes.
+
+Give a level in the Goal box (for example "second-year university"). With a spec or a bare subject you can switch on **Research on the web**: the compile step then searches for what courses at that level cover and cites its sources. This is the only time any tool is enabled, and only web search and fetch.
+
+The topic is **compiled once** into a topic card (concepts, key claims with links back to your notes, common misconceptions), a question bank, and a course graph of how its concepts depend on one another.
+
+### Home
+
+- **Pick up where you left off** shows your unfinished session: its topic, mode, and where it stopped. **Resume session** reopens it with its open question pinned.
+- **Suggested next** gives one step and the reason for it. Choose 10, 25 or 45 minutes: with little time, quick practice comes before a new lesson. A step on a concept never comes before a weak prerequisite of it.
+- The study tiles start a session on the current topic: **Adaptive study**, **Learn**, **Practise**, **Review**, **Ask** and **Knowledge graph**.
+- **Topics** can be searched by topic or concept name. Each row shows progress to the target level, concepts secured, cards due, when you last practised, and a warning when a recorded level is not yet backed by your answers. Its button takes the topic's next step; select the row for the topic page.
+- **Recent sessions** reopens any earlier session. The file icon opens its full transcript as a note.
+
+### Study modes
+
+- **Adaptive.** A study guide chooses each step: a quick check, an explanation, a hint, practice or a transfer question. It finishes one step before starting another. A new learner is placed with one question-bank question per concept, and unaided practice comes from the bank. Both are marked by the plugin with no tokens. A prerequisite in another topic is checked with one short question before it is assumed.
+- **Learn.** Lessons on material you have not met: why it matters, the idea, a worked example, a diagram where it helps, the common pitfall, then a problem with help on hand. It stays within explanation, examples and guided practice, and says when you look ready to practise unaided.
+- **Practise.** Strict questions from the question bank, weakest concepts first. Multiple-choice and exact short answers are marked by the plugin with no tokens; an answer that needs judgement costs a small grading call. When the bank runs out, the model writes fresh questions.
+- **Master.** Socratic tutoring, one question at a time. The most thorough mode, and the one that uses the most tokens. Start it from the topic page or the Study screen's mode menu.
+- **Ask.** Direct answers to anything about the topic, grounded in your notes.
+
+### Study screen
+
+- The header has the way back to Home, the topic, the mode menu, a new chat, and the transcript as a note.
+- A line under it says what the guide chose and why. **Why this?** shows the details.
+- The question waiting for your answer is pinned above the answer box. **Hint**, **Explain** and **Skip** are one click away. After a hint or an explanation the answer counts as helped; a skip is recorded as skipped and the answer is shown.
+- **Confidence** is an optional slider from 0 to 100%. It stays unset until you move it, is read before you see the feedback, and resets after each marked answer. It is compared with your results; it never raises a level.
+- **Attach open note**, when switched on, sends the note you have open with your message.
+- A marked answer shows the result and how it was checked (by the plugin, by SymPy, or by the model), and whether help was given or the answer had been seen. **Dispute this mark** sets it aside. A question-bank answer can then be regraded with more thinking; for an answer marked in conversation, the tutor looks again on your next message.
+- If a reply fails, your message is kept and **Retry** asks again. An unsent draft is kept if you leave. **Details** shows the tokens used and the checks run on the last turn.
+
+### Topic page
+
+Select a topic on Home to open it. It shows progress to the target level, the next step (**Do this**), and every mode. The **Concepts** table lists each concept with its level, the evidence behind it (unaided answers correct, answers given with help, and a provisional estimate once there are three unaided answers), what is missing for the next level, and when you last practised it. Each row can start a session on that concept or show it in the graph. Below are the misconceptions being tracked and the topic tools: target level (3, 4 or 5), topic card, question bank, evidence log, **Write summary note** (one model call; saves a revision summary with a concept map), **Export flashcards** and **Recompile from notes**. Recompiling keeps your levels, answers and relations with each concept, even one that has been renumbered or renamed.
+
+### Review
+
+Built-in spaced flashcards from the question bank, with no tokens. Multiple-choice and exact short answers are marked by the plugin. For anything else you rate yourself, or ask Claude to grade that one answer. A self-rating schedules the card; it does not count as evidence for a level. With the Spaced Repetition plugin enabled, Review shows its due and new counts and starts its review of the topic instead.
+
+### Knowledge graph
+
+Every concept from every topic on one map, drawn by the plugin with no tokens. The map shows the course; your progress only changes the colours.
+
+- **Find a concept** (or press `/`) searches by name. **Colour** switches between topic, demonstrated level, estimated success, last practised, and confidence against results. **Show** limits the map to one topic, and the relation buttons hide or show each kind of link.
+- Drag to pan and scroll to zoom. The buttons fit the map, zoom, lay it out again, and expand it to fill the pane. With the map focused, the arrow keys move between concepts, `+` and `-` zoom, `0` fits, Enter shows only the selected concept's neighbourhood, and Escape clears the selection. Positions are remembered.
+- Select a concept for its details: its level and whether your answers back it, the suggested next step (**Study this**), its evidence, and what it rests on and what builds on it. Relations read from the topic card are marked inferred; confirm (✓) or reject (✕) each one. **Add a relation or set priority** adds a link by hand or changes how strongly the concept is preferred. Only "requires" orders study; supports, applies to, contrasts with and derived from are for understanding.
+- **Suggest a synoptic connection** (one model call) proposes a link to another concept, with an explanation and a joint problem that needs both. It stays unreviewed until you confirm it, and then **Study connection** opens the joint problem in a new session. A connection never awards mastery.
+- Estimated success is a provisional estimate that your next unaided first answer on the concept is fully correct. It is shown only once there are three unaided answers.
+
+### The ⋯ menu and settings
+
+The **⋯** menu opens the topic overview, topic card, question bank and evidence log. It also has **How levels and choices are decided** (the rules, in `_skills/policy.md`), **Compare policy with logged decisions**, **Edit teaching instructions** and **Reload from vault**. Under Settings → Study Tutor → **Study policy** you can weigh exam relevance, prerequisite importance, observed errors, uncertainty, recency and available time. The weights change what is suggested, never a level.
 
 ## Maths with SymPy
 
@@ -60,7 +106,7 @@ The plugin always uses the last row, with `--strict-mcp-config`, `--disable-slas
 - **Compile once, teach many times.** Notes are read once. A chat turn loads the compiled card, not the notes.
 - **Stable part first.** The tutor rules, subject card and topic card form the system prompt and are identical every turn, so after the first turn they are read from the prompt cache. In a live test a tutor turn was about 4,700 input tokens, 3,400 of them from cache.
 - **Chats live in markdown, one part at a time.** Each chat is a file. Only the active part is sent. When it passes the size limit (default 600 words) the cheap model writes a 150-word handover, a new part starts with that summary and the last exchange, and the old part stays in the vault as a normal note.
-- **The plugin does what needs no model.** Review scheduling, marking, the skill map, progress, quiz questions from the bank, and placing a new learner (one bank question per subskill) are plain code.
+- **The plugin does what needs no model.** Review scheduling, marking, levels and the evidence behind them, the knowledge graph, progress, quiz questions from the bank, the study guide's choice of step, and placing a new learner (one bank question per concept) are plain code.
 - **A router picks the model per turn, in code.** Short look-up questions to the expert ("what is a loop invariant?") go to the utility model. Everything else goes to the chat model, and proofs, derivations, code and answers containing maths get extra thinking. The router is lopsided on purpose: a turn only goes to the cheap model when every check agrees, the tutor and teacher never use it, and it can never change a level. It is tested against a labelled set of messages in `tests/router.test.ts`.
 - **Model defaults.** Chat and compile use `sonnet`; reading large note sets, summarising and grading plain-prose answers use `haiku`. All are settings, under "Token saving".
 - **Parallel helpers only where they pay.** A large note set (default over 6,000 words) is read in parallel batches by the cheap model, and one call then builds the card from the extracts.
@@ -71,23 +117,28 @@ The plugin always uses the last row, with `--strict-mcp-config`, `--disable-slas
 Tutor/
   Dashboard.base            a Bases table of every topic's progress
   _skills/                  the teaching rules, as markdown you can edit
-    core.md  mode-tutor.md  mode-teach.md  mode-quiz.md  mode-expert.md
+    core.md  mode-auto.md  mode-tutor.md  mode-teach.md  mode-quiz.md  mode-expert.md
     compile.md  utility.md  summary.md  maths-check.md
+    policy.md               how levels and study choices are decided, for reading
     subjects/               one short card per field; add your own
+  _logs/decisions.md        what the study guide chose and why, for comparing policies
   Topics/<topic>/
     topic.md                the compiled topic card
     questions.md            the question bank
-    state.md                skill map, misconceptions, review schedule
+    graph.md                the course graph: concept ids and relations, no progress
+    state.md                levels, misconceptions, review schedule
+    evidence.md             every marked answer and level change, with how it was marked
     flashcards.md           optional export
     chats/                  one file per chat part
+    sessions/               a readable record of where each chat stands
 ```
 
-Everything is markdown, so you can read, edit, link and search it. Edits to `_skills/` take effect on the next turn. To add a subject card, add `subjects/<name>.md`; the compiler can then pick it for new topics. To change a topic's card by hand, edit `topic.md` and set `subject:` in its properties.
+Everything is markdown, so you can read, edit, link and search it. Edits to `_skills/` take effect on the next turn, except `policy.md`: it describes rules that the code enforces, and is never sent to a model. To add a subject card, add `subjects/<name>.md`; the compiler can then pick it for new topics. To change a topic's card by hand, edit `topic.md` and set `subject:` in its properties.
 
 ## Working with other plugins
 
 - **Bases** (core): `Tutor/Dashboard.base` lists topics with progress and cards due.
-- **Spaced Repetition** (community): when it is enabled, flashcards are handed to it. Each topic's question bank is kept as a note tagged `#flashcards/<topic>`, Spaced Repetition schedules and reviews it with your other decks (including on mobile), and the Review tab shows its due and new counts and starts its review on the topic. Regenerating the note keeps the review history. Without that plugin, or with the setting off, the built-in review is used. Checked against Spaced Repetition 1.15.4, including its own card parser.
+- **Spaced Repetition** (community): when it is enabled, flashcards are handed to it. Each topic's question bank is kept as a note tagged `#flashcards/<topic>`, Spaced Repetition schedules and reviews it with your other decks (including on mobile), and the Review screen shows its due and new counts and starts its review on the topic. Regenerating the note keeps the review history. Without that plugin, or with the setting off, the built-in review is used. Checked against Spaced Repetition 1.15.4, including its own card parser.
 - **Execute Code** (community): chat files are notes, so code blocks the tutor writes can be run from the chat file.
 - Maths is written in LaTeX and renders in the chat and in every file.
 
