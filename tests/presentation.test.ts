@@ -294,6 +294,9 @@ test("ids outside the shortlist, code, links and answer-giving hints are refused
   assert.match(check({ settings: { algorithm: "binary-search", values: [1, 2, 3], target: 2, checker: "x" } }), /unexpected field "checker"/);
   assert.match(check({ objective: "learn about volcano eruptions", predictionQuestion: "How tall is a volcano?" }), /share no content words/);
   assert.equal(check({}), "");
+  // Prose that quotes a command in backticks, or says "only = ...", is not code (seen in the benchmark).
+  assert.equal(check({ hint: "Think about what `binary search` checks first, only after the middle one." }), "");
+  assert.match(check({ hint: "Click <a onclick=x>here</a> to see the middle element." }), /looks like code/);
 });
 
 test("an unsupported capability is a structured record, from code or from the local model's fit check", async () => {
@@ -736,4 +739,11 @@ test("a module's own question template replaces the local model's wording; vague
   assert.equal(vague.missingCapability!.operation, "a simulation of: compares the target with the middle element", "a module value or a 'none' is not a description of what is missing");
   const none = await configureActivity({ request: req({ objective: "Process states: running, ready and blocked" }), conceptId: "c", candidates: [], assets: [], registry: adaptRegistry(makeFixtureRegistry() as any), model: null, catalogVersion: "c", trigger: "explicit" });
   assert.equal(none.missingCapability!.operation, "a simulation of: running, ready and blocked");
+});
+
+test("the concept's own name decides which supported objective matched", () => {
+  const algorithm = { ...ARRAY_TRACE, id: "algorithm", supportedObjectives: ["Zero-based numeric array indexing", "Linear search (first match)", "Binary search on sorted numbers (one matching index)"] };
+  const text = "Linear search: compares each numeric array element with a target, from index 0, and stops at the first match.";
+  assert.equal(matchModules(text, "simulation", [algorithm], undefined, "Linear search")[0].phrase, "Linear search (first match)");
+  assert.equal(matchModules("Zero-based numeric array indexing: a[0] is the first element of the array.", "simulation", [algorithm], undefined, "Zero-based numeric array indexing")[0].phrase, "Zero-based numeric array indexing");
 });

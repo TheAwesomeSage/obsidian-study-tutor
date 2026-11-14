@@ -89,9 +89,12 @@ const GENERIC = new Set(["value", "function", "number", "numeric", "result", "da
  * its specific words (or its only one) appear in the text, so "Binary search on sorted numbers"
  * matches a note on binary search over a sorted array. This is a shortlist, not a verdict: the
  * configuration step still has to fit the excerpt, and the module still validates the result.
+ * Words of the concept's own name (`title`) count most, so a note on linear search over an
+ * indexed array is matched to "Linear search", not to "array indexing".
  */
-export function matchModules(text: string, kind: PresentationKind, descriptors: ModuleDescriptor[], preferred?: string): ModuleMatch[] {
+export function matchModules(text: string, kind: PresentationKind, descriptors: ModuleDescriptor[], preferred?: string, title = ""): ModuleMatch[] {
   const have = terms(text);
+  const named = terms(title);
   const out: ModuleMatch[] = [];
   for (const d of descriptors) {
     if (!moduleKinds(d).includes(kind) && !(kind === "game" && moduleKinds(d).includes("simulation"))) continue;
@@ -100,7 +103,8 @@ export function matchModules(text: string, kind: PresentationKind, descriptors: 
       const specific = [...terms(phrase)].filter((w) => !GENERIC.has(w));
       const found = specific.filter((w) => have.has(w)).length;
       if (!specific.length || found < Math.min(2, specific.length)) continue;
-      if (!best || found > best.score) best = { phrase, score: found };
+      const score = found + 2 * specific.filter((w) => named.has(w)).length + found / specific.length;
+      if (!best || score > best.score) best = { phrase, score };
     }
     if (best) out.push({ descriptor: d, phrase: best.phrase, score: best.score + (d.id === preferred ? 10 : 0) + (moduleKinds(d)[0] === kind ? 0.5 : 0) });
   }
@@ -171,7 +175,7 @@ const AUTO_MODES: Mode[] = ["auto", "quiz", "tutor"];
 export function choosePresentation(g: GateInput, explicit: ExplicitRequest | null, tutorKind: PresentationKind | null = null): PresentationDecision {
   const name = g.objective.split(/[:.\n]/)[0].trim() || "this";
   const find = (kind: PresentationKind) => {
-    const candidates = matchModules(`${g.objective}\n${g.context}\n${g.message}`, kind, g.descriptors, g.preferredModuleId);
+    const candidates = matchModules(`${g.objective}\n${g.context}\n${g.message}`, kind, g.descriptors, g.preferredModuleId, name);
     const ids = candidates.map((c) => c.descriptor.id);
     const ready = g.saved.find((a) => a.status === "ready" && (a.kind === kind || (kind === "game" && a.kind === "simulation")) && (ids.includes(a.moduleId) || !ids.length));
     const failed = g.saved.find((a) => a.status !== "ready" && a.kind === kind);

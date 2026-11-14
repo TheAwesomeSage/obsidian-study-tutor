@@ -102,6 +102,8 @@ export interface PresentationOutcome {
   cacheHit: boolean;
   /** Model calls spent on presentation: local model calls, and Claude calls (always 0). */
   calls: { local: number; claude: 0 };
+  /** The subskill the activity is about, so an offer is opened for that concept. Null when unknown. */
+  concept: number | null;
 }
 
 export interface TurnResult {
@@ -603,7 +605,7 @@ export class Engine {
       p.tutorKind ?? null,
     );
     if (decision.status === "none") return null;
-    const outcome: PresentationOutcome = { decision, request: null, activity: null, lesson: null, result: null, fallback: "", cacheHit: false, calls: { local: 0, claude: 0 } };
+    const outcome: PresentationOutcome = { decision, request: null, activity: null, lesson: null, result: null, fallback: "", cacheHit: false, calls: { local: 0, claude: 0 }, concept: n };
     if (decision.status === "text") return outcome;
     const t = new Date().toISOString();
     const log = (event: string, a: ActivityRecord | null) => this.store.logActivity(p.dir, { t, activityId: a?.id ?? decision.activityId ?? "", conceptId, event, trigger: decision.trigger, reason: decision.reason, ...(p.chatPath ? { chatPath: p.chatPath } : {}) });
@@ -637,7 +639,7 @@ export class Engine {
     // configure: a saved configuration (or saved failure) for exactly these sources and versions
     // is reused first, so a repeated failure never runs the local model again.
     if (!this.visuals) return this.declined(p.dir, p.topic, n, outcome, null, conceptId, false, log);
-    const candidates = matchModules(`${objective}\n${context}\n${p.said}`, decision.kind, descriptors, decision.moduleId ?? undefined).map((m) => m.descriptor);
+    const candidates = matchModules(`${objective}\n${context}\n${p.said}`, decision.kind, descriptors, decision.moduleId ?? undefined, sk.name).map((m) => m.descriptor);
     const hit = saved.find((a) => a.kind === decision.kind && a.moduleId === candidates[0]?.id && a.objective === objective) ?? null;
     let rec: ActivityRecord;
     if (hit) {
@@ -742,7 +744,8 @@ export class Engine {
     await this.store.logActivity(dir, { t: new Date().toISOString(), activityId, conceptId: rec.conceptId, event: "opened", trigger: rec.trigger, reason: rec.selectionReason, ...(o.chatPath ? { chatPath: o.chatPath } : {}) });
     if (lesson) await this.noteActivityHelp(o.chatPath, state, rec.kind);
     const decision: PresentationDecision = { kind: rec.kind, trigger: "explicit", status: rec.status === "ready" ? "cached" : "unsupported", reason: rec.selectionReason, moduleId: rec.moduleId || null, activityId, candidates: rec.moduleId ? [rec.moduleId] : [] };
-    return { decision, request: null, activity: rec, lesson, result: lesson ? { status: "ready", lesson } : toResult(rec), fallback: "", cacheHit: true, calls: { local: 0, claude: 0 } };
+    const concept = Number(Object.entries(state.concepts).find(([, id]) => id === rec.conceptId)?.[0] ?? NaN);
+    return { decision, request: null, activity: rec, lesson, result: lesson ? { status: "ready", lesson } : toResult(rec), fallback: "", cacheHit: true, calls: { local: 0, claude: 0 }, concept: Number.isFinite(concept) ? concept : null };
   }
 
   /**

@@ -189,6 +189,10 @@
   border-bottom: 1px solid var(--st-line);
   background: var(--st-raised);
   min-height: 48px;
+  /* When the tabs and the topic picker do not fit on one line, the picker moves to a second
+     line instead of drawing over the tabs. */
+  flex-wrap: wrap;
+  row-gap: var(--st-1);
 }
 .study-tutor .st-brand {
   display: inline-flex;
@@ -211,8 +215,19 @@
 .study-tutor .st-nav-tabs {
   display: flex;
   gap: 2px;
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   min-width: 0;
+}
+.study-tutor .st-nav-tab {
+  white-space: nowrap;
+}
+@container st (max-width: 1120px) {
+  .study-tutor .st-nav-icon {
+    display: none;
+  }
+  .study-tutor .st-topic-select {
+    max-width: 11rem;
+  }
 }
 .study-tutor .st-nav-tab {
   display: inline-flex;
@@ -996,8 +1011,12 @@
   color: var(--text-normal);
 }
 .study-tutor .st-why-text {
-  flex: 1 1 auto;
+  /* Below about 16em the reason takes its own line instead of becoming a column of single words. */
+  flex: 1 1 16em;
   min-width: 0;
+}
+.study-tutor .st-why-line {
+  flex-wrap: wrap;
 }
 .study-tutor .st-why .st-link {
   flex: 0 0 auto;

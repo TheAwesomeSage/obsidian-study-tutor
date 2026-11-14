@@ -150,7 +150,9 @@ export function configPrompt(req: PresentationRequest, d: ModuleDescriptor, asse
   ].join("\n");
 }
 
-const CODE = /<\s*script|javascript:|\beval\s*\(|\bfunction\s*\(|=>|\brequire\s*\(|\bimport\s*\(|new\s+Function|`|\$\{|<\s*iframe|\bon[a-z]+\s*=/i;
+// Backticks are not code here: models quote commands such as `sort -r` in prose, and no string
+// from the model is ever run. Event-handler attributes are matched by name, not by "on…=".
+const CODE = /<\s*script|javascript:|\beval\s*\(|\bfunction\s*\(|=>|\brequire\s*\(|\bimport\s*\(|new\s+Function|\$\{|<\s*iframe|\bon(click|load|error|focus|blur|change|input|submit|mouse\w*|key\w*|pointer\w*)\s*=/i;
 const PATHISH = /(^|\s)([a-z]:\\|\.\.\/|\/(usr|etc|home|var|bin)\/)|https?:\/\/|file:\/\//i;
 const LEAK = /\b(the answer is|answer:|it (will )?(equals?|is exactly)|=\s*-?\d)/i;
 

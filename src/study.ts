@@ -358,13 +358,17 @@ export class StudyScreen implements Screen {
         open.onclick = async () => {
           open.disabled = true; open.setText("Preparing activity…");
           try {
-            const next = await v.plugin.engine.requestActivity(activity.dir, { kind: out.decision.kind, concept: v.state?.focus ?? undefined, chatPath: activity.chatPath, preferredModuleId: out.decision.moduleId ?? undefined });
+            const next = await v.plugin.engine.requestActivity(activity.dir, { kind: out.decision.kind, concept: out.concept ?? v.state?.focus ?? undefined, chatPath: activity.chatPath, preferredModuleId: out.decision.moduleId ?? undefined });
             activity.outcome = next;
             if (v.dir === activity.dir && v.chatPath === activity.chatPath) this.openActivity(next, activity.dir, activity.chatPath);
           } catch (error) { new Notice((error as Error).message); }
           finally { this.sync(); }
         };
-      } else card.createDiv({ cls: "st-meta", text: out.activity?.reason || "This topic needs a different representation. Continue with the explanation." });
+      } else if (out.activity?.status === "invalid" && out.activity.reason && out.activity.reason !== out.decision.reason) {
+        // A configuration that failed its checks says why; an unsupported request is already
+        // explained by the decision's reason, and a text or diagram reply needs no extra line.
+        card.createDiv({ cls: "st-meta", text: out.activity.reason });
+      }
     }
 
     if (this.busy) this.thinking(tail);
