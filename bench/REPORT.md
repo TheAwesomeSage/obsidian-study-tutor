@@ -75,6 +75,25 @@ About 8 output tokens per second. Most of the time is output tokens: the schema 
 write every field, so a refusal costs as much as a configuration. A two-stage fit check, or a
 schema that lets `fits: false` stop early, would roughly halve refusal time; not done here.
 
+### Final run on the integrated branch (2026-11-14 19:08)
+
+The same ten excerpts against the committed registry on `claude/finish-integration` (module
+descriptors with kinds, summaries and question templates), after the excerpt-aware shortlist,
+the vague-capability filter and the backtick fix.
+
+- Routing against my labels: 9 of 10 (E01 declined in code, as before). Forced fit check: 8 of 9.
+- E04 (`sort` is alphabetical), forced: the first reply failed its checks, one repair followed, and
+  the model then judged it unsupported. In the run before the backtick fix (the visual
+  workstream's run at 18:42) the same excerpt ended invalid because prose in backticks was
+  rejected as code.
+- Missing-capability records now describe the objective in plain words when the model's text is
+  vague; one usable model phrase was kept ("increment of index_counter").
+- Claude calls 0; reopening all ten results: 0 model calls.
+- Latency: cold first call 34.3 s (4.2 s load); warm, forced pass median 23.5 s (19.4–27.2 s,
+  n = 8); E04 with its repair 53.1 s.
+- Inside real Obsidian (see `docs/INTEGRATION.md`), a live configuration for a synthetic linear
+  search concept opened the player in 18.9–30.3 s over four runs.
+
 ## Synthetic controls (not the learner's notes)
 
 `bench/synthetic-controls.json`: four short supported texts (binary search, bubble sort, linear
