@@ -7,7 +7,7 @@ Desktop only: it starts the `claude` program, which mobile Obsidian cannot do.
 ## Install
 
 1. Install [Claude Code](https://claude.com/claude-code) and sign in once by running `claude` in a terminal.
-2. Download `main.js`, `manifest.json` and `styles.css` from the [latest release](https://github.com/TheAwesomeSage/obsidian-study-tutor/releases/latest) and put them in `<your vault>/.obsidian/plugins/study-tutor/`. To build them yourself instead, run `npm install` and then `npm run build`; the files are written to `release/study-tutor/`.
+2. Download `main.js`, `manifest.json`, `styles.css`, `player.js`, `plot.js` and the `assets` folder from the [latest release](https://github.com/TheAwesomeSage/obsidian-study-tutor/releases/latest) and put them in `<your vault>/.obsidian/plugins/study-tutor/`. To build them yourself instead, run `npm install` and then `npm run build`; the whole folder is written to `release/study-tutor/`, so copy all of it. `player.js` and `plot.js` hold the activity player and the function plotter (JSXGraph); they are loaded only when an activity opens, and without them everything else still works. Obsidian's own plugin updater fetches only the first three files, so update by copying the folder.
 3. In Obsidian: Settings → Community plugins → enable **Study Tutor**.
 4. Settings → Study Tutor → **Test** checks that the CLI is found and shows the overhead of one call.
 

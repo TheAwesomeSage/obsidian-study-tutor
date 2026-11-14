@@ -351,8 +351,19 @@ export class StudyScreen implements Screen {
       const out = activity.outcome;
       const card = tail.createDiv({ cls: "st-notice st-activity-offer" });
       card.createDiv({ cls: "st-meta", text: out.decision.reason });
-      if (out.lesson) button(card, { label: "Reopen activity", icon: "play", onClick: () => this.openActivity(out, activity.dir, activity.chatPath) });
-      else if (out.decision.status === "offer") {
+      if (out.lesson) {
+        const row = card.createDiv({ cls: "st-actions" });
+        button(row, { label: "Reopen activity", icon: "play", onClick: () => this.openActivity(out, activity.dir, activity.chatPath) });
+        // Fresh numbers come from module code with a new seed; the saved configuration is reused, no model is called.
+        const saved = out.activity;
+        if (saved && saved.status === "ready") button(row, { label: "New numbers", icon: "shuffle", tone: "ghost", title: "New numbers: the same activity with different values, made by the module itself. Uses no model.", onClick: async () => {
+          try {
+            const next = await v.plugin.engine.openActivity(activity.dir, saved.id, { chatPath: activity.chatPath, variantSeed: Math.floor(Math.random() * 1_000_000) });
+            if (JSON.stringify(next.lesson?.settings) === JSON.stringify(saved.lesson?.settings)) new Notice("This activity has no numeric variants; it opens as saved.");
+            this.openActivity({ ...next, request: out.request }, activity.dir, activity.chatPath);
+          } catch (error) { new Notice((error as Error).message); }
+        } });
+      } else if (out.decision.status === "offer") {
         const open = button(card, { label: `Open ${out.decision.kind}`, icon: "play" });
         open.disabled = this.busy;
         open.onclick = async () => {
@@ -401,7 +412,8 @@ export class StudyScreen implements Screen {
       if (event.type !== "assessment" || !outcome.activity) return;
       const activityId = outcome.activity.id;
       recording = recording.then(async () => {
-        const marked = await v.plugin.engine.recordActivityResult(dir, activityId, event.response, { chatPath, hintUsed });
+        // The lesson actually played is passed, so an answer in a numeric variant is checked against that variant.
+        const marked = await v.plugin.engine.recordActivityResult(dir, activityId, event.response, { chatPath, hintUsed, lesson: outcome.lesson });
         if (v.dir === dir) { this.marked = marked.attempt; this.changes = marked.changes; await v.loadState(); await v.stateChanged(); this.sync(); }
       }).catch(error => { new Notice(`The practice result could not be saved: ${(error as Error).message}`); });
     });

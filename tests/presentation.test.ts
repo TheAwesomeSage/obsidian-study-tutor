@@ -747,3 +747,15 @@ test("the concept's own name decides which supported objective matched", () => {
   assert.equal(matchModules(text, "simulation", [algorithm], undefined, "Linear search")[0].phrase, "Linear search (first match)");
   assert.equal(matchModules("Zero-based numeric array indexing: a[0] is the first element of the array.", "simulation", [algorithm], undefined, "Zero-based numeric array indexing")[0].phrase, "Zero-based numeric array indexing");
 });
+
+test("an answer in a numeric variant is assessed against that variant, and a lesson that is not the saved activity is refused", async () => {
+  const t = await setup({ local: [arrayReply()] });
+  await t.focus(2, { 1: 3, 2: null });
+  const out = await t.engine.requestActivity(t.dir, { kind: "simulation" });
+  const variant = await t.engine.openActivity(t.dir, out.activity!.id, { variantSeed: 4 });
+  const expected = trace(variant.lesson!.settings).comparisons;
+  const res = await t.engine.recordActivityResult(t.dir, out.activity!.id, { answer: expected }, { lesson: variant.lesson });
+  assert.equal(res.assessment.correct, true, "checked against the variant's own trace");
+  await assert.rejects(t.engine.recordActivityResult(t.dir, out.activity!.id, { answer: 1 }, { lesson: { ...variant.lesson, objective: "something else entirely" } }), /does not match the saved one/);
+  assert.equal(t.calls.length + t.local.requests.length, 1, "only the first configuration used a model");
+});

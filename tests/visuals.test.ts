@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assessLesson, listModuleDescriptors, validateLesson } from "../src/visuals/registry";
+import { assessLesson, createVariant, listModuleDescriptors, validateLesson } from "../src/visuals/registry";
 import { evaluate, formula, projectile, rangeBounds, traceAlgorithm, numericVariant, plotSegments, type PlotSettings, type ProjectileSettings, type AlgorithmSettings } from "../src/visuals/models";
 import { FIXTURES } from "../src/visuals/fixtures";
 import { ASSETS } from "../src/visuals/assets";
@@ -88,4 +88,22 @@ test("backend assessment follows allowed learner controls and refuses changed eq
   assert.equal(assessLesson(l,{answer:expected,settings:{...settings,speed:100}}).status,"invalid");
   const p=copy("plot");assert.equal(assessLesson(p,{answer:4,settings:{...p.settings,pointX:2}}).status,"correct");
   const corrupted=copy("plot");corrupted.sourceRefs[0].excerpt="changed";assert.equal(validateLesson(corrupted).valid,false);
+});
+test("numeric variants are made and validated by module code, deterministically, with the question rewritten", () => {
+  for (const id of ["projectile", "plot", "algorithm"]) {
+    const a = createVariant(copy(id), 7), b = createVariant(copy(id), 7), c = createVariant(copy(id), 8);
+    assert.ok(a && validateLesson(a).valid, `${id} variant validates`);
+    assert.deepEqual(a, b, `${id}: the same seed gives the same variant`);
+    assert.notDeepEqual(a!.settings, c!.settings, `${id}: another seed gives other numbers`);
+    for (const k of ["moduleId", "moduleVersion", "assessmentId", "objective", "sourceRefs", "assetIds"] as const) assert.deepEqual(a![k], copy(id)[k], `${id}: ${k} unchanged`);
+  }
+  const p = createVariant(copy("projectile"), 11)!, s = p.settings as unknown as ProjectileSettings;
+  const [lo, hi] = rangeBounds(s);
+  assert.ok(s.target >= lo - s.tolerance && s.target <= hi + s.tolerance, "the new target is reachable with the allowed controls");
+  assert.match(p.predictionQuestion, new RegExp(`speed ${s.speed} m/s, angle ${s.angle} degrees`), "the question states the new settings");
+  const bin = createVariant({ ...copy("algorithm"), settings: { ...copy("algorithm").settings, algorithm: "binary-search", values: [1, 3, 5, 7, 9] } }, 5)!;
+  const v = (bin.settings as unknown as AlgorithmSettings).values;
+  assert.deepEqual(v, [...new Set(v)].sort((x, y) => x - y), "binary-search variants stay sorted and distinct");
+  assert.equal(createVariant(copy("external"), 3), null, "external activities have no numeric variants");
+  assert.equal(createVariant({ schemaVersion: 1 }, 3), null);
 });

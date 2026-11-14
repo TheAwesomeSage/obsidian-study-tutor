@@ -753,13 +753,24 @@ export class Engine {
    * the activity and recorded as evidence, always as helped work: an interactive shows its result
    * as the learner works, so it can support "can do with help" and never counts as unaided
    * retention or transfer. No model is called.
+   *
+   * With `lesson`, the answer was given in a numeric variant of the saved activity (from
+   * openActivity with a seed). It is assessed against that variant, which must validate and must
+   * be the same activity: module, version, assessment, objective and sources unchanged.
    */
-  async recordActivityResult(dir: string, activityId: string, response: unknown, o: { hintUsed?: boolean; chatPath?: string; confidence?: number | null } = {}): Promise<{ assessment: AssessmentResult; attempt: Attempt | null; changes: string[] }> {
+  async recordActivityResult(dir: string, activityId: string, response: unknown, o: { hintUsed?: boolean; chatPath?: string; confidence?: number | null; lesson?: unknown } = {}): Promise<{ assessment: AssessmentResult; attempt: Attempt | null; changes: string[] }> {
     const s = this.settings();
     if (!this.visuals) throw new Error("No visual modules are installed.");
     const rec = (await this.store.loadActivities(dir)).find((a) => a.id === activityId);
     if (!rec?.lesson) throw new Error("That activity is no longer saved.");
-    const assessment = this.visuals.assessLesson(rec.lesson, response);
+    let played: VisualLesson = rec.lesson;
+    if (o.lesson !== undefined) {
+      const v = this.visuals.validateLesson(o.lesson);
+      const same = v.ok && v.lesson.moduleId === rec.lesson.moduleId && v.lesson.moduleVersion === rec.lesson.moduleVersion && v.lesson.assessmentId === rec.lesson.assessmentId && v.lesson.objective === rec.lesson.objective && JSON.stringify(v.lesson.sourceRefs) === JSON.stringify(rec.lesson.sourceRefs);
+      if (!v.ok || !same) throw new Error("That activity does not match the saved one, so its answer was not recorded.");
+      played = v.lesson;
+    }
+    const assessment = this.visuals.assessLesson(played, response);
     // The contract's response carries its own hintsUsed flag; either source marks the hint.
     o = { ...o, hintUsed: !!o.hintUsed || (!!response && typeof response === "object" && (response as Record<string, unknown>).hintsUsed === true) };
     const now = new Date().toISOString();
@@ -775,7 +786,7 @@ export class Engine {
         skill: n,
         concept: rec.conceptId,
         questionId: `${activityId}:${rec.lesson.assessmentId}`,
-        question: rec.lesson.predictionQuestion,
+        question: played.predictionQuestion,
         answer: JSON.stringify(response ?? null).slice(0, 400),
         activity: "interactive",
         mode: "activity",

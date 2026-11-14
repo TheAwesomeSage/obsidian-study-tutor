@@ -1,5 +1,5 @@
 import type { AssessmentResponse, AssessmentResult, JsonObject, LessonValidation, ModuleDescriptor, ValidationError, VisualLesson } from "./contracts";
-import { evaluate, plotSegments, rangeBounds, traceAlgorithm, type AlgorithmSettings, type PlotSettings, type ProjectileSettings } from "./models";
+import { evaluate, numericVariant, plotSegments, projectile, rangeBounds, traceAlgorithm, type AlgorithmSettings, type PlotSettings, type ProjectileSettings } from "./models";
 import { ASSETS } from "./assets";
 import { contentHash } from "../formats";
 
@@ -120,4 +120,49 @@ export function assessLesson(lesson: VisualLesson, response: AssessmentResponse)
   } else return result("ungraded", "External simulation state is opaque. Discuss your source-based explanation with your tutor.");
   const correct = typeof expected === "number" ? typeof response.answer === "number" && Number.isFinite(response.answer) && Math.abs(expected - response.answer) <= 0.001 : JSON.stringify(expected) === JSON.stringify(response.answer);
   return result(correct ? "correct" : "incorrect", correct ? "Matches the model. Explain why, then try a fresh unaided problem." : "Does not match this model. Inspect the components or execution trace and explain the difference.");
+}
+
+const round2 = (x: number) => Math.round(x * 100) / 100;
+/** Deterministic fraction in [0, 1) from a seed and a salt. */
+const unit = (seed: number, salt: number) => (Math.imul((seed ^ Math.imul(salt, 0x9e3779b1)) >>> 0, 2654435761) >>> 0) / 4294967296;
+
+/**
+ * A fresh numeric variant of a saved lesson, made by module code from an integer seed: new
+ * array values for the algorithm trace, new launch settings and a reachable target for the
+ * projectile, a new point for the plotter. The question is rewritten from the module's template
+ * for the new settings, and the variant is validated like any lesson. Null when the module has
+ * no variants (external activities) or the variant does not validate. No model is involved.
+ */
+export function createVariant(value: unknown, seed: number): VisualLesson | null {
+  const valid = validateLesson(value);
+  if (!valid.valid || !Number.isInteger(seed)) return null;
+  const lesson = valid.lesson;
+  const s = lesson.settings;
+  let next: JsonObject | null = null;
+  if (lesson.moduleId === "algorithm") {
+    const a = s as unknown as AlgorithmSettings;
+    let values = numericVariant(seed >>> 0, Math.max(1, Math.min(16, a.values.length)));
+    // Binary search here has one matching index, so its values are distinct and ascending.
+    if (a.algorithm === "binary-search") values = [...new Set(values)].sort((x, y) => x - y);
+    const index = Math.floor(unit(seed, 1) * values.length);
+    const target = values[Math.floor(unit(seed, 2) * values.length)];
+    next = { ...s, values, index, target };
+  } else if (lesson.moduleId === "projectile") {
+    const p = s as unknown as ProjectileSettings;
+    const pick = (lo: number, hi: number, salt: number) => round2(lo + unit(seed, salt) * (hi - lo));
+    const speed = pick(p.speedRange[0], p.speedRange[1], 1), angle = pick(p.angleRange[0], p.angleRange[1], 2);
+    // The target is the landing point of another allowed setting, so it is always reachable.
+    const target = round2(projectile({ speed: pick(p.speedRange[0], p.speedRange[1], 3), angle: pick(p.angleRange[0], p.angleRange[1], 4), gravity: p.gravity }).range);
+    next = { ...s, speed, angle, target };
+  } else if (lesson.moduleId === "function-plotter") {
+    const p = s as unknown as PlotSettings;
+    next = { ...s, pointX: round2(p.domain[0] + unit(seed, 1) * (p.domain[1] - p.domain[0])) };
+  }
+  if (!next) return null;
+  const descriptor = descriptors.find((d) => d.id === lesson.moduleId);
+  const template = descriptor?.questionTemplates?.[lesson.assessmentId];
+  const settings = next;
+  const predictionQuestion = template ? template.replace(/\{(\w+)\}/g, (all, k: string) => (k in settings ? String(settings[k]) : all)) : lesson.predictionQuestion;
+  const checked = validateLesson({ ...lesson, settings, predictionQuestion });
+  return checked.valid ? checked.lesson : null;
 }
