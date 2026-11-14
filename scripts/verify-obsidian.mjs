@@ -38,7 +38,18 @@ try {
   if (!page) throw new Error("No Obsidian window appeared.");
   const errors = [];
   const shot = async (name) => { await sleep(700); await page.screenshot({ path: path.join(out, `${name}.png`) }); note(`screenshot ${name}`); };
-  const theme = async (dark) => { await page.evaluate((d) => window.app.commands.executeCommandById(d ? "theme:use-dark" : "theme:use-light"), dark); await sleep(500); };
+  const theme = async (dark) => {
+    const ok = await page.evaluate(async (d) => {
+      window.app.commands.executeCommandById(d ? "theme:use-dark" : "theme:use-light");
+      await new Promise((r) => setTimeout(r, 300));
+      // Fall back to the app's own switch when the command is not there.
+      if (document.body.classList.contains("theme-dark") !== d) window.app.changeTheme?.(d ? "obsidian" : "moonstone");
+      await new Promise((r) => setTimeout(r, 300));
+      return document.body.classList.contains("theme-dark") === d;
+    }, dark);
+    if (!ok) note(`could not switch to the ${dark ? "dark" : "light"} theme`);
+    await sleep(300);
+  };
   // Window size, through the renderer's own Electron window when CDP cannot set bounds.
   const size = async (width, height) => {
     const ok = await page.evaluate(([w, h]) => {
@@ -54,7 +65,7 @@ try {
   // First open of a vault with community plugins asks whether to trust it. Accepting reloads
   // the window, so the page is found again afterwards.
   const trust = page.getByRole("button", { name: /Trust author and enable plugins/i });
-  if (await trust.isVisible({ timeout: 8000 }).catch(() => false)) {
+  if (await trust.waitFor({ state: "visible", timeout: 25000 }).then(() => true, () => false)) {
     await trust.click();
     note("trusted the verification vault's plugins");
     await sleep(6000);
@@ -63,6 +74,11 @@ try {
     await page.waitForSelector(".workspace", { timeout: 60000 });
     await sleep(2000);
   }
+  // Under remote control on a profile's first launch, Obsidian's activeDocument can point away from
+  // the main window, so every dialog (even the command palette) is attached elsewhere and never
+  // shows. The focus event a real click on the window would send puts it right.
+  await page.evaluate(() => window.dispatchEvent(new FocusEvent("focus")));
+  if (!(await page.evaluate(() => window.activeDocument === document))) note("activeDocument is not the main window; dialogs may not show");
   page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
   page.on("pageerror", (e) => errors.push(String(e)));
   await size(1400, 900);
@@ -96,6 +112,16 @@ try {
   await page.keyboard.press("Escape");
   await sleep(800);
   await shot("04-study-after-activity");
+  // The composer: five confidence points, help beside the box, and the step's reasons on demand.
+  await page.locator(".st-conf-opt", { hasText: "High" }).first().click();
+  note(`confidence chosen: ${await page.locator(".st-conf-opt[aria-checked=true]").allTextContents()}`);
+  const whyBtn = page.locator(".st-why-btn");
+  if (await whyBtn.count()) {
+    await whyBtn.click();
+    await shot("04c-study-why-open");
+    await whyBtn.click();
+  } else note("no chosen-step button in the header");
+  await shot("04d-study-confidence");
   // Fresh numbers from module code, reusing the saved configuration.
   const fresh = page.getByRole("button", { name: /^New numbers/ });
   if (await fresh.count()) {
@@ -189,10 +215,35 @@ try {
   await page.locator(".st-nav-tab", { hasText: "Graph" }).click();
   await sleep(1200);
   await shot("14-graph-narrow-dark");
+
+  // Deleting a session: from the study header, with a confirmation, then a fresh session.
+  await size(1400, 900);
+  await page.evaluate(() => { const v = document.querySelector(".study-tutor"); if (v) { v.style.width = ""; v.style.maxWidth = ""; } });
+  await theme(false);
+  await page.locator(".st-nav-tab", { hasText: "Study" }).click();
+  await page.waitForSelector(".st-input", { timeout: 15000 });
+  const before = await page.evaluate(() => document.querySelector(".study-tutor")?.querySelectorAll(".st-msg").length ?? 0);
+  await page.locator('[aria-label="Delete this session and start a new one"]').click();
+  await page.waitForSelector(".modal .mod-warning", { timeout: 10000 });
+  await shot("18-delete-confirm");
+  await page.locator(".modal .mod-warning").click();
+  await sleep(1500);
+  const after = await page.evaluate(() => document.querySelector(".study-tutor")?.querySelectorAll(".st-msg").length ?? 0);
+  note(`delete session: ${before} messages before, ${after} after`);
+  await shot("19-after-delete");
+  await page.locator(".st-nav-tab", { hasText: "Home" }).click();
+  await shot("20-home-recent-delete");
   const files = await page.evaluate(() => window.app.vault.getFiles().map((f) => f.path).filter((p) => /activities\.md|activity-log\.md|evidence\.md|capability-requests\.md/.test(p)));
   note(`files written: ${files.join(", ")}`);
   fs.writeFileSync(path.join(out, "console-errors.json"), JSON.stringify(errors, null, 1));
   note(`console errors: ${errors.length}`);
+} catch (e) {
+  // Keep what the window showed when a step failed, and the errors so far.
+  const page = browser?.contexts().flatMap((c) => c.pages()).find((p) => !p.isClosed());
+  await page?.screenshot({ path: path.join(out, "failed.png") }).catch(() => {});
+  note(`failed: ${String(e).split("\n")[0]}`);
+  note(`study screen text: ${await page?.evaluate(() => document.querySelector(".study-tutor")?.textContent?.slice(0, 600)).catch(() => "")}`);
+  throw e;
 } finally {
   fs.writeFileSync(path.join(out, "run-log.txt"), log.join("\n"));
   await browser?.close().catch(() => {});

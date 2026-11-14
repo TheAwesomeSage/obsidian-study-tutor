@@ -1,8 +1,34 @@
 // Small building blocks shared by every screen, so buttons, chips and empty states look and
 // behave the same everywhere.
 
-import { setIcon } from "obsidian";
+import { App, Modal, setIcon } from "obsidian";
 import type { Mode } from "./formats";
+
+/** Asks before something that cannot be undone from inside the plugin. Resolves true on confirm. */
+export function confirmAction(app: App, o: { title: string; text: string; confirm: string }): Promise<boolean> {
+  return new Promise((resolve) => {
+    let done = false;
+    const modal = new (class extends Modal {
+      onOpen(): void {
+        this.titleEl.setText(o.title);
+        this.contentEl.createEl("p", { text: o.text });
+        const row = this.contentEl.createDiv({ cls: "modal-button-container" });
+        const no = row.createEl("button", { text: "Cancel" });
+        no.onclick = () => this.close();
+        const yes = row.createEl("button", { cls: "mod-warning", text: o.confirm });
+        yes.onclick = () => {
+          done = true;
+          this.close();
+        };
+        no.focus();
+      }
+      onClose(): void {
+        resolve(done);
+      }
+    })(app);
+    modal.open();
+  });
+}
 
 export interface ModeInfo {
   mode: Mode;

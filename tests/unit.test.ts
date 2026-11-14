@@ -325,6 +325,48 @@ test("store installs skills once, saves a compiled topic, rotates chats and expo
   assert.match(await fs.read("Tutor/Dashboard.base"), /tutor == "state"/);
 });
 
+test("deleting a session trashes every part and its session notes, and keeps the evidence", async () => {
+  const fs = new MemFS();
+  const store = new Store(fs, "Tutor", () => "2026-11-12");
+  const out = F.parseCompileOutput(COMPILED);
+  const dir = await store.saveCompiled({ title: "Linear maps", fm: {}, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
+  const first = await store.newChat(dir, "Linear maps", "tutor", new Date(2026, 10, 12, 9, 5));
+  const chat = await store.loadChat(first);
+  chat.messages.push({ role: "tutor", text: "q1" }, { role: "you", text: "a1" }, { role: "tutor", text: "q2" });
+  const second = await store.rotateChat(first, chat, "Answered q1.");
+  const third = await store.rotateChat(second, await store.loadChat(second), "More.");
+  const other = await store.newChat(dir, "Linear maps", "quiz", new Date(2026, 10, 12, 10, 0));
+  fs.dirs.add(`${dir}/sessions`);
+  for (const p of [first, third, other]) fs.files.set(p.replace("/chats/", "/sessions/"), "session note");
+  const state = await store.loadState(dir, 4);
+  state.levels[1] = 2;
+  await store.saveState(dir, state);
+  const stateText = await fs.read(`${dir}/state.md`);
+
+  // Deleting from the middle part follows the links both ways.
+  const removed = await store.deleteChat(second);
+  assert.deepEqual([...removed].sort(), [first, second, third].sort());
+  assert.deepEqual([...fs.trashed].sort(), [first, second, third, first.replace("/chats/", "/sessions/"), third.replace("/chats/", "/sessions/")].sort());
+  assert.deepEqual(await store.listChats(dir), [other], "other sessions are untouched");
+  assert.ok(await fs.exists(other.replace("/chats/", "/sessions/")));
+  assert.equal(await fs.read(`${dir}/state.md`), stateText, "levels and evidence are kept");
+
+  // The system trash is used where there is one, then the vault's own .trash folder.
+  const system: string[] = [];
+  const local: string[] = [];
+  const withTrash = Object.assign(fs, {
+    trashSystem: async (p: string) => (system.push(p), fs.files.delete(p), true),
+    trashLocal: async (p: string) => void local.push(p),
+  });
+  await new Store(withTrash, "Tutor", () => "2026-11-12").deleteChat(other);
+  assert.deepEqual(system, [other, other.replace("/chats/", "/sessions/")]);
+  assert.deepEqual(local, []);
+  const next = await store.newChat(dir, "Linear maps", "quiz", new Date(2026, 10, 12, 11, 0));
+  withTrash.trashSystem = async () => false;
+  await new Store(withTrash, "Tutor", () => "2026-11-12").deleteChat(next);
+  assert.deepEqual(local, [next], "with no system trash, the vault's .trash folder is used");
+});
+
 test("quiz replies are read as letters, give-ups or questions to the tutor", () => {
   assert.equal(F.parseMcqReply("b", 4), "B");
   assert.equal(F.parseMcqReply(" (C) ", 4), "C");

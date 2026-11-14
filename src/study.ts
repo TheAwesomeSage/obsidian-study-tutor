@@ -14,13 +14,28 @@ import { ACTION_LABEL, Action, POLICY_VERSION } from "./policy";
 import { SessionRecord, openQuestion, sessionFor } from "./session";
 import { toolLine } from "./tools";
 import type { Screen, TutorView } from "./view";
-import { MODE_INFO, button, chip, iconButton, modeInfo } from "./ui";
+import { MODE_INFO, button, chip, confirmAction, iconButton, modeInfo } from "./ui";
 
 const ROUTE_NOTE: Record<string, string> = { simple: "cheaper model", standard: "chat model", complex: "chat model, extra thinking" };
 const k = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 /** A trailing status line the engine appends to a reply when SymPy computed or checked something. */
 const SYMPY_LINE = /\n\n(\*SymPy [^\n]*\*|\*\*SymPy disagrees\*\*[^\n]*)\s*$/;
-let uid = 0;
+
+/**
+ * The confidence points offered with an answer, as the probability the answer is right. They are
+ * evenly spaced so calibration (compared with your results, never with your level) stays simple.
+ */
+export const CONFIDENCE_LEVELS: [string, number][] = [
+  ["None", 0],
+  ["Low", 0.25],
+  ["Medium", 0.5],
+  ["High", 0.75],
+  ["Very high", 1],
+];
+
+/** A stored confidence in words: the matching point, or a percentage for values saved by older versions. */
+export const confidenceLabel = (c: number): string => CONFIDENCE_LEVELS.find(([, v]) => Math.abs(v - c) < 1e-9)?.[0] ?? `${Math.round(c * 100)}%`;
+
 
 export class StudyScreen implements Screen {
   busy = false;
@@ -33,7 +48,7 @@ export class StudyScreen implements Screen {
   /** The attempt marked on the last turn, shown with how it was checked and a way to dispute it. */
   private marked: Attempt | null = null;
   private markedNote = "";
-  /** Self-reported confidence for the answer being written. Null until the slider is deliberately moved. */
+  /** Self-reported confidence for the answer being written, one of CONFIDENCE_LEVELS. Null until one is chosen. */
   private confidence: number | null = null;
   private attach = false;
   private whyOpen = false;
@@ -45,12 +60,10 @@ export class StudyScreen implements Screen {
   private scrollEl!: HTMLElement;
   private listEl!: HTMLElement;
   private tailEl!: HTMLElement;
-  private pendingEl!: HTMLElement;
   private quickEl!: HTMLElement;
   private input!: HTMLTextAreaElement;
   private confEl!: HTMLElement;
-  private slider!: HTMLInputElement;
-  private confOut!: HTMLElement;
+  private confBtns: HTMLButtonElement[] = [];
   private attachBtn!: HTMLButtonElement;
   private sendBtn!: HTMLButtonElement;
   private diagEl!: HTMLElement;
@@ -72,12 +85,16 @@ export class StudyScreen implements Screen {
     this.listEl = column.createDiv({ cls: "st-messages" });
     this.tailEl = column.createDiv({ cls: "st-tail" });
 
+    // The answer area keeps to one compact block: help buttons on the left of the box, Send on
+    // the right, confidence and attach under the text. The open question is the last message in
+    // the chat itself, so it is not pinned again here.
     const dock = page.createDiv({ cls: "st-dock" });
     const inner = dock.createDiv({ cls: "st-column" });
-    this.pendingEl = inner.createDiv({ cls: "st-pending" });
     const composer = inner.createDiv({ cls: "st-composer" });
-    this.quickEl = composer.createDiv({ cls: "st-quick", attr: { role: "group", "aria-label": "Help with the open question" } });
-    this.input = composer.createEl("textarea", { cls: "st-input", attr: { rows: "3", "aria-label": "Your answer or message" } });
+    this.quickEl = composer.createDiv({ cls: "st-quick st-side", attr: { role: "group", "aria-label": "Help with the open question" } });
+    const main = composer.createDiv({ cls: "st-composer-main" });
+    const right = composer.createDiv({ cls: "st-side is-right" });
+    this.input = main.createEl("textarea", { cls: "st-input", attr: { rows: "3", "aria-label": "Your answer or message" } });
     this.input.oninput = () => this.keepDraft();
     this.input.onkeydown = (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -85,48 +102,42 @@ export class StudyScreen implements Screen {
         if (!this.busy && this.input.value.trim()) void this.send(this.input.value);
       }
     };
-    const foot = composer.createDiv({ cls: "st-composer-foot" });
+    const foot = main.createDiv({ cls: "st-composer-foot" });
+
+    // Confidence: five points, unset until one is chosen. Choosing the same point again clears it.
+    this.confEl = foot.createDiv({ cls: "st-conf", attr: { role: "radiogroup", "aria-label": "How confident are you in this answer? Choose before you see the feedback." } });
+    this.confEl.createSpan({ cls: "st-conf-label", text: "Confidence" });
+    this.confBtns = CONFIDENCE_LEVELS.map(([label, value], i) => {
+      const b = this.confEl.createEl("button", { cls: "st-conf-opt", text: label, attr: { role: "radio", "aria-checked": "false", "aria-label": `Confidence: ${label}`, "data-value": String(value) } });
+      b.onclick = () => {
+        this.confidence = this.confidence === value ? null : value;
+        this.syncConfidence();
+      };
+      b.onkeydown = (e) => {
+        const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+        if (step) {
+          e.preventDefault();
+          const next = this.confBtns[(i + step + CONFIDENCE_LEVELS.length) % CONFIDENCE_LEVELS.length];
+          next.focus();
+          next.click();
+        } else if ((e.key === "Backspace" || e.key === "Delete") && this.confidence !== null) {
+          e.preventDefault();
+          this.confidence = null;
+          this.syncConfidence();
+        }
+      };
+      return b;
+    });
+
     this.attachBtn = foot.createEl("button", { cls: "st-btn is-ghost st-attach", attr: { "aria-pressed": "false" } });
     setIcon(this.attachBtn.createSpan({ cls: "st-btn-icon" }), "paperclip");
-    this.attachBtn.createSpan({ cls: "st-btn-label", text: "Attach open note" });
+    this.attachBtn.createSpan({ cls: "st-btn-label", text: "Attach note" });
     this.attachBtn.onclick = () => {
       this.attach = !this.attach;
       this.syncComposer();
     };
 
-    // The confidence slider. It starts unset and records a value only once it is deliberately moved.
-    const id = `st-conf-${++uid}`;
-    this.confEl = foot.createDiv({ cls: "st-conf" });
-    this.confEl.createEl("label", { cls: "st-conf-label", text: "Confidence", attr: { for: id } });
-    this.slider = this.confEl.createEl("input", { type: "range", cls: "st-conf-range", attr: { id, min: "0", max: "100", step: "5", "aria-label": "How confident are you in this answer? Set it before you see feedback." } });
-    this.slider.value = "50";
-    this.confOut = this.confEl.createEl("output", { cls: "st-conf-value", attr: { for: id } });
-    const clear = this.confEl.createEl("button", { cls: "st-conf-clear clickable-icon", attr: { "aria-label": "Clear confidence" } });
-    setIcon(clear, "x");
-    const set = () => {
-      this.confidence = Number(this.slider.value) / 100;
-      this.syncConfidence();
-    };
-    this.slider.oninput = set;
-    // A click that lands exactly on the thumb moves nothing, so it fires no input event. It is still a choice.
-    this.slider.onclick = set;
-    this.slider.onkeydown = (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        set();
-      } else if ((e.key === "Backspace" || e.key === "Delete") && this.confidence !== null) {
-        e.preventDefault();
-        this.confidence = null;
-        this.syncConfidence();
-      }
-    };
-    clear.onclick = () => {
-      this.confidence = null;
-      this.syncConfidence();
-      this.slider.focus();
-    };
-
-    this.sendBtn = foot.createEl("button", { cls: "st-btn is-primary mod-cta st-send" });
+    this.sendBtn = right.createEl("button", { cls: "st-btn is-primary mod-cta st-send" });
     this.sendBtn.onclick = () => {
       if (this.busy) this.stop();
       else if (this.input.value.trim()) void this.send(this.input.value);
@@ -234,6 +245,19 @@ export class StudyScreen implements Screen {
     sel.onchange = () => void this.setMode(sel.value as Mode);
 
     const end = h.createDiv({ cls: "st-study-end" });
+    // In Adaptive and Learn, the step the guide chose is one small button; its reasons open on demand.
+    const record = this.record();
+    const label = record ? ACTION_LABEL[record.action as Action] : undefined;
+    if ((v.mode === "auto" || v.mode === "teach") && record?.reason && label) {
+      const why = end.createEl("button", { cls: "st-btn is-ghost st-why-btn" + (this.whyOpen ? " is-on" : ""), attr: { "aria-expanded": String(this.whyOpen), "aria-label": `${label}. Why this step?` } });
+      setIcon(why.createSpan({ cls: "st-btn-icon" }), "lightbulb");
+      why.createSpan({ cls: "st-btn-label", text: label });
+      why.onclick = () => {
+        this.whyOpen = !this.whyOpen;
+        this.syncHead();
+        this.syncWhy();
+      };
+    }
     const fresh = iconButton(end, "message-square-plus", "New chat in this mode", async () => {
       await v.newChat(v.mode);
       this.refresh();
@@ -241,9 +265,37 @@ export class StudyScreen implements Screen {
     });
     fresh.disabled = this.busy;
     if (v.chatPath) iconButton(end, "file-text", "Open this chat's transcript as a note", () => void v.app.workspace.openLinkText(v.chatPath!, "", true));
+    if (v.chatPath) iconButton(end, "trash-2", "Delete this session and start a new one", () => void this.deleteSession()).disabled = this.busy;
   }
 
-  /** The reason for the current action, in one line, with the working behind it on demand. */
+  /**
+   * Deletes the open session, every earlier part of it and its session notes (to the trash), then
+   * starts a fresh chat in the same mode. Answers, levels and saved activities are kept.
+   */
+  private async deleteSession(): Promise<void> {
+    const v = this.view;
+    const path = v.chatPath;
+    if (!path || this.busy) return;
+    const ok = await confirmAction(v.app, {
+      title: "Delete this session?",
+      text: "The conversation, its earlier parts and its session notes are moved to the trash, and a new session starts in the same mode. Your answers, levels and saved activities are kept.",
+      confirm: "Delete and start new",
+    });
+    if (!ok) return;
+    try {
+      await v.deleteChat(path);
+      this.activity = null;
+      this.whyOpen = false;
+      await v.newChat(v.mode);
+      this.refresh();
+      this.input.focus();
+      new Notice("Session deleted. A new one has started.");
+    } catch (e) {
+      new Notice(`Study Tutor: the session could not be deleted. ${(e as Error).message}`);
+    }
+  }
+
+  /** The reasons behind the guide's chosen step, shown only when asked for from the header. */
   private syncWhy(): void {
     const el = this.whyEl;
     el.empty();
@@ -251,21 +303,16 @@ export class StudyScreen implements Screen {
     const record = this.record();
     const decision = this.last?.decision;
     const reason = record?.reason || "";
-    el.toggleClass("is-empty", !reason);
-    if (!reason) return;
-    const line = el.createDiv({ cls: "st-why-line" });
-    setIcon(line.createSpan({ cls: "st-why-icon" }), "lightbulb");
-    const label = ACTION_LABEL[record!.action as Action];
-    if (label && (v.mode === "auto" || v.mode === "teach")) line.createSpan({ cls: "st-why-action", text: label });
-    line.createSpan({ cls: "st-why-text", text: reason });
-    if (!decision) return;
-    const toggle = line.createEl("button", { cls: "st-link", text: this.whyOpen ? "Hide details" : "Why this?", attr: { "aria-expanded": String(this.whyOpen) } });
-    toggle.onclick = () => {
-      this.whyOpen = !this.whyOpen;
-      this.syncWhy();
-    };
-    if (!this.whyOpen) return;
+    const show = this.whyOpen && !!reason && (v.mode === "auto" || v.mode === "teach");
+    el.toggleClass("is-empty", !show);
+    if (!show) return;
     const box = el.createDiv({ cls: "st-why-detail" });
+    const label = ACTION_LABEL[record!.action as Action];
+    box.createDiv({ cls: "st-why-reason", text: label ? `${label}: ${reason}` : reason });
+    if (!decision) {
+      box.createDiv({ cls: "st-meta", text: `Policy version ${POLICY_VERSION}. The scores behind this step are shown after the next turn.` });
+      return;
+    }
     if (decision.constraint) box.createDiv({ text: `Rule applied: ${decision.constraint}.` });
     if (decision.local) box.createDiv({ text: decision.local === "bank" ? "Handled by the plugin: a bank question, marked without a model call." : "Handled by the plugin: placement questions, marked without a model call." });
     if (decision.scores.length) {
@@ -440,7 +487,7 @@ export class StudyScreen implements Screen {
     const bits = [gradingLabel(a)];
     if (a.assisted) bits.push("with help");
     if (a.answerExposed) bits.push("answer already shown");
-    if (a.confidence !== null) bits.push(`your confidence ${Math.round(a.confidence * 100)}%`);
+    if (a.confidence !== null) bits.push(`your confidence: ${confidenceLabel(a.confidence).toLowerCase()}`);
     if (a.seconds !== null) bits.push(a.seconds < 90 ? `${a.seconds}s` : `${Math.round(a.seconds / 60)} min`);
     line.createSpan({ cls: "st-meta", text: bits.join(" · ") });
     const more = box.createEl("details", { cls: "st-feedback-more" });
@@ -493,9 +540,14 @@ export class StudyScreen implements Screen {
   private syncConfidence(): void {
     const set = this.confidence !== null;
     this.confEl.toggleClass("is-set", set);
-    if (set) this.slider.value = String(Math.round(this.confidence! * 100));
-    this.confOut.setText(set ? `${Math.round(this.confidence! * 100)}%` : "Not set");
-    this.slider.setAttribute("aria-valuetext", set ? `${Math.round(this.confidence! * 100)} percent confident` : "not set");
+    // One point is focusable at a time (the chosen one, or the first), as in any radio group.
+    const chosen = this.confBtns.findIndex((b) => set && Math.abs(Number(b.dataset.value) - this.confidence!) < 1e-9);
+    this.confBtns.forEach((b, i) => {
+      const on = i === chosen;
+      b.toggleClass("is-on", on);
+      b.setAttribute("aria-checked", String(on));
+      b.tabIndex = i === (chosen < 0 ? 0 : chosen) ? 0 : -1;
+    });
   }
 
   private syncComposer(): void {
@@ -503,31 +555,19 @@ export class StudyScreen implements Screen {
     const question = this.openQuestionText();
     const asking = v.mode === "expert";
 
-    // The open question, pinned above the answer area so the two are never confused.
-    const p = this.pendingEl;
-    p.empty();
-    p.toggleClass("is-empty", !question || asking);
-    if (question && !asking) {
-      setIcon(p.createSpan({ cls: "st-pending-icon" }), "help-circle");
-      const t = p.createDiv({ cls: "st-grow" });
-      t.createDiv({ cls: "st-kicker", text: "Open question" });
-      t.createDiv({ cls: "st-pending-text", text: question.replace(/\s+/g, " ").slice(0, 220) });
-      button(p, { label: "Show", tone: "ghost", title: "Scroll to the question", onClick: () => (this.scrollEl.scrollTop = this.scrollEl.scrollHeight) });
-    }
-
-    // Help with the open question, always in the same place: just above where you type.
+    // Help with the open question, beside the box you type in.
     const q = this.quickEl;
     q.empty();
     q.toggleClass("is-empty", asking);
     if (!asking) {
       const quick = (label: string, icon: string, message: string, title: string) => {
-        const b = button(q, { label, icon, tone: "ghost", title, onClick: () => void this.send(message) });
+        const b = button(q, { label, icon, tone: "ghost", title: `${label}: ${title}`, onClick: () => void this.send(message) });
         b.disabled = this.busy || !question;
       };
-      quick("Hint", "life-buoy", "Hint please.", "Ask for a hint. The answer will then count as helped.");
-      quick("Explain", "book-open", "Explain this to me.", "Ask for an explanation. The answer will then count as helped.");
-      quick("Skip", "skip-forward", "skip", "Skip this question and see the answer. It is recorded as skipped.");
-      const activity = button(q, { label: "Visual activity", icon: "play", tone: "ghost", title: "Explicitly request a suitable simulation. Uses a saved activity or local Qwen configuration.", onClick: () => void this.send("Show me a simulation for this concept.") });
+      quick("Hint", "life-buoy", "Hint please.", "ask for a hint. The answer then counts as helped.");
+      quick("Explain", "book-open", "Explain this to me.", "ask for an explanation. The answer then counts as helped.");
+      quick("Skip", "skip-forward", "skip", "skip this question and see the answer. It is recorded as skipped.");
+      const activity = button(q, { label: "Visual", icon: "play", tone: "ghost", title: "Visual activity: ask for a simulation of this concept. Uses a saved activity or the local model, never Claude.", onClick: () => void this.send("Show me a simulation for this concept.") });
       activity.disabled = this.busy;
     }
 
@@ -538,13 +578,13 @@ export class StudyScreen implements Screen {
     this.attachBtn.disabled = !canAttach || this.busy;
     this.attachBtn.toggleClass("is-on", this.attach);
     this.attachBtn.setAttribute("aria-pressed", String(this.attach));
-    this.attachBtn.querySelector(".st-btn-label")?.setText(this.attach && active ? `Attached: ${active.basename}` : "Attach open note");
+    this.attachBtn.querySelector(".st-btn-label")?.setText(this.attach && active ? `Attached: ${active.basename}` : "Attach note");
+    this.attachBtn.setAttribute("aria-label", this.attach && active ? `Attached: ${active.basename}. Select to detach.` : "Attach the note you have open to this message");
 
-    // Confidence belongs to an answer, so it is offered only while a question is open.
+    // Confidence goes with an answer. It can be chosen at any time (it is sent with your next
+    // message and counts only if that message is marked), and is not offered in Ask mode.
     this.confEl.toggleClass("is-hidden", asking);
-    this.slider.disabled = !question || this.busy;
-    this.confEl.toggleClass("is-off", !question);
-    if (!question) this.confidence = null;
+    for (const b of this.confBtns) b.disabled = this.busy;
     this.syncConfidence();
 
     this.sendBtn.empty();

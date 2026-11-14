@@ -33,11 +33,11 @@ The topic is **compiled once** into a topic card (objectives, concepts, key clai
 
 ### Home
 
-- **Pick up where you left off** shows your unfinished session: its topic, mode, and where it stopped. **Resume session** reopens it with its open question pinned.
+- **Pick up where you left off** shows your unfinished session: its topic, mode, and where it stopped. **Resume session** reopens it where you left it.
 - **Suggested next** gives one step and the reason for it. Choose 10, 25 or 45 minutes: with little time, quick practice comes before a new lesson. A step on a concept never comes before a weak prerequisite of it.
 - The study tiles start a session on the current topic: **Adaptive study**, **Learn**, **Practise**, **Review**, **Ask** and **Knowledge graph**.
 - **Topics** can be searched by topic or concept name. Each row shows progress to the target level, concepts secured, cards due, when you last practised, and a warning when a recorded level is not yet backed by your answers. Its button takes the topic's next step; select the row for the topic page.
-- **Recent sessions** reopens any earlier session. The file icon opens its full transcript as a note.
+- **Recent sessions** reopens any earlier session. The file icon opens its full transcript as a note, and the bin deletes the session after asking.
 
 ### Study modes
 
@@ -49,11 +49,11 @@ The topic is **compiled once** into a topic card (objectives, concepts, key clai
 
 ### Study screen
 
-- The header has the way back to Home, the topic, the mode menu, a new chat, and the transcript as a note.
-- A line under it says what the guide chose and why. **Why this?** shows the details.
-- The question waiting for your answer is pinned above the answer box. **Hint**, **Explain** and **Skip** are one click away. After a hint or an explanation the answer counts as helped; a skip is recorded as skipped and the answer is shown.
-- **Confidence** is an optional slider from 0 to 100%. It stays unset until you move it, is read before you see the feedback, and resets after each marked answer. It is compared with your results; it never raises a level.
-- **Attach open note**, when switched on, sends the note you have open with your message.
+- The header has the way back to Home, the topic, the mode menu, a new chat, the transcript as a note, and the bin. The bin deletes this session (the conversation, its earlier parts and its session notes go to the trash) and starts a new one in the same mode; your answers, levels and saved activities are kept.
+- In Adaptive and Learn, a small button in the header names the step the guide chose (for example **Diagnosis**). Select it for why it was chosen and the scores behind it.
+- The question waiting for your answer is the last message in the chat. **Hint**, **Explain**, **Skip** and **Visual** sit to the left of the answer box, and **Send** to its right, so the chat keeps the room. After a hint or an explanation the answer counts as helped; a skip is recorded as skipped and the answer is shown.
+- **Confidence** has five points under the box: None, Low, Medium, High and Very high. It stays unset until you choose one (choose it again, or press Delete, to clear it), is read before you see the feedback, and resets after each marked answer. It is compared with your results; it never raises a level.
+- **Attach note**, when switched on, sends the note you have open with your message.
 - A marked answer shows the result and how it was checked (by the plugin, by SymPy, or by the model), and whether help was given or the answer had been seen. **Dispute this mark** sets it aside. A question-bank answer can then be regraded with more thinking; for an answer marked in conversation, the tutor looks again on your next message.
 - If a reply fails, your message is kept and **Retry** asks again. An unsent draft is kept if you leave. **Details** shows the tokens used and the checks run on the last turn.
 
@@ -67,10 +67,10 @@ Built-in spaced flashcards from the question bank, with no tokens. Multiple-choi
 
 ### Knowledge graph
 
-Every concept from every topic on one map, drawn by the plugin with no tokens. The map shows the course; your progress only changes the colours.
+Every concept from every topic on one map, drawn by the plugin with no tokens. The map shows the course; your progress only changes the colours. The map takes the left of the screen; the sidebar on the right holds the search, colour and relation controls and the selected concept's details.
 
-- **Find a concept** (or press `/`) searches by name. **Colour** switches between topic, demonstrated level, estimated success, last practised, and confidence against results. **Show** limits the map to one topic, and the relation buttons hide or show each kind of link.
-- Drag to pan and scroll to zoom. The buttons fit the map, zoom, lay it out again, and expand it to fill the pane. With the map focused, the arrow keys move between concepts, `+` and `-` zoom, `0` fits, Enter shows only the selected concept's neighbourhood, and Escape clears the selection. Positions are remembered.
+- **Find a concept** (or press `/`) searches by name. **Colour** switches between topic (one colour per topic), demonstrated level (lighter to darker, hollow when not placed, a dashed ring when a level is not backed by unaided answers), estimated success, last practised, and confidence against results. With a single topic it starts on demonstrated level, since colouring by topic would paint every concept alike. **Show** limits the map to one topic, and the relation buttons hide or show each kind of link.
+- Drag to pan and scroll to zoom. The small island of buttons at the top left of the map shows only the selected concept's neighbourhood, fits the map, zooms, lays it out again, and expands it to fill the pane. With the map focused, the arrow keys move between concepts, `+` and `-` zoom, `0` fits, Enter shows only the selected concept's neighbourhood, and Escape clears the selection. Positions are remembered.
 - Select a concept for its details: its level and whether your answers back it, the suggested next step (**Study this**), its evidence, and what it rests on and what builds on it. Relations read from the topic card are marked inferred; confirm (✓) or reject (✕) each one. **Add a relation or set priority** adds a link by hand or changes how strongly the concept is preferred. Only "requires" orders study; supports, applies to, contrasts with and derived from are for understanding.
 - **Suggest a synoptic connection** (one model call) proposes a link to another concept, with an explanation and a joint problem that needs both. It stays unreviewed until you confirm it, and then **Study connection** opens the joint problem in a new session. A connection never awards mastery.
 - Estimated success is a provisional estimate that your next unaided first answer on the concept is fully correct. It is shown only once there are three unaided answers.
@@ -186,6 +186,18 @@ STUDY_VAULT=<vault> VISUAL_REGISTRY=<bundled registry.cjs> npm run bench:qwen
 
 MIT. See `LICENSE`. `NOTICE.md` lists the sources the teaching method draws on.
 
+
+## Version 0.7.0
+
+More room for the chat and the map, and a way to delete a session.
+
+- **Study screen.** The open question is no longer pinned above the answer box: it is the last message in the chat. **Hint**, **Explain**, **Skip** and **Visual** sit beside the box instead of above it. The strip that explained the chosen step ("Master mode, chosen by you") is gone; in Adaptive and Learn the step is a small header button whose reasons open on demand.
+- **Confidence** is five points (None, Low, Medium, High, Very high) instead of a long slider, and can be chosen at any time, not only while a question is detected as open. Saved confidences are shown in the same words.
+- **Delete a session** from the study header (then a new one starts in the same mode) or from **Recent sessions** on Home. It asks first, moves the chat, its earlier parts and its session notes to the trash, and keeps your answers, levels and saved activities.
+- **Graph.** The controls moved from a bar above the map into the sidebar on the right, with a smaller title, and the view buttons into a small island at the map's top left. With a single topic the map is coloured by demonstrated level.
+- The logo and "Study Tutor" name are gone from the top bar; the pane's tab already says it.
+
+Verified in Obsidian 1.15.1 with an isolated vault (screenshots in `docs/verification/`, 0 console errors), plus the unit tests (130 of 131 pass; the native SymPy test is skipped without a local Python) and 6 browser tests. Install as for 0.6.0: the whole release folder, or unzip `study-tutor-0.7.0.zip`.
 
 ## Version 0.6.0
 

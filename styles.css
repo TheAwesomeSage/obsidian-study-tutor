@@ -194,24 +194,6 @@
   flex-wrap: wrap;
   row-gap: var(--st-1);
 }
-.study-tutor .st-brand {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--st-2);
-  height: 32px;
-  padding: 0 var(--st-2);
-  border: none;
-  background: none;
-  box-shadow: none;
-  color: var(--text-normal);
-  font-weight: var(--font-semibold, 600);
-  cursor: pointer;
-  flex: 0 0 auto;
-}
-.study-tutor .st-brand-icon {
-  display: inline-flex;
-  color: var(--text-accent);
-}
 .study-tutor .st-nav-tabs {
   display: flex;
   gap: 2px;
@@ -1248,36 +1230,12 @@
   flex-direction: column;
   gap: var(--st-2);
 }
-.study-tutor .st-pending {
-  display: flex;
-  align-items: center;
-  gap: var(--st-2);
-  padding: 6px var(--st-3);
-  border: 1px solid var(--st-accent-line);
-  border-radius: var(--st-r-m);
-  background: var(--st-accent-soft);
-}
-.study-tutor .st-pending-icon {
-  display: inline-flex;
-  color: var(--text-accent);
-}
-.study-tutor .st-pending-icon svg {
-  width: 16px;
-  height: 16px;
-}
-.study-tutor .st-pending-text {
-  font-size: var(--st-small);
-  line-height: 1.4;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  overflow-wrap: anywhere;
-}
+/* One block: help buttons on the left, the text and its options in the middle, Send on the right. */
 .study-tutor .st-composer {
-  display: flex;
-  flex-direction: column;
-  gap: var(--st-1);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: var(--st-2);
   padding: var(--st-2);
   border: 1px solid var(--st-line);
   border-radius: var(--st-r-l);
@@ -1287,19 +1245,37 @@
   border-color: var(--st-accent);
   box-shadow: 0 0 0 3px var(--st-accent-soft);
 }
-.study-tutor .st-quick {
+.study-tutor .st-composer-main {
   display: flex;
+  flex-direction: column;
+  gap: var(--st-1);
+  min-width: 0;
+}
+.study-tutor .st-side {
+  display: flex;
+  flex-direction: column;
   gap: 2px;
-  margin: -2px 0 0 -4px;
+}
+.study-tutor .st-side.is-right {
+  justify-content: flex-end;
+}
+.study-tutor .st-quick {
+  padding-right: var(--st-2);
+  border-right: 1px solid var(--st-line);
 }
 .study-tutor .st-quick .st-btn {
-  min-height: 28px;
+  justify-content: flex-start;
+  min-height: 26px;
   padding: 2px var(--st-2);
   font-size: var(--st-smaller);
 }
+.study-tutor .st-why-btn.is-on {
+  color: var(--text-normal);
+  background: var(--st-accent-soft);
+}
 .study-tutor textarea.st-input {
   width: 100%;
-  min-height: 4.6em;
+  min-height: 3.2em;
   resize: vertical;
   border: none;
   background: transparent;
@@ -1325,92 +1301,48 @@
   text-overflow: ellipsis;
 }
 
-/* confidence slider: unset until moved */
+/* confidence: five points, none chosen until you choose one */
 .study-tutor .st-conf {
-  margin-left: auto;
   display: inline-flex;
   align-items: center;
-  gap: var(--st-2);
-  min-height: 32px;
-  padding: 0 var(--st-2);
-  border-radius: var(--st-r-s);
+  flex-wrap: wrap;
+  gap: 3px;
   font-size: var(--st-smaller);
   color: var(--text-muted);
 }
-.study-tutor .st-conf.is-off {
-  opacity: 0.5;
-}
 .study-tutor .st-conf-label {
+  margin-right: var(--st-1);
   white-space: nowrap;
 }
-.study-tutor .st-conf-range {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 8.5rem;
+.study-tutor .st-conf-opt {
   height: 24px;
-  margin: 0;
-  padding: 0;
-  background: transparent;
-  cursor: pointer;
-  border: none;
-}
-.study-tutor .st-conf-range:disabled {
-  cursor: default;
-}
-.study-tutor .st-conf-range::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 2px;
-  background: var(--st-line);
-}
-.study-tutor .st-conf.is-set .st-conf-range::-webkit-slider-runnable-track {
-  background: linear-gradient(90deg, var(--st-accent-line), var(--st-accent));
-}
-.study-tutor .st-conf-range::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 16px;
-  height: 16px;
-  margin-top: -6px;
-  border-radius: 50%;
-  border: 2px dashed var(--text-faint);
-  background: var(--st-surface);
-  box-shadow: none;
-}
-.study-tutor .st-conf.is-set .st-conf-range::-webkit-slider-thumb {
-  border: 2px solid var(--st-surface);
-  background: var(--st-accent);
-  box-shadow: 0 0 0 1px var(--st-accent);
-}
-.study-tutor .st-conf-value {
-  min-width: 3.6em;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.study-tutor .st-conf.is-set .st-conf-value {
-  color: var(--text-normal);
-  font-weight: var(--font-semibold, 600);
-}
-.study-tutor .st-conf-clear {
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  visibility: hidden;
-  border: none;
+  padding: 0 var(--st-2);
+  border: 1px solid var(--st-line);
+  border-radius: 999px;
   background: transparent;
   box-shadow: none;
   color: var(--text-muted);
+  font-size: var(--st-smaller);
+  white-space: nowrap;
   cursor: pointer;
 }
-.study-tutor .st-conf.is-set .st-conf-clear {
-  visibility: visible;
+.study-tutor .st-conf-opt:hover:not(:disabled) {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
 }
-.study-tutor .st-conf-clear svg {
-  width: 13px;
-  height: 13px;
+.study-tutor .st-conf-opt.is-on,
+.study-tutor .st-conf-opt.is-on:hover:not(:disabled) {
+  border-color: var(--interactive-accent);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-weight: var(--font-semibold, 600);
+}
+.study-tutor .st-conf-opt:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.study-tutor .st-attach {
+  margin-left: auto;
 }
 .study-tutor .st-send {
   min-width: 5.5rem;
@@ -1518,15 +1450,12 @@
 
 /* ---------- knowledge graph ---------- */
 
-.study-tutor .st-graph-heading { padding: 20px 24px 16px; border-bottom: 1px solid var(--st-line); }
 .study-tutor { --st-cat-9:#60a7b4; --st-cat-10:#a080b6; --st-cat-11:#8a9f55; --st-cat-12:#a88253; --st-cat-13:#bc7181; --st-cat-14:#62988e; --st-cat-15:#7894b6; --st-cat-16:#9691ba; }
 .study-tutor .st-legend-rows { max-height: 260px; overflow-y: auto; }
-.study-tutor .st-graph-heading h2 { margin: 5px 0 7px; font-size: clamp(20px, 2vw, 27px); letter-spacing: -.025em; }
 .study-tutor .st-graph-capability { margin: 16px 0; padding: 14px; background: var(--st-surface); border: 1px solid var(--st-line); border-radius: 10px; font-size: 13px; line-height: 1.6; }
 .study-tutor .st-graph-statistics { margin-top: 12px; font-size: 12px; }
 .study-tutor .st-graph-statistics summary { cursor: pointer; color: var(--text-muted); }
 .study-tutor .st-graph-panel { scrollbar-width: thin; }
-@media (max-width: 700px) { .study-tutor .st-graph-heading { padding: 14px 16px; } }
 
 .study-tutor .st-graph-screen {
   flex: 1 1 auto;
@@ -1539,12 +1468,64 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--st-2) var(--st-3);
-  padding: var(--st-2) var(--st-4);
+  gap: var(--st-2);
+  padding: 0 var(--st-4) var(--st-3);
   border-bottom: 1px solid var(--st-line);
 }
 .study-tutor .st-graph-find {
   position: relative;
+  flex: 1 1 100%;
+}
+.study-tutor .st-graph-find .st-search {
+  width: 100%;
+}
+.study-tutor .st-graph-bar .st-field {
+  flex: 1 1 auto;
+}
+.study-tutor .st-graph-bar .st-toggle {
+  height: 24px;
+}
+/* The sidebar: title and controls at the top, concept details below, the full height of the pane. */
+.study-tutor .st-graph-side {
+  flex: 0 0 22rem;
+  max-width: 45%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--st-line);
+  background: var(--st-raised);
+}
+.study-tutor .st-graph-side-head {
+  padding: var(--st-3) var(--st-4) var(--st-2);
+}
+.study-tutor .st-graph-side-title {
+  margin: 0 0 2px;
+  font-size: var(--st-small);
+  font-weight: var(--font-semibold, 600);
+  letter-spacing: 0.01em;
+}
+/* The view buttons: a small island at the top left of the map. */
+.study-tutor .st-graph-island {
+  position: absolute;
+  z-index: 3;
+  top: var(--st-2);
+  left: var(--st-2);
+  display: flex;
+  gap: 1px;
+  padding: 2px;
+  border: 1px solid var(--st-line);
+  border-radius: var(--st-r-m);
+  background: color-mix(in srgb, var(--st-surface) 92%, transparent);
+  box-shadow: 0 2px 8px var(--background-modifier-box-shadow, rgba(0, 0, 0, 0.12));
+}
+.study-tutor .st-graph-island .st-icon-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+.study-tutor .st-graph-island .st-icon-btn.is-on {
+  color: var(--text-normal);
+  background: var(--st-accent-soft);
 }
 .study-tutor .st-graph-results {
   display: none;
@@ -1646,12 +1627,6 @@
   opacity: 1;
   margin-left: var(--st-2);
 }
-.study-tutor .st-graph-end {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
 .study-tutor .st-graph-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -1743,14 +1718,12 @@
   pointer-events: none;
 }
 .study-tutor .st-graph-panel {
-  flex: 0 0 22rem;
-  max-width: 45%;
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: var(--st-3);
-  padding: var(--st-4);
-  border-left: 1px solid var(--st-line);
-  background: var(--st-raised);
+  padding: var(--st-3) var(--st-4) var(--st-4);
   overflow-y: auto;
   font-size: var(--st-small);
 }
@@ -1860,12 +1833,15 @@
   .study-tutor .st-graph-body {
     flex-direction: column;
   }
-  .study-tutor .st-graph-panel {
+  .study-tutor .st-graph-side {
     flex: 0 0 auto;
     max-width: none;
-    max-height: 45%;
+    max-height: 50%;
     border-left: none;
     border-top: 1px solid var(--st-line);
+  }
+  .study-tutor .st-graph-side-head .st-meta {
+    display: none;
   }
   .study-tutor .st-graph-hint {
     display: none;
@@ -1876,9 +1852,6 @@
     gap: var(--st-1);
     padding: var(--st-1) var(--st-2);
     flex-wrap: wrap;
-  }
-  .study-tutor .st-brand-name {
-    display: none;
   }
   .study-tutor .st-nav-tab {
     padding: 0 var(--st-2);
@@ -1909,19 +1882,13 @@
   .study-tutor .st-time {
     margin-left: 0;
   }
-  .study-tutor .st-conf {
-    margin-left: 0;
-    flex: 1 1 100%;
-    order: 3;
-    padding: 0;
-  }
-  .study-tutor .st-conf-range {
-    flex: 1 1 auto;
-    width: auto;
-    min-width: 5rem;
-  }
-  .study-tutor .st-send {
-    margin-left: auto;
+  /* Narrow: the help buttons, attach and Send keep their icons only, and the five confidence
+     points keep to one line (each still says "Confidence" to a screen reader and on hover). */
+  .study-tutor .st-quick .st-btn-label,
+  .study-tutor .st-attach .st-btn-label,
+  .study-tutor .st-send .st-btn-label,
+  .study-tutor .st-conf-label {
+    display: none;
   }
   .study-tutor .st-msg.is-you {
     max-width: 96%;

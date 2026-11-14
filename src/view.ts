@@ -239,6 +239,23 @@ export class TutorView extends ItemView {
     }
   }
 
+  /**
+   * Deletes a chat session (all its parts and session notes) and forgets its draft and its place
+   * as a topic's remembered chat. If it is the open chat, nothing is open afterwards.
+   */
+  async deleteChat(path: string): Promise<void> {
+    const removed = await this.plugin.store.deleteChat(path);
+    for (const p of removed) delete this.plugin.data.drafts[p];
+    for (const [dir, remembered] of Object.entries(this.plugin.data.activeChat)) if (removed.includes(remembered)) delete this.plugin.data.activeChat[dir];
+    await this.plugin.save();
+    if (this.chatPath && removed.includes(this.chatPath)) {
+      this.chat = null;
+      this.chatPath = null;
+    }
+    await this.loadOverview();
+    this.renderNav();
+  }
+
   /** Starts a new chat in a mode, reusing the current chat when it is still empty. */
   async newChat(mode: Mode): Promise<void> {
     if (!this.dir || !this.topic) return;
@@ -333,12 +350,10 @@ export class TutorView extends ItemView {
   renderNav(): void {
     const nav = this.navEl;
     nav.empty();
-    const brand = nav.createEl("button", { cls: "st-brand", attr: { "aria-label": "Study Tutor home" } });
-    setIcon(brand.createSpan({ cls: "st-brand-icon" }), "graduation-cap");
-    brand.createSpan({ cls: "st-brand-name", text: "Study Tutor" });
-    brand.onclick = () => this.show("home");
-
-    const tabs = nav.createEl("nav", { cls: "st-nav-tabs", attr: { "aria-label": "Study Tutor sections" } });
+    // No logo or name here: the pane's own tab already says Study Tutor, and Home is the first tab.
+    // The <nav> has no aria-label: Obsidian turns every aria-label into a hover tooltip, and one on
+    // the whole bar covered the graph's view buttons while the pointer rested on the tabs.
+    const tabs = nav.createEl("nav", { cls: "st-nav-tabs" });
     const due = this.info?.due ?? 0;
     for (const item of NAV) {
       const active = this.screen === item.screen || (item.screen === "home" && this.screen === "topic");

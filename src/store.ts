@@ -59,6 +59,11 @@ export interface FS {
   exists(path: string): Promise<boolean>;
   mkdir(path: string): Promise<void>;
   list(path: string): Promise<{ files: string[]; folders: string[] }>;
+  /** Obsidian's adapter: move to the system trash (false when unavailable), or to the vault's .trash. */
+  trashSystem?(path: string): Promise<boolean>;
+  trashLocal?(path: string): Promise<void>;
+  /** Permanent removal, used only when no trash is available. */
+  remove?(path: string): Promise<void>;
 }
 
 export interface TopicRef {
@@ -549,6 +554,45 @@ export class Store {
     await this.saveChat(next, { fm: { ...chat.fm, part, previous: link(path), next: "", created: fmStr(chat.fm, "created") || this.today() }, summary, messages: carried });
     await this.saveChat(path, { ...chat, fm: { ...chat.fm, next: link(next) } });
     return next;
+  }
+
+  /** Moves a file to the trash: the system trash where possible, otherwise the vault's .trash folder. */
+  private async trash(path: string): Promise<void> {
+    if (this.fs.trashSystem && (await this.fs.trashSystem(path).catch(() => false))) return;
+    if (this.fs.trashLocal) return this.fs.trashLocal(path);
+    if (this.fs.remove) return this.fs.remove(path);
+    throw new Error("This vault cannot delete files from the plugin.");
+  }
+
+  /**
+   * Deletes a chat session: every part of it (followed through the previous and next links) and
+   * the readable session note of each part, to the trash. Learner evidence, levels and saved
+   * activities live elsewhere and are kept. Returns the chat files removed.
+   */
+  async deleteChat(path: string): Promise<string[]> {
+    const linked = (chat: Chat, key: "previous" | "next"): string => {
+      const m = /^\[\[([^\]|]+)/.exec(fmStr(chat.fm, key));
+      return m ? `${m[1]}.md` : "";
+    };
+    const parts: string[] = [];
+    const queue = [path];
+    while (queue.length && parts.length < 50) {
+      const p = queue.shift()!;
+      if (parts.includes(p) || !(await this.fs.exists(p))) continue;
+      parts.push(p);
+      try {
+        const chat = await this.loadChat(p);
+        for (const next of [linked(chat, "previous"), linked(chat, "next")]) if (next && !parts.includes(next)) queue.push(next);
+      } catch {
+        /* an unreadable part is still deleted; its links are simply not followed */
+      }
+    }
+    for (const p of parts) {
+      await this.trash(p);
+      const note = p.replace("/chats/", "/sessions/");
+      if (note !== p && (await this.fs.exists(note))) await this.trash(note);
+    }
+    return parts;
   }
 
   /** The earlier parts of a chat, oldest first, followed back through each part's `previous` link. */

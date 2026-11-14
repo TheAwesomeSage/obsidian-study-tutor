@@ -46,6 +46,10 @@ export class GraphScreen implements Screen {
   private live!: HTMLElement;
   private results!: HTMLElement;
   private bar!: HTMLElement;
+  /** The view buttons, floating at the top left of the map. */
+  private tools!: HTMLElement;
+  /** Set once the learner picks a colour mode; until then a single topic is coloured by level. */
+  private modeChosen = false;
   private observer: ResizeObserver | null = null;
   private nodes: GNode[] = [];
   private advice = new Map<string, Decision>();
@@ -59,23 +63,27 @@ export class GraphScreen implements Screen {
     this.el = el;
     const v = this.view;
     const root = el.createDiv({ cls: "st-graph-screen" });
-    const heading = root.createDiv({ cls: "st-graph-heading" });
-    heading.createDiv({ cls: "st-kicker", text: "YOUR LEARNING MAP" });
-    heading.createEl("h2", { text: "See how your knowledge connects" });
-    heading.createDiv({ cls: "st-meta", text: "Follow a prerequisite, inspect the evidence, choose your next step." });
     if (!v.topics.length) {
       const box = emptyState(root, { icon: "git-fork", title: "The graph is empty", text: "Concepts appear here once a topic has been compiled. Each topic becomes a cluster, and prerequisites link them." });
       button(box, { label: "New topic", icon: "plus", tone: "primary", onClick: () => v.plugin.openNewTopic() });
       return;
     }
-    this.bar = root.createDiv({ cls: "st-graph-bar" });
+    // The map takes the whole height on the left. Its title, search, colours and relation filters
+    // sit at the top of the sidebar on the right, above the concept details, and the view buttons
+    // float in a small island at the map's top left.
     const body = root.createDiv({ cls: "st-graph-body" });
     this.stage = body.createDiv({ cls: "st-graph-stage" });
     const canvasEl = this.stage.createEl("canvas", { cls: "st-graph-canvas", attr: { tabindex: "0", role: "application", "aria-label": "Knowledge graph. Arrow keys move between concepts, plus and minus zoom, zero fits the graph, Escape clears the selection. The search box lists every concept." } });
+    this.tools = this.stage.createDiv({ cls: "st-graph-island", attr: { role: "toolbar", "aria-label": "Graph view" } });
     this.legend = this.stage.createDiv({ cls: "st-graph-legend" });
     this.stage.createDiv({ cls: "st-graph-hint", text: "Drag to pan · scroll to zoom · arrows to explore · / to search" });
     this.live = this.stage.createDiv({ cls: "st-sr-only", attr: { "aria-live": "polite" } });
-    this.panel = body.createEl("aside", { cls: "st-graph-panel", attr: { "aria-label": "Concept details" } });
+    const side = body.createEl("aside", { cls: "st-graph-side", attr: { "aria-label": "Graph controls and concept details" } });
+    const head = side.createDiv({ cls: "st-graph-side-head" });
+    head.createEl("h2", { cls: "st-graph-side-title", text: "Learning map" });
+    head.createDiv({ cls: "st-meta", text: "Follow a prerequisite, inspect the evidence, choose your next step." });
+    this.bar = side.createDiv({ cls: "st-graph-bar" });
+    this.panel = side.createDiv({ cls: "st-graph-panel", attr: { "aria-label": "Concept details" } });
     this.fitted = false;
     // The screen object outlives a visit; the last visit's concepts belong to its old canvas.
     this.nodes = [];
@@ -369,10 +377,13 @@ export class GraphScreen implements Screen {
       const o = sel.createEl("option", { value, text: enough[value] ? text : `${text} (needs more answers)` });
       o.disabled = !enough[value];
     }
+    // With one topic, colouring by topic paints every concept the same; level says more.
+    if (!this.modeChosen && this.mode === "topic" && this.topicList().length <= 1) this.mode = "level";
     if (!enough[this.mode]) this.mode = "topic";
     sel.value = this.mode;
     sel.onchange = () => {
       this.mode = sel.value as ColourMode;
+      this.modeChosen = true;
       this.apply();
     };
 
@@ -404,16 +415,23 @@ export class GraphScreen implements Screen {
       };
     }
 
-    const end = bar.createDiv({ cls: "st-graph-end" });
-    const near = button(end, { label: "Neighbourhood", icon: "focus", tone: "ghost", title: "Show only the selected concept, what it rests on and what rests on it", cls: this.onlyNear ? "is-on" : "" });
-    near.disabled = !this.selected;
-    near.setAttribute("aria-pressed", String(this.onlyNear));
-    near.onclick = () => {
+    this.renderTools();
+  }
+
+  /** The view buttons, as one compact island at the top left of the map. */
+  private renderTools(): void {
+    const end = this.tools;
+    const v = this.view;
+    end.empty();
+    const near = iconButton(end, "focus", "Neighbourhood: show only the selected concept, what it rests on and what rests on it", () => {
       this.onlyNear = !this.onlyNear;
       this.apply();
       this.renderBar();
       this.canvas?.fit();
-    };
+    });
+    near.disabled = !this.selected;
+    near.setAttribute("aria-pressed", String(this.onlyNear));
+    near.toggleClass("is-on", this.onlyNear);
     iconButton(end, "maximize", "Fit the graph to the view", () => this.canvas?.fit());
     iconButton(end, "zoom-in", "Zoom in", () => this.canvas?.zoomAt(1.3));
     iconButton(end, "zoom-out", "Zoom out", () => this.canvas?.zoomAt(1 / 1.3));
@@ -425,7 +443,7 @@ export class GraphScreen implements Screen {
     const expanded = v.contentEl.hasClass("is-graph-expanded");
     iconButton(end, expanded ? "minimize-2" : "maximize-2", expanded ? "Leave full view" : "Expand the graph to fill the pane", () => {
       this.expand(!expanded);
-      this.renderBar();
+      this.renderTools();
     });
   }
 

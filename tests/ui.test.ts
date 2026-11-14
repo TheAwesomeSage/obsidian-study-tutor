@@ -169,37 +169,48 @@ test("home, study, review, topic page and graph work together from the normal en
   await tick(40);
   assert.equal(root.getAttribute("data-screen"), "study");
   assert.match($(root, ".st-tail .st-empty").textContent, /Adaptive · Linear maps/);
-  const slider = () => $(root, ".st-conf-range");
-  assert.equal($(root, ".st-conf-value").textContent, "Not set");
-  assert.equal(slider().disabled, true, "confidence is offered only while a question is open");
-  assert.equal(slider().getAttribute("aria-valuetext"), "not set");
+  const conf = () => $$(root, ".st-conf-opt");
+  const confOn = () => conf().filter((b: any) => b.getAttribute("aria-checked") === "true").map((b: any) => b.textContent);
+  const confPick = (label: string) => conf().find((b: any) => b.textContent === label).click();
+  assert.deepEqual(conf().map((b: any) => b.textContent), ["None", "Low", "Medium", "High", "Very high"], "confidence is five discrete points");
+  assert.deepEqual(confOn(), [], "confidence is unset until one is chosen");
+  assert.equal($(root, ".st-conf").getAttribute("role"), "radiogroup");
   button(root, "Start session").click();
   await tick(80);
   assert.match($(root, ".st-messages").textContent, /Is \$f\(x\)=x\+1\$ linear\?/);
   assert.ok(!/<state>|<session>|<attempt>/.test(root.textContent), "hidden lines are never shown");
-  assert.match($(root, ".st-why").textContent, /^DiagnosisChosen because other concepts rest on it\. There is no evidence on Definition of a linear map yet/);
+  // The chosen step is one small button in the header; its reasons stay folded away until asked for.
+  assert.equal($(root, ".st-why").textContent, "", "no strip of reasoning above the chat by default");
+  assert.equal($(root, ".st-why-btn").textContent, "Diagnosis");
   assert.match(calls[0].system, /# Tutor core[\s\S]*# Subject card: linear-algebra[\s\S]*# Topic card[\s\S]*# Mode: Adaptive study guide/);
   assert.match(calls[0].input, /just opened this chat\. Begin\./);
   assert.equal(calls[0].model, "sonnet");
-  // The open question is pinned above the answer area, and help sits in a fixed place.
-  assert.match($(root, ".st-pending").textContent, /Open questionIs \$f\(x\)=x\+1\$ linear\?/);
-  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent, b.disabled]), [["Hint", false], ["Explain", false], ["Skip", false], ["Visual activity", false]]);
+  // The open question is not pinned again above the answer box; help sits beside the box.
+  assert.equal(root.querySelector(".st-pending"), null);
+  assert.ok($(root, ".st-composer > .st-quick.st-side"), "help buttons sit at the side of the answer box");
+  assert.ok($(root, ".st-composer > .st-side.is-right .st-send"), "Send sits at the other side");
+  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent, b.disabled]), [["Hint", false], ["Explain", false], ["Skip", false], ["Visual", false]]);
   // The reasoning behind the action is one click away.
-  button(root, "Why this?").click();
-  assert.match($(root, ".st-why-detail").textContent, /Definition of a linear map[\s\S]*Policy version 3\. Scores only rank what to study next\./);
-  button(root, "Hide details").click();
+  $(root, ".st-why-btn").click();
+  assert.equal($(root, ".st-why-btn").getAttribute("aria-expanded"), "true");
+  assert.match($(root, ".st-why-detail").textContent, /^Diagnosis: Chosen because other concepts rest on it\. There is no evidence on Definition of a linear map yet[\s\S]*Policy version 3\./);
+  $(root, ".st-why-btn").click();
+  assert.equal(root.querySelector(".st-why-detail"), null);
 
-  // The slider: unset until deliberately moved, readable, clearable by keyboard.
-  assert.equal(slider().disabled, false);
-  slider().value = "80";
-  fire(slider(), "input");
-  assert.equal($(root, ".st-conf-value").textContent, "80%");
-  assert.equal(slider().getAttribute("aria-valuetext"), "80 percent confident");
+  // Confidence: choosing a point sets it, choosing it again or Delete clears it, arrows move it.
+  assert.equal(conf()[0].disabled, false);
+  confPick("High");
+  assert.deepEqual(confOn(), ["High"]);
   assert.ok($(root, ".st-conf").classList.contains("is-set"));
-  slider().dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
-  assert.equal($(root, ".st-conf-value").textContent, "Not set");
-  slider().value = "90";
-  fire(slider(), "input");
+  confPick("High");
+  assert.deepEqual(confOn(), [], "choosing the same point again clears it");
+  confPick("Medium");
+  conf()[2].dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+  assert.deepEqual(confOn(), ["High"], "arrow keys move between points");
+  conf()[3].dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+  assert.deepEqual(confOn(), []);
+  assert.ok(!$(root, ".st-conf").classList.contains("is-set"));
+  confPick("Very high");
 
   // A draft survives leaving the screen and coming back; so does the confidence.
   const input = () => $(root, ".st-composer textarea");
@@ -214,7 +225,7 @@ test("home, study, review, topic page and graph work together from the normal en
   await tick(40);
   assert.equal(root.getAttribute("data-screen"), "study");
   assert.equal(input().value, "Yes, it is li");
-  assert.equal($(root, ".st-conf-value").textContent, "90%");
+  assert.deepEqual(confOn(), ["Very high"]);
   assert.equal($$(root, ".st-msg").length, 1);
 
   // A failed send keeps the message, the confidence and the open question.
@@ -228,8 +239,8 @@ test("home, study, review, topic page and graph work together from the normal en
   const chats = await plugin.store.listChats(dir);
   assert.equal(chats.length, 1);
   assert.match(await fs.read(chats[0]), /%%msg:you%%\n###### You\nYes, it is linear\./);
-  assert.equal($(root, ".st-conf-value").textContent, "90%", "the confidence is kept for the retry");
-  assert.match($(root, ".st-pending").textContent, /Is \$f\(x\)=x\+1\$ linear\?/);
+  assert.deepEqual(confOn(), ["Very high"], "the confidence is kept for the retry");
+  assert.match($(root, ".st-messages").textContent, /Is \$f\(x\)=x\+1\$ linear\?/);
 
   // Retry: the same answer is marked, with the confidence given before feedback.
   plugin.engine.call = async (o: any) => {
@@ -241,14 +252,14 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal($$(root, ".st-msg").length, 3);
   assert.match(calls[1].input, /LEARNER: Yes, it is linear\.[\s\S]*Reply to the learner's last message\.[\s\S]*Instructional action: check\./);
   assert.equal(calls[1].system, calls[0].system, "the stable part of the prompt is byte-identical between turns");
-  assert.match($(root, ".st-feedback").textContent, /Marked incorrectgraded by the model, unverified · your confidence 90%/);
+  assert.match($(root, ".st-feedback").textContent, /Marked incorrectgraded by the model, unverified · your confidence: very high/);
   assert.match($(root, ".st-feedback-more").textContent, /How this was checkedBasis: one model judgement, not independently checked\.This counts as unaided evidence\.thinks translation is linear/);
-  assert.equal($(root, ".st-conf-value").textContent, "Not set", "confidence resets for the next answer");
+  assert.deepEqual(confOn(), [], "confidence resets for the next answer");
   const state1 = parseState(await fs.read(`${dir}/state.md`));
   assert.equal(state1.levels[1], 1, "a first wrong answer places the concept at 1; the model's proposed level 4 is ignored");
   assert.deepEqual(state1.misconceptions, ["thinks translation is linear"]);
   const evidence = await fs.read(`${dir}/evidence.md`);
-  assert.match(evidence, /"result":"incorrect","errorType":"conceptual".*"confidence":0\.9/);
+  assert.match(evidence, /"result":"incorrect","errorType":"conceptual".*"confidence":1/);
   // Diagnostics are there, tucked away, with measured cache use.
   assert.match($(root, ".st-diag").textContent, /DetailsLast turn: 4\.0k tokens in \(3\.0k read from cache, 1\.0k written to cache, 10 uncached\) · 50 out · 1 call\.Measured cache share of input this turn: 75%\./);
   assert.equal($(root, ".st-diag").hasAttribute("open"), false);
@@ -359,8 +370,17 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.ok($(root, "canvas.st-graph-canvas"));
   assert.match($(root, ".st-graph-panel").textContent, /2 concepts across 1 topic\./);
   assert.deepEqual($$(root, ".st-graph-rels .st-toggle").map((b: any) => b.textContent), ["Requires", "Supports", "Applies to", "Contrasts with", "Derived from", "Synoptic connections"]);
+  // The map has the room: search, colour, relations and details sit in a sidebar to its right,
+  // and the view buttons in a small island over its top-left corner.
+  assert.ok($(root, ".st-graph-body > .st-graph-stage > canvas.st-graph-canvas"));
+  assert.ok($(root, ".st-graph-body > .st-graph-side .st-graph-bar .st-graph-rels"), "the graph controls are in the sidebar");
+  assert.ok($(root, ".st-graph-side .st-graph-panel"), "concept details share the sidebar");
+  assert.equal(root.querySelector(".st-graph-heading"), null, "no title bar above the map");
+  assert.deepEqual($$(root, ".st-graph-stage > .st-graph-island button").map((b: any) => b.getAttribute("aria-label").split(":")[0]), ["Neighbourhood", "Fit the graph to the view", "Zoom in", "Zoom out", "Lay the graph out again from scratch", "Expand the graph to fill the pane"]);
+  assert.equal(labelled(root, "Neighbourhood").disabled, true, "neighbourhood needs a selected concept");
   const colour = labelled(root, "Colour concepts by");
   assert.deepEqual($$(colour, "option").map((o: any) => [o.value, o.disabled]), [["topic", false], ["level", false], ["estimate", true], ["recency", false], ["calibration", true]], "modes without enough data are not offered");
+  assert.equal(colour.value, "level", "with a single topic, colouring by topic would paint every concept alike, so level is the default");
   assert.ok(Object.keys(plugin.data.graphLayout).length === 2, "positions are saved so the map stays put");
   // Search lists concepts; choosing one opens its details.
   const find = $(root, ".st-graph-find .st-search");
@@ -393,6 +413,45 @@ test("home, study, review, topic page and graph work together from the normal en
   button($(root, ".st-graph-panel"), "Study this").click();
   await tick(60);
   assert.equal(root.getAttribute("data-screen"), "study");
+
+  // ----- deleting a session: asks first, trashes the chat, keeps the evidence, starts afresh -----
+  const doc = root.ownerDocument;
+  const doomed = view.chatPath;
+  const chatsBefore = await plugin.store.listChats(dir);
+  const evidenceBefore = await fs.read(`${dir}/evidence.md`);
+  assert.ok(chatsBefore.includes(doomed));
+  labelled(root, "Delete this session and start a new one").click();
+  await tick();
+  assert.match(doc.body.textContent, /The conversation, its earlier parts and its session notes are moved to the trash/);
+  [...doc.querySelectorAll("button")].find((b: any) => b.textContent === "Cancel").click();
+  await tick(40);
+  assert.ok(await fs.exists(doomed), "cancelling deletes nothing");
+  labelled(root, "Delete this session and start a new one").click();
+  await tick();
+  doc.querySelector("button.mod-warning").click();
+  await tick(80);
+  assert.ok(fs.trashed.includes(doomed), "the chat went to the trash");
+  // The new session is named by the minute it starts, so here it may reuse the deleted name.
+  assert.ok(view.chatPath, "a new session has started");
+  assert.equal((await plugin.store.loadChat(view.chatPath)).messages.length, 0, "and it starts empty");
+  assert.equal(root.getAttribute("data-screen"), "study");
+  assert.equal($$(root, ".st-msg").length, 0);
+  assert.equal(await fs.read(`${dir}/evidence.md`), evidenceBefore, "answers and levels are kept");
+  const chatsAfter = await plugin.store.listChats(dir);
+  assert.equal(chatsAfter.length, chatsBefore.length, "one deleted, one new");
+  // From the home screen, any past session can be deleted too.
+  button($(root, ".st-nav"), "Home").click();
+  await tick(40);
+  const recentRows = $$(root, ".st-recent .st-row-item").length;
+  const oldest = chatsAfter[0];
+  labelled($$(root, ".st-recent .st-row-item").at(-1), "Delete this").click();
+  await tick();
+  doc.querySelector("button.mod-warning").click();
+  await tick(80);
+  assert.equal($$(root, ".st-recent .st-row-item").length, recentRows - 1);
+  assert.equal((await plugin.store.listChats(dir)).length, chatsAfter.length - 1);
+  assert.ok(fs.trashed.includes(oldest), "the oldest session, last in the list, was deleted");
+  assert.equal(await fs.read(`${dir}/evidence.md`), evidenceBefore);
 
   // ----- the More menu, the new-topic modal and settings -----
   labelled(root, "More tools").click();
@@ -484,8 +543,8 @@ test("a chat saved by an older version reopens with its question open, and nothi
   await tick(60);
   assert.equal(root.getAttribute("data-screen"), "study");
   assert.equal($$(root, ".st-msg").length, 1);
-  assert.match($(root, ".st-pending").textContent, /Open questionWhat does it print, and why\?/);
-  assert.equal($(root, ".st-conf-range").disabled, false);
+  assert.match($(root, ".st-messages").textContent, /What does it print, and why\?/);
+  assert.equal($(root, ".st-conf-opt").disabled, false);
   assert.equal(await fs.read(`${dir}/chats/2026-11-12 1701 tutor.md`), old, "opening a chat does not rewrite it");
   // Answering it carries the question into the record, and the transcript keeps every earlier line.
   let seen = "";
@@ -516,7 +575,7 @@ test("a chat saved by an older version reopens with its question open, and nothi
   button(root, "Study connection").click();
   await tick(80);
   assert.equal(root.getAttribute("data-screen"), "study");
-  assert.match($(root, ".st-pending").textContent, /Use linearity/);
+  assert.match($(root, ".st-messages").textContent, /Use linearity/);
   assert.notEqual(view.chatPath, `${dir}/chats/2026-11-12 1701 tutor.md`);
   assert.equal(await fs.read(`${dir}/chats/2026-11-12 1701 tutor.md`), saved);
   assert.equal(JSON.parse(String(view.chat.fm.session)).pendingQuestion, jointQuestion);

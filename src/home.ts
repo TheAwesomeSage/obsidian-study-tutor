@@ -2,11 +2,11 @@
 // suggested next step, then the ways in. Topics and past sessions sit below, and everything
 // else is one click further away.
 
-import { setIcon } from "obsidian";
+import { Notice, setIcon } from "obsidian";
 import { ago, recommend } from "./overview";
 import { ACTION_LABEL, Action } from "./policy";
 import type { Screen, TutorView } from "./view";
-import { button, chip, emptyState, iconButton, modeInfo, panel, progressBar, stampLabel } from "./ui";
+import { button, chip, confirmAction, emptyState, iconButton, modeInfo, panel, progressBar, stampLabel } from "./ui";
 
 const MINUTES = [10, 25, 45];
 
@@ -165,6 +165,16 @@ export class HomeScreen implements Screen {
       if (c.unfinished) chip(main, "Unfinished", "accent");
       main.onclick = () => void v.startStudy({ dir: c.dir, chatPath: c.path });
       iconButton(row, "file-text", "Open the transcript as a note", () => void v.app.workspace.openLinkText(c.path, "", true));
+      iconButton(row, "trash-2", `Delete this ${info.label} session on ${c.topic}`, async () => {
+        const ok = await confirmAction(v.app, { title: "Delete this session?", text: `The ${info.label} session on ${c.topic} from ${stampLabel(c.stamp)}, its earlier parts and its session notes are moved to the trash. Your answers, levels and saved activities are kept.`, confirm: "Delete" });
+        if (!ok) return;
+        try {
+          await v.deleteChat(c.path);
+          this.render();
+        } catch (e) {
+          new Notice(`Study Tutor: the session could not be deleted. ${(e as Error).message}`);
+        }
+      });
     }
   }
 }

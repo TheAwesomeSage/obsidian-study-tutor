@@ -1,29 +1,37 @@
-19:09:04 screenshot 01-home-light
-19:09:05 saved activity opened in 603 ms
-19:09:06 screenshot 02-player-saved-index
-19:09:08 assessment feedback: Matches the model. Explain why, then try a fresh unaided problem.
-19:09:08 screenshot 03-player-assessed
-19:09:10 screenshot 04-study-after-activity
-19:09:10 numeric variant opened in 218 ms: 66[0]13[1]16[2]87[3]
-19:09:11 screenshot 04b-player-new-numbers
-19:09:14 screenshot 05-graph-light
-19:09:16 screenshot 06-graph-node-details
-19:09:38 linear search request: player opened after 21359 ms
-19:09:39 screenshot 07-player-live-local-model
-19:09:40 screenshot 08-study-reply-live
-19:09:46 screenshot 09-unsupported-fallback
-19:09:46 projectile fixture opened in 115 ms
-19:09:50 projectile check (v=10, 45°, g=9.81, answer 10.19367992 m): Matches the model. Explain why, then try a fresh unaided problem.
-19:09:50 screenshot 15-player-projectile
-19:09:53 plot fixture opened in 1362 ms
-19:09:53 screenshot 16-player-plot
-19:09:54 external fixture opened in 117 ms
-19:09:55 screenshot 17-player-external
-19:09:59 screenshot 10-graph-dark
-19:10:00 screenshot 11-home-dark
-19:10:01 view width in the narrow check: 496 px
-19:10:02 screenshot 12-home-narrow-dark
-19:10:02 screenshot 13-study-narrow-dark
-19:10:05 screenshot 14-graph-narrow-dark
-19:10:05 files written: Tutor/_logs/capability-requests.md, Tutor/Topics/Numeric array indexing/evidence.md, Tutor/Topics/Numeric array indexing/activity-log.md, Tutor/Topics/Numeric array indexing/activities.md
-19:10:05 console errors: 0
+21:02:34 trusted the verification vault's plugins
+21:02:45 screenshot 01-home-light
+21:02:45 saved activity opened in 384 ms
+21:02:46 screenshot 02-player-saved-index
+21:02:48 assessment feedback: Matches the model. Explain why, then try a fresh unaided problem.
+21:02:49 screenshot 03-player-assessed
+21:02:50 screenshot 04-study-after-activity
+21:02:50 confidence chosen: High
+21:02:51 screenshot 04c-study-why-open
+21:02:52 screenshot 04d-study-confidence
+21:02:52 numeric variant opened in 117 ms: 13[0]68[1]63[2]94[3]
+21:02:53 screenshot 04b-player-new-numbers
+21:02:56 screenshot 05-graph-light
+21:02:58 screenshot 06-graph-node-details
+21:03:18 linear search request: player opened after 19120 ms
+21:03:18 screenshot 07-player-live-local-model
+21:03:20 screenshot 08-study-reply-live
+21:03:26 screenshot 09-unsupported-fallback
+21:03:26 projectile fixture opened in 107 ms
+21:03:29 projectile check (v=10, 45°, g=9.81, answer 10.19367992 m): Matches the model. Explain why, then try a fresh unaided problem.
+21:03:30 screenshot 15-player-projectile
+21:03:32 plot fixture opened in 1309 ms
+21:03:33 screenshot 16-player-plot
+21:03:34 external fixture opened in 91 ms
+21:03:35 screenshot 17-player-external
+21:03:39 screenshot 10-graph-dark
+21:03:40 screenshot 11-home-dark
+21:03:41 view width in the narrow check: 496 px
+21:03:42 screenshot 12-home-narrow-dark
+21:03:42 screenshot 13-study-narrow-dark
+21:03:45 screenshot 14-graph-narrow-dark
+21:03:48 screenshot 18-delete-confirm
+21:03:50 delete session: 2 messages before, 0 after
+21:03:51 screenshot 19-after-delete
+21:03:52 screenshot 20-home-recent-delete
+21:03:52 files written: Tutor/_logs/capability-requests.md, Tutor/Topics/Numeric array indexing/evidence.md, Tutor/Topics/Numeric array indexing/activity-log.md, Tutor/Topics/Numeric array indexing/activities.md
+21:03:52 console errors: 0

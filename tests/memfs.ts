@@ -21,6 +21,12 @@ export class MemFS implements FS {
   async mkdir(path: string): Promise<void> {
     this.dirs.add(path);
   }
+  /** Files deleted through the store, in order. Here deleting stands in for the trash. */
+  trashed: string[] = [];
+  async remove(path: string): Promise<void> {
+    if (!this.files.delete(path)) throw new Error(`ENOENT ${path}`);
+    this.trashed.push(path);
+  }
   async list(path: string): Promise<{ files: string[]; folders: string[] }> {
     const direct = (p: string) => p.startsWith(path + "/") && !p.slice(path.length + 1).includes("/");
     return { files: [...this.files.keys()].filter(direct), folders: [...this.dirs].filter(direct) };

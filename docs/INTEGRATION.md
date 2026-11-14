@@ -50,6 +50,9 @@ activity came from a scripted local-model reply. Claude was blocked by an invali
 | Function plotter fixture | JSXGraph loaded on demand in 1.3 s; tangent slope 2.000 at x = 1 (`16`) |
 | PhET fixture | Link-out with a source-based question; marked as opaque (`17`) |
 | Dark theme; 496 px pane | Home, Study and Graph lay out without overlap (`10`–`14`) |
+| 0.7.0 composer | Help buttons beside the box, five confidence points ("High" chosen), the chosen step's reasons open from the header button (`04c`, `04d`) |
+| 0.7.0 graph | Controls in the right sidebar, view buttons in an island at the map's top left, coloured by level with one topic (`05`, `06`, `10`) |
+| 0.7.0 delete session | Header bin → confirmation → chat with 2 messages replaced by an empty one; Home lists the rest with a bin each (`18`–`20`) |
 | Console | 0 errors |
 | Files written | `activities.md`, `activity-log.md`, `evidence.md`, `_logs/capability-requests.md` |
 
@@ -58,9 +61,15 @@ strip collapsed to one word per line in a narrow pane; an offer opened for the c
 than its concept; the linear-search activity named the wrong supported objective; an unsupported
 request showed its message twice; prose with backticks was rejected as code.
 
+Harness notes (0.7.0): on a profile's first launch under remote control, Obsidian's `activeDocument`
+pointed away from the main window, so no dialog showed (not even the command palette, and the 0.6.0
+build behaved the same); the script now sends the window the focus event a real click would. The
+trust prompt can appear after 8 s, so it is waited for up to 25 s, and the theme is switched with
+`app.changeTheme` when the theme command does not take.
+
 ## Tests
 
-- `npm test`: 130 tests, 129 pass, 1 skipped (native SymPy; no Python with SymPy on this machine).
+- `npm test`: 131 tests, 130 pass, 1 skipped (native SymPy; no Python with SymPy on this machine).
 - `npm run test:visual-browser` (Playwright in Edge): 6 of 6 pass: projectile (exact landing,
   pause, reset), plotter (JSXGraph, slider, tangent), algorithm (real trace, reduced motion),
   graph light and dark (keyboard, details), dense graph (1,920 concepts) and 390 px player without
