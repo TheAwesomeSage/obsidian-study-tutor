@@ -44,8 +44,8 @@ export interface SessionRecord {
 const strings = (x: unknown, max = 8): string[] => (Array.isArray(x) ? x.filter((i): i is string => typeof i === "string" && !!i.trim()).map((i) => i.trim().slice(0, 400)).slice(-max) : []);
 
 /**
- * The question a tutor message leaves open: its last paragraph, when that paragraph ends in a
- * question mark or hands over with "Your turn". Empty when the message does not end by asking.
+ * The question a tutor message leaves open: its last paragraph, when that paragraph contains a
+ * question or hands over with "Your turn". Trailing reassurance belongs to the same question.
  */
 export function openQuestion(text: string): string {
   const paras = text.trim().split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
@@ -53,7 +53,7 @@ export function openQuestion(text: string): string {
   while (paras.length && /^\*[^*].*\*$/.test(paras[paras.length - 1])) paras.pop();
   const last = paras[paras.length - 1] ?? "";
   const bare = last.replace(/[*_`]+/g, "").trim();
-  if (/\?\s*$/.test(bare) || /^(your turn|try (it|this|one)|now you)\b/i.test(bare) || /\*Reply with a letter\.\*$/.test(last)) return last.slice(0, 1200);
+  if (/\?/.test(bare) || /^(your turn|try (it|this|one)|now you)\b/i.test(bare) || /\*Reply with a letter\.\*$/.test(last)) return last.slice(0, 1200);
   return "";
 }
 
@@ -70,8 +70,9 @@ export function sessionFor(chat: Chat, state: LearnerState, mode: Mode): Session
   const last = chat.messages[chat.messages.length - 1];
   const str = (v: unknown, d = ""): string => (typeof v === "string" ? v : d);
   let pending = str(p.pendingQuestion);
-  // No record yet: the question a tutor message ends on is the one that is open.
-  if (p.version === undefined && !pending && lastTutor && (last === lastTutor || chat.messages.indexOf(lastTutor) === chat.messages.length - 2)) pending = openQuestion(lastTutor.text);
+  // Older records sometimes missed a question followed by reassurance. Recover it without
+  // reopening a step that an existing record explicitly says was completed.
+  if (p.version !== 2 && !p.completedStep && !pending && lastTutor && (last === lastTutor || chat.messages.indexOf(lastTutor) === chat.messages.length - 2)) pending = openQuestion(lastTutor.text);
   return {
     version: 2,
     goal: str(p.goal) || fmStr(chat.fm, "goal"),

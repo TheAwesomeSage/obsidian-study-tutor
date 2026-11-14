@@ -241,8 +241,14 @@ export class Store {
    * Adds a relation between two concepts, stored with the topic the first one belongs to.
    * A `requires` relation that would close a loop of prerequisites is refused.
    */
-  async addRelation(edge: { from: string; to: string; type: Relation; status?: EdgeStatus; source?: string }): Promise<void> {
+  async addRelation(edge: { from: string; to: string; type: Relation; status?: EdgeStatus; source?: string; rationale?: string; challenge?: string }): Promise<void> {
     const course = await this.loadCourse();
+    if (edge.type === "synoptic") {
+      if (!edge.rationale?.trim() || !edge.challenge?.trim()) throw new Error("A synoptic connection needs an explanation and a joint question.");
+      if (edge.rationale.length > 2000 || edge.challenge.length > 4000) throw new Error("Keep the explanation under 2000 characters and the question under 4000.");
+      const duplicate = course.edges.find(e => e.type === "synoptic" && ((e.from === edge.from && e.to === edge.to) || (e.from === edge.to && e.to === edge.from)));
+      if (duplicate) throw new Error("This synoptic connection already exists, including reviewed or rejected suggestions.");
+    }
     const from = course.concepts.get(edge.from);
     if (!from || !course.concepts.has(edge.to)) throw new Error("Choose two existing concepts.");
     if (edge.from === edge.to) throw new Error("A concept cannot be related to itself.");
@@ -250,13 +256,13 @@ export class Store {
     const graph = await this.loadGraph(from.topic);
     const existing = graph.edges.find((e) => e.from === edge.from && e.to === edge.to && e.type === edge.type);
     if (existing) existing.status = edge.status ?? "reviewed";
-    else graph.edges.push({ from: edge.from, to: edge.to, type: edge.type, status: edge.status ?? "reviewed", source: edge.source ?? "learner" });
+    else graph.edges.push({ from: edge.from, to: edge.to, type: edge.type, status: edge.status ?? "reviewed", source: edge.source ?? "learner", ...(edge.rationale ? { rationale: edge.rationale.trim() } : {}), ...(edge.challenge ? { challenge: edge.challenge.trim() } : {}) });
     await this.saveGraph(from.topic, graph);
   }
 
   /**
    * Marks a relation reviewed or rejected. A relation the learner added is removed outright when
-   * rejected; one that comes from the topic card stays in the file as rejected, so it is not
+   * rejected; synoptic suggestions and those from the topic card stay in the file as rejected, so they are not
    * proposed again the next time the card is read.
    */
   async setRelationStatus(edge: { from: string; to: string; type: Relation }, status: EdgeStatus): Promise<void> {
@@ -269,7 +275,7 @@ export class Store {
     if (i < 0) return;
     // Bringing a rejected prerequisite back must not close a loop either.
     if (status !== "rejected" && edge.type === "requires" && graph.edges[i].status === "rejected" && wouldCycle(course.edges.filter((e) => !same(e)), edge.from, edge.to)) throw new Error("This prerequisite would create a circular dependency.");
-    if (status === "rejected" && graph.edges[i].source !== "topic card") graph.edges.splice(i, 1);
+    if (status === "rejected" && graph.edges[i].source !== "topic card" && graph.edges[i].type !== "synoptic") graph.edges.splice(i, 1);
     else graph.edges[i].status = status;
     await this.saveGraph(from.topic, graph);
   }

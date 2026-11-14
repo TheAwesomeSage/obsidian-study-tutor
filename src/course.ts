@@ -11,11 +11,13 @@ import type { Topic } from "./formats";
  *   applies_to      `from` is used in the application `to`
  *   contrasts_with  the two are commonly confused (symmetric)
  *   derived_from    `from` is derived mathematically from `to`
+ *   synoptic        a joint problem connects the two concepts (symmetric, never orders study)
  */
-export type Relation = "requires" | "supports" | "applies_to" | "contrasts_with" | "derived_from";
-export const RELATIONS: Relation[] = ["requires", "supports", "applies_to", "contrasts_with", "derived_from"];
+export type Relation = "requires" | "supports" | "applies_to" | "contrasts_with" | "derived_from" | "synoptic";
+export const RELATIONS: Relation[] = ["requires", "supports", "applies_to", "contrasts_with", "derived_from", "synoptic"];
 
 export const RELATION_TEXT: Record<Relation, { out: string; back: string }> = {
+  synoptic: { out: "connects in a synoptic problem with", back: "connects in a synoptic problem with" },
   requires: { out: "requires", back: "is required by" },
   supports: { out: "supports", back: "is supported by" },
   applies_to: { out: "applies to", back: "is applied by" },
@@ -45,6 +47,8 @@ export interface CourseEdge {
   status: EdgeStatus;
   /** Where the edge came from: "topic card", "learner", or a [[note]]. */
   source: string;
+  rationale?: string;
+  challenge?: string;
 }
 
 export interface TopicGraph {
@@ -162,7 +166,7 @@ export function parseTopicGraph(md: string): TopicGraph | null {
       .map((c: Concept) => ({ id: c.id, n: c.n, name: c.name, sources: Array.isArray(c.sources) ? c.sources.filter((s) => typeof s === "string") : [], ...(c.retired ? { retired: true } : {}) }));
     const edges: CourseEdge[] = g.edges
       .filter((e: CourseEdge) => e && typeof e.from === "string" && typeof e.to === "string" && RELATIONS.includes(e.type))
-      .map((e: CourseEdge) => ({ from: e.from, to: e.to, type: e.type, status: e.status === "reviewed" || e.status === "rejected" ? e.status : "inferred", source: typeof e.source === "string" ? e.source : "topic card" }));
+      .map((e: CourseEdge) => ({ from: e.from, to: e.to, type: e.type, status: e.status === "reviewed" || e.status === "rejected" ? e.status : "inferred", source: typeof e.source === "string" ? e.source : "topic card", ...(typeof e.rationale === "string" ? { rationale: e.rationale.slice(0, 2000) } : {}), ...(typeof e.challenge === "string" ? { challenge: e.challenge.slice(0, 4000) } : {}) }));
     return { version: 1, concepts, edges };
   } catch {
     return null;

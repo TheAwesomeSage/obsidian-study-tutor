@@ -865,3 +865,68 @@ test("source excerpts are sent only when a step needs them, quoted exactly", asy
   assert.ok(!/From the learner's source notes/.test(t.calls[1].input));
   assert.deepEqual(JSON.parse(String((await t.store.loadChat(chat)).fm.session)).sources, ["[[Calc notes]]"]);
 });
+
+
+test("synoptic links preserve their learning purpose, reject reversed duplicates, and never order study", async () => {
+  const store = new Store(new MemFS(), "Tutor");
+  const dir = await store.saveCompiled({ title: "Connections", fm: {}, topicBody: CARD(NAMES), questionsBody: BANK, target: 4 });
+  const graph = await store.loadGraph(dir);
+  const [a, b] = graph.concepts;
+  const edge = { from: a.id, to: b.id, type: "synoptic" as const, status: "inferred" as const, source: "model suggestion", rationale: "Use limits to justify a derivative.", challenge: "Derive the derivative of x squared from its difference quotient." };
+  await store.addRelation(edge);
+  assert.deepEqual((await store.loadGraph(dir)).edges.find(e => e.type === "synoptic"), edge);
+  await assert.rejects(store.addRelation({ ...edge, from: b.id, to: a.id }), /already exists/);
+  await store.setRelationStatus(edge, "rejected");
+  assert.equal((await store.loadGraph(dir)).edges.find(e => e.type === "synoptic")?.status, "rejected");
+  await assert.rejects(store.addRelation(edge), /already exists/);
+  await store.setRelationStatus(edge, "reviewed");
+  assert.equal((await store.loadGraph(dir)).edges.find(e => e.type === "synoptic")?.status, "reviewed");
+  await assert.rejects(store.addRelation({ ...edge, to: graph.concepts[2].id, rationale: "" }), /explanation/);
+});
+
+test("tool validation and synchronous failures return structured errors and timeouts signal cancellation", async () => {
+  const tools = new ToolRegistry();
+  tools.register({ name: "bad-validator", description: "test", kind: "inspection", timeoutMs: 20, validate: () => { throw new Error("bad"); }, run: async () => ({ output: null }) });
+  assert.equal((await tools.run("bad-validator", {})).ok, false);
+  let aborted = false;
+  tools.register({ name: "slow", description: "test", kind: "inspection", timeoutMs: 5, validate: () => ({}), run: async (_, ctx) => new Promise<{ output: null }>(resolve => { ctx.signal?.addEventListener("abort", () => { aborted = true; resolve({ output: null }); }); }) });
+  assert.equal((await tools.run("slow", {})).timedOut, true);
+  assert.equal(aborted, true);
+});
+
+
+test("legacy questions remain open when a reassurance follows the question mark", async () => {
+  const question = 'What does this print, and why? If unsure, say "I do not know".';
+  assert.equal(openQuestion(question), question);
+  const t = await setup();
+  const path = await t.chatIn("tutor");
+  const chat = await t.store.loadChat(path);
+  chat.messages = [{ role: "tutor", text: question }, { role: "you", text: "5" }];
+  chat.fm.session = JSON.stringify({ version: 1, pendingQuestion: "", completedStep: false });
+  const state = await t.store.loadState(t.dir, 4);
+  assert.equal(sessionFor(chat, state, "tutor").pendingQuestion, question);
+  chat.fm.session = JSON.stringify({ version: 1, pendingQuestion: "", completedStep: true });
+  assert.equal(sessionFor(chat, state, "tutor").pendingQuestion, "", "a completed legacy step stays closed");
+  chat.fm.session = JSON.stringify({ version: 2, pendingQuestion: "", completedStep: false });
+  assert.equal(sessionFor(chat, state, "tutor").pendingQuestion, "", "current explicit records remain authoritative");
+});
+
+test("synoptic proposals validate target IDs, stay unreviewed and leave mastery unchanged", async () => {
+  const t = await setup();
+  const [a, b] = (await t.store.loadGraph(t.dir)).concepts;
+  const before = await t.store.loadState(t.dir, 4);
+  t.replies.push(JSON.stringify({ target: "invented/concept", rationale: "A connection", challenge: "A joint problem" }));
+  await assert.rejects(t.engine.suggestSynoptic(a.id), /No valid/);
+  assert.equal((await t.store.loadGraph(t.dir)).edges.filter(e => e.type === "synoptic").length, 0);
+  t.replies.push(JSON.stringify({ target: b.id, rationale: "Limits define derivatives.", challenge: "Use the limit definition to differentiate x squared." }));
+  const result = await t.engine.suggestSynoptic(a.id);
+  assert.equal(result.edge.status, "inferred");
+  assert.equal(result.edge.source, "model suggestion");
+  assert.deepEqual((await t.store.loadState(t.dir, 4)).levels, before.levels);
+  assert.deepEqual((await t.store.loadState(t.dir, 4)).attempts, before.attempts);
+  t.replies.push(o => {
+    assert.ok(!JSON.parse(o.input).candidates.some((c: { id: string }) => c.id === b.id), "existing pairs are not proposed again");
+    return JSON.stringify({ target: "", rationale: "", challenge: "" });
+  });
+  await assert.rejects(t.engine.suggestSynoptic(a.id), /No valid/);
+});

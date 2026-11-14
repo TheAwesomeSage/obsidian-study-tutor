@@ -355,7 +355,7 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal(root.getAttribute("data-screen"), "graph");
   assert.ok($(root, "canvas.st-graph-canvas"));
   assert.match($(root, ".st-graph-panel").textContent, /2 concepts across 1 topic\./);
-  assert.deepEqual($$(root, ".st-graph-rels .st-toggle").map((b: any) => b.textContent), ["Requires", "Supports", "Applies to", "Contrasts with", "Derived from"]);
+  assert.deepEqual($$(root, ".st-graph-rels .st-toggle").map((b: any) => b.textContent), ["Requires", "Supports", "Applies to", "Contrasts with", "Derived from", "Synoptic connections"]);
   const colour = labelled(root, "Colour concepts by");
   assert.deepEqual($$(colour, "option").map((o: any) => [o.value, o.disabled]), [["topic", false], ["level", false], ["estimate", true], ["recency", false], ["calibration", true]], "modes without enough data are not offered");
   assert.ok(Object.keys(plugin.data.graphLayout).length === 2, "positions are saved so the map stays put");
@@ -494,4 +494,33 @@ test("a chat saved by an older version reopens with its question open, and nothi
   assert.match(saved, /Question 2 is still open[\s\S]*```c\nint x = 5;\n```[\s\S]*5, because x is passed by value[\s\S]*Right\./);
   assert.match($(root, ".st-feedback").textContent, /Marked correct/);
   assert.ok(button(root, "Continue"), "with nothing open, the next step is one click away");
+
+  // A proposed joint problem is reviewed in the graph and opens without rewriting this chat.
+  const graph = await plugin.store.loadGraph(dir);
+  const [a, b] = graph.concepts;
+  const jointQuestion = "Use linearity to show that the kernel is closed under addition.";
+  plugin.engine.call = async () => ({ structured: { target: b.id, rationale: "Linearity explains the subspace structure of the kernel.", challenge: jointQuestion }, usage: { input: 1, cacheRead: 0, cacheWrite: 0, output: 1, costUsd: 0, calls: 1 } });
+  view.graphFocus = a.id;
+  view.go("graph");
+  await tick(60);
+  button(root, "Suggest a synoptic connection").click();
+  await tick(80);
+  assert.equal(button(root, "Study connection").disabled, true);
+  labelled(root, `Confirm that ${a.name} connects in a synoptic problem`).click();
+  await tick(80);
+  assert.equal(button(root, "Study connection").disabled, false);
+  button(root, "Study connection").click();
+  await tick(80);
+  assert.equal(root.getAttribute("data-screen"), "study");
+  assert.match($(root, ".st-pending").textContent, /Use linearity/);
+  assert.notEqual(view.chatPath, `${dir}/chats/2026-11-12 1701 tutor.md`);
+  assert.equal(await fs.read(`${dir}/chats/2026-11-12 1701 tutor.md`), saved);
+  assert.equal(JSON.parse(String(view.chat.fm.session)).pendingQuestion, jointQuestion);
+  plugin.engine.call = async () => ({ text: `Correct.\n<attempt>{"skill":${b.n},"result":"correct","assisted":false,"transfer":true,"error_type":"","error":""}</attempt>\n${session({ pendingQuestion: "", completedStep: true })}`, usage: { input: 1, cacheRead: 0, cacheWrite: 0, output: 1, costUsd: 0, calls: 1 } });
+  $(root, ".st-composer textarea").value = "T(u+v) = T(u)+T(v) = 0+0 = 0.";
+  button(root, "Send").click();
+  await tick(100);
+  const jointAttempt = (await plugin.store.loadState(dir, 4)).attempts.at(-1);
+  assert.equal(jointAttempt.concept, a.id, "joint practice assesses the selected concept even if a model tags the other one");
+  assert.equal(jointAttempt.question, jointQuestion);
 });

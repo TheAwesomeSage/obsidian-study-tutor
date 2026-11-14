@@ -69,26 +69,28 @@ export class ToolRegistry {
       return result;
     };
     if (!tool) return done({ error: `Unknown tool: ${name}.` });
-    const input = tool.validate(raw);
+    let input: unknown;
+    try { input = tool.validate(raw); } catch (error) { return done({ error: `Invalid input: ${(error as Error).message}` }); }
     if (typeof input === "string") return done({ error: `Invalid input: ${input}` });
     if (ctx.signal?.aborted) return done({ error: "Cancelled.", cancelled: true });
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
     const limit = ctx.timeoutMs ?? tool.timeoutMs;
+    const controller = new AbortController();
     const stop = new Promise<"timeout" | "cancel">((resolve) => {
       timer = setTimeout(() => resolve("timeout"), limit);
       onAbort = () => resolve("cancel");
       ctx.signal?.addEventListener("abort", onAbort);
     });
     try {
-      const work = tool.run(input, { signal: ctx.signal }).then(
+      const work = Promise.resolve().then(() => tool.run(input, { signal: controller.signal })).then(
         (r) => ({ r }),
         (e: unknown) => ({ e }),
       );
       const first = await Promise.race([work, stop]);
-      if (first === "timeout") return done({ error: `Timed out after ${Math.round(limit / 1000)}s.`, timedOut: true });
-      if (first === "cancel") return done({ error: "Cancelled.", cancelled: true });
+      if (first === "timeout") { controller.abort(); return done({ error: `Timed out after ${Math.round(limit / 1000)}s.`, timedOut: true }); }
+      if (first === "cancel") { controller.abort(); return done({ error: "Cancelled.", cancelled: true }); }
       if ("e" in first) return done({ error: (first.e as Error)?.message || String(first.e) });
       return done({ ok: true, output: first.r.output as O, assumptions: first.r.assumptions ?? [], kind: first.r.kind ?? tool.kind });
     } finally {

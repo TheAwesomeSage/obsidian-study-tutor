@@ -1,6 +1,6 @@
 # Study Tutor
 
-An Obsidian plugin that teaches you from your own notes. It has a Socratic tutor, a strict quizzer and a subject expert in a sidebar chat, plus flashcard review that uses no tokens. It runs on the Claude CLI (your Claude subscription), and is built to load as little as possible on every turn.
+An Obsidian plugin that teaches you from your own notes. It has a Socratic tutor, a strict quizzer and a subject expert in a main-workspace study view, plus flashcard review that uses no tokens. It runs on the Claude CLI (your Claude subscription), and is built to load as little as possible on every turn.
 
 Desktop only: it starts the `claude` program, which mobile Obsidian cannot do.
 
@@ -98,7 +98,7 @@ npm install
 npm test          # unit tests and a jsdom run of the view; no model calls
 npm run test:live # end-to-end against the real CLI; spends a little usage
 npm run test:features # live check of research, lessons, quiz and summaries; spends more
-npm run preview   # writes tests/out/preview.html, a static look at the sidebar design
+npm run preview   # writes tests/out/preview.html, light and dark previews at wide and narrow widths
 npm run build     # writes main.js
 ```
 
@@ -109,9 +109,20 @@ npm run build     # writes main.js
 - Used inside Obsidian on Windows only; never tried on macOS or Linux. The logic is covered by unit tests, a jsdom run of the view with a stubbed `obsidian` module, and live CLI tests.
 - Replies are not streamed; a turn appears when it is complete.
 - A model can grade maths wrongly. With SymPy switched on, results are checked and a wrong one is rewritten or flagged, but the steps of a derivation or a proof are still judged by the model alone. Treat a surprising verdict with care.
-- The concept graph covers one topic at a time. Prerequisites between topics are not recorded.
+- The course graph spans topics. Prerequisites and other relations are stored separately from learner evidence.
 - The flashcard schedule is a simple SM-2 style scheme, not FSRS.
 
 ## Licence
 
 MIT. See `LICENSE`. `NOTICE.md` lists the sources the teaching method draws on.
+
+
+## Version 0.5.1
+
+The Home screen brings together resume, topic search, review, study modes and the course graph. The study composer has an initially unset confidence slider. Adaptive mode chooses teaching, local practice and checking; Learn mode stays within guided learning. Session records and exact working survive interruption and rotation. Attempts retain grading provenance and assistance; unsupported level changes are refused.
+
+### Synoptic connections
+
+Select a concept in the Knowledge Graph and use **Suggest a synoptic connection** (one model call), or add a **synoptic** relation manually. A connection includes an explanation and a joint problem requiring both concepts. Suggested links are unreviewed until confirmed. After confirmation, **Study connection** opens the joint question in a new tutoring session. Existing sessions remain saved. The selected concept receives assessment evidence; the link itself never awards mastery to either concept or becomes a prerequisite. Rejected suggestions stay recorded so the same pair is not repeatedly suggested. Connections are symmetric and duplicates in the reverse direction are refused.
+
+Model suggestions are limited to up to 40 candidate concepts and need review for correctness and syllabus relevance. No WolframAlpha adapter is present in this version. The registered tools cover SymPy checks, vault retrieval and graph inspection. Numerical sampling and symbolic agreement have explicit limits and do not certify a complete proof.

@@ -49,7 +49,7 @@ export interface GraphColors {
   font: string;
 }
 
-const DASH: Record<Relation, number[]> = { requires: [], supports: [7, 4], applies_to: [2, 4], contrasts_with: [9, 3, 2, 3], derived_from: [1, 3] };
+const DASH: Record<Relation, number[]> = { synoptic: [10, 4, 3, 4], requires: [], supports: [7, 4], applies_to: [2, 4], contrasts_with: [9, 3, 2, 3], derived_from: [1, 3] };
 
 export class GraphCanvas {
   /** Null where there is no canvas support (a test environment): everything but drawing still works. */

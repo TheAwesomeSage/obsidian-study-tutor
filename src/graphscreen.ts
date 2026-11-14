@@ -1,3 +1,6 @@
+import { addUsage } from "./claude";
+import { sessionFor } from "./session";
+import { questionKey } from "./evidence";
 // The knowledge graph screen: every concept from every topic on one map, with search, filters,
 // colour modes and a details panel.
 //
@@ -25,7 +28,7 @@ const MODES: [ColourMode, string][] = [
   ["recency", "Last practised"],
   ["calibration", "Confidence against results"],
 ];
-const REL_LABEL: Record<Relation, string> = { requires: "Requires", supports: "Supports", applies_to: "Applies to", contrasts_with: "Contrasts with", derived_from: "Derived from" };
+const REL_LABEL: Record<Relation, string> = { synoptic: "Synoptic connections", requires: "Requires", supports: "Supports", applies_to: "Applies to", contrasts_with: "Contrasts with", derived_from: "Derived from" };
 
 export class GraphScreen implements Screen {
   private el: HTMLElement | null = null;
@@ -550,6 +553,18 @@ export class GraphScreen implements Screen {
       }
     }
 
+    const suggest = button(p, { label: "Suggest a synoptic connection", icon: "git-merge", tone: "ghost", title: "Uses one model call to propose a joint learning problem. Review before using." });
+    suggest.onclick = async () => {
+      suggest.disabled = true;
+      suggest.setText("Finding a connection...");
+      try {
+        const result = await v.plugin.engine.suggestSynoptic(c.id);
+        v.sessionUsage = addUsage(v.sessionUsage, result.usage);
+        await v.stateChanged();
+        await this.load();
+      } catch (error) { new Notice((error as Error).message); }
+      finally { suggest.disabled = false; suggest.setText("Suggest a synoptic connection"); }
+    };
     // ----- relations: the course layer -----
     const hood = neighbourhood(course, c.id);
     const rejected = course.edges.filter((e) => e.status === "rejected" && (e.from === c.id || e.to === c.id));
@@ -567,6 +582,35 @@ export class GraphScreen implements Screen {
         const os = course.concepts.get(other(e));
         const ost = os ? this.conceptState(os) : null;
         t.createDiv({ cls: "st-meta", text: [ost ? (ost.m.level === null ? "not placed" : `level ${ost.m.level}`) : "", e.status === "reviewed" ? "reviewed by you" : e.status === "rejected" ? "rejected by you" : "inferred, not yet reviewed", `from ${e.source}`].filter(Boolean).join(" · ") });
+        if (e.rationale) t.createDiv({ cls: "st-card-text", text: e.rationale });
+        if (e.challenge) {
+          t.createDiv({ cls: "st-meta", text: e.challenge });
+          const practise = button(t, { label: "Study connection", icon: "git-merge", tone: "ghost" });
+          practise.disabled = e.status !== "reviewed";
+          practise.title = e.status === "reviewed" ? "Open a joint problem; evidence is recorded for the selected concept" : "Confirm the connection before practising it";
+          practise.onclick = async () => {
+            if (v.study.busy) { new Notice("Finish or stop the current response first."); return; }
+            try {
+              await v.startStudy({ dir: c.topic, mode: "tutor", focus: c.n });
+              if (!v.chat || !v.state || !v.chatPath) return;
+              const session = sessionFor(v.chat, v.state, "tutor");
+              session.concept = c.id;
+              session.conceptName = c.name;
+              session.skill = c.n;
+              session.goal = `Synoptic study: ${name(e.from)} and ${name(e.to)}. ${e.rationale}. Assess the selected concept only; do not award mastery of both from one answer.`;
+              session.pendingQuestion = e.challenge!;
+              session.questionId = questionKey(e.challenge!);
+              session.askedAt = new Date().toISOString();
+              session.action = "transfer";
+              session.completedStep = false;
+              session.nextAction = "Check how the learner connects both concepts, then diagnose any missing foundation.";
+              v.chat.fm.session = JSON.stringify(session);
+              v.chat.messages.push({ role: "tutor", text: e.challenge! });
+              await v.plugin.store.saveChat(v.chatPath, v.chat);
+              await v.startStudy({ chatPath: v.chatPath });
+            } catch (error) { new Notice((error as Error).message); }
+          };
+        }
         const act = async (status: "reviewed" | "rejected" | "inferred") => {
           try {
             await v.plugin.store.setRelationStatus(e, status);
@@ -582,7 +626,8 @@ export class GraphScreen implements Screen {
     };
     relSection("Rests on", hood.prerequisites, (e) => e.to, () => "");
     relSection("Builds on it", hood.dependents, (e) => e.from, () => "");
-    relSection("Other relations", hood.related.filter((e) => e.status !== "rejected"), (e) => (e.from === c.id ? e.to : e.from), (e) => `${e.from === c.id ? RELATION_TEXT[e.type].out : RELATION_TEXT[e.type].back} `);
+    relSection("Synoptic connections", hood.related.filter((e) => e.status !== "rejected" && e.type === "synoptic"), (e) => (e.from === c.id ? e.to : e.from), () => "Study together with ");
+    relSection("Other relations", hood.related.filter((e) => e.status !== "rejected" && e.type !== "synoptic"), (e) => (e.from === c.id ? e.to : e.from), (e) => `${e.from === c.id ? RELATION_TEXT[e.type].out : RELATION_TEXT[e.type].back} `);
     relSection("Rejected", rejected, (e) => (e.from === c.id ? e.to : e.from), (e) => `${e.from === c.id ? RELATION_TEXT[e.type].out : RELATION_TEXT[e.type].back} `);
     if (hood.ancestors.size > hood.prerequisites.length) p.createDiv({ cls: "st-meta", text: `${hood.ancestors.size} concepts in all lie beneath this one, through its prerequisites.` });
 
@@ -598,13 +643,18 @@ export class GraphScreen implements Screen {
       const group = target.createEl("optgroup", { attr: { label: t.title } });
       for (const o of course.concepts.values()) if (o.topic === t.dir && o.id !== c.id) group.createEl("option", { value: o.id, text: o.name });
     }
+    const rationale = form.createEl("textarea", { attr: { placeholder: "Why these concepts belong together", "aria-label": "Connection explanation", maxlength: "2000" } });
+    const challenge = form.createEl("textarea", { attr: { placeholder: "A question requiring both concepts", "aria-label": "Joint question", maxlength: "4000" } });
+    const toggle = () => { rationale.hidden = challenge.hidden = type.value !== "synoptic"; };
+    type.onchange = toggle;
+    toggle();
     button(form, {
       label: "Add relation",
       icon: "plus",
       onClick: async () => {
         if (!target.value) return;
         try {
-          await v.plugin.store.addRelation({ from: c.id, to: target.value, type: type.value as Relation });
+          await v.plugin.store.addRelation({ from: c.id, to: target.value, type: type.value as Relation, ...(type.value === "synoptic" ? { rationale: rationale.value, challenge: challenge.value } : {}) });
           await v.stateChanged();
           await this.load();
         } catch (err) {
