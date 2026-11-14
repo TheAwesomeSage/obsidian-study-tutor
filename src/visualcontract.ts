@@ -96,6 +96,12 @@ export interface ModuleDescriptor {
   kinds?: PresentationKind[];
   /** Optional one-line description for the configuration prompt. */
   summary?: string;
+  /**
+   * Optional refinement: the module's own prediction question per assessment id, with {setting}
+   * placeholders ("Where does binary search find {target} in {values}?"). When present it is used
+   * instead of the local model's wording, so the question asks exactly what the assessment checks.
+   */
+  questionTemplates?: Record<string, string>;
 }
 
 /** An approved asset as the configuration step sees it: an id and a description, never a path. */

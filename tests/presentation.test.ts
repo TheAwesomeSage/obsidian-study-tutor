@@ -713,3 +713,27 @@ test("source hashes are SHA-256, matching known vectors, with line endings norma
   assert.equal(F.sha256("π ≈ 3.14159"), require("crypto").createHash("sha256").update("π ≈ 3.14159", "utf8").digest("hex"));
   assert.equal(F.contentHash("a\r\nb"), F.contentHash("a\nb"));
 });
+
+test("in Practise, a request about the open bank question configures that question's concept, and its answer counts as helped", async () => {
+  const t = await setup({ local: [arrayReply()] });
+  await t.focus(1, { 1: 3, 3: 3 });
+  const chat = await t.chatIn("quiz");
+  const asked = await t.engine.study(t.dir, chat, "");
+  assert.match(asked.reply, /What does binary search compare the target with\?/, "the weakest concept's bank question is open");
+  const r = await t.engine.study(t.dir, chat, "show me a simulation of this");
+  assert.equal(t.calls.length, 0);
+  assert.equal(r.presentation!.activity!.conceptId, (await t.store.loadState(t.dir, 4)).concepts[2], "the open question's concept, not the focus");
+  const answered = await t.engine.study(t.dir, chat, "B");
+  assert.deepEqual([answered.attempt!.result, answered.attempt!.assisted, answered.attempt!.questionId], ["correct", true, "Q3"]);
+  assert.equal(t.calls.length, 0, "the bank answer is still marked by code");
+});
+
+test("a module's own question template replaces the local model's wording; vague missing-capability text is replaced by code", async () => {
+  const templated = { ...ARRAY_TRACE, questionTemplates: { "predict-comparisons": "How many comparisons will {algorithm} make to find {target} in {values}?" } };
+  const r = await configureActivity({ request: req(), conceptId: "c", candidates: [templated], assets: [], registry: adaptRegistry(makeFixtureRegistry({ modules: [templated] }) as any), model: scriptedModel([arrayReply({ predictionQuestion: "What is the value after the first pass?" })]), catalogVersion: "c", trigger: "explicit" });
+  assert.equal(r.lesson!.predictionQuestion, "How many comparisons will binary-search make to find 25 in [3, 8, 12, 19, 25, 31, 40]?", "the question asks what the assessment checks");
+  const vague = await configure([JSON.stringify({ fits: false, objective: "how a pipe wraps around", settings: { algorithm: "linear-search", values: [1, 2, 3], target: 1 }, assetIds: [], assessmentId: "predict-comparisons", predictionQuestion: "What next?", hint: "Look again.", missingOperation: "insertion-sort" })]).run;
+  assert.equal(vague.missingCapability!.operation, "a simulation of: compares the target with the middle element", "a module value or a 'none' is not a description of what is missing");
+  const none = await configureActivity({ request: req({ objective: "Process states: running, ready and blocked" }), conceptId: "c", candidates: [], assets: [], registry: adaptRegistry(makeFixtureRegistry() as any), model: null, catalogVersion: "c", trigger: "explicit" });
+  assert.equal(none.missingCapability!.operation, "a simulation of: running, ready and blocked");
+});

@@ -12,6 +12,7 @@
     "test:session": "node esbuild.config.mjs test && node tests/out/live-session.test.cjs",
     "preview": "node esbuild.config.mjs test && node tests/out/preview.cjs",
     "preview:visuals": "node scripts/visual-preview.mjs",
+    "bench:qwen": "node esbuild.config.mjs test && node tests/out/qwen-bench.cjs",
     "test:visual-browser": "node scripts/visual-preview.mjs --build && playwright test"
   },
   "license": "MIT",
@@ -29,4 +30,5 @@
     "jsxgraph": "^1.12.2"
   }
 }
+
 

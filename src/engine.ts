@@ -595,8 +595,10 @@ export class Engine {
     const saved = (await this.store.loadActivities(p.dir)).filter((a) => a.conceptId === conceptId && a.schemaVersion === LESSON_SCHEMA_VERSION && a.promptVersion === CONFIG_PROMPT_VERSION && a.model === modelName && a.catalogVersion === catalog && same(a.sourceRefs) && (!a.moduleId || descriptors.some((d) => d.id === a.moduleId && d.version === a.moduleVersion)));
     const e = skillEvidence(p.state.attempts, n);
     const lastWrong = [...p.state.attempts].reverse().find((a) => a.skill === n && a.result !== "correct" && a.result !== "ungraded");
+    // Modules are shortlisted against the card and the source passages the activity would rest on.
+    const context = [sk.section, ...refs.map((r) => r.excerpt)].join("\n");
     const decision = choosePresentation(
-      { mode: p.mode, action: p.action, message: p.said, objective, context: sk.section, recentFailures: e.recentFailures, errorType: lastWrong?.errorType ?? "", misconception: p.state.misconceptions.length > 0, eligibility: sk.visual ?? null, descriptors, saved: saved.map((a) => ({ id: a.id, kind: a.kind, moduleId: a.moduleId, status: a.status })), preferredModuleId: p.preferredModuleId },
+      { mode: p.mode, action: p.action, message: p.said, objective, context, recentFailures: e.recentFailures, errorType: lastWrong?.errorType ?? "", misconception: p.state.misconceptions.length > 0, eligibility: sk.visual ?? null, descriptors, saved: saved.map((a) => ({ id: a.id, kind: a.kind, moduleId: a.moduleId, status: a.status })), preferredModuleId: p.preferredModuleId },
       p.visualAsk,
       p.tutorKind ?? null,
     );
@@ -628,13 +630,14 @@ export class Engine {
       // A failure saved for this concept and kind is reused; otherwise code records the gap.
       const known = saved.find((a) => a.status !== "ready" && a.kind === decision.kind && !a.moduleId) ?? null;
       const rec = known ?? (await configure([], null));
+      outcome.cacheHit = !!known;
       if (!known) await this.store.saveActivity(p.dir, rec);
       return this.declined(p.dir, p.topic, n, outcome, rec, conceptId, !!known, log);
     }
     // configure: a saved configuration (or saved failure) for exactly these sources and versions
     // is reused first, so a repeated failure never runs the local model again.
     if (!this.visuals) return this.declined(p.dir, p.topic, n, outcome, null, conceptId, false, log);
-    const candidates = matchModules(`${objective}\n${sk.section}\n${p.said}`, decision.kind, descriptors, decision.moduleId ?? undefined).map((m) => m.descriptor);
+    const candidates = matchModules(`${objective}\n${context}\n${p.said}`, decision.kind, descriptors, decision.moduleId ?? undefined).map((m) => m.descriptor);
     const hit = saved.find((a) => a.kind === decision.kind && a.moduleId === candidates[0]?.id && a.objective === objective) ?? null;
     let rec: ActivityRecord;
     if (hit) {
@@ -894,7 +897,13 @@ export class Engine {
     // activity a module supports is answered here: a saved one reopens, a new one is configured
     // by the local model, and either way Claude is not called. So is a request that cannot be
     // met when the course has a worked lesson to offer instead.
-    const presented = await this.presentationFor({ dir, topic, state, mode, action: decision?.action ?? null, said, visualAsk, chatPath });
+    // The concept a request is about is the open question's: a pending bank question in Practise,
+    // or the concept the open question was asked on; otherwise the focus.
+    const card = fmStr(chat.fm, "card");
+    const cardSkill = card ? (await this.store.loadQuestions(dir)).find((q) => q.id === card)?.subskill : undefined;
+    const askedOn = before.concept ? Number(Object.entries(state.concepts).find(([, id]) => id === before.concept)?.[0] ?? NaN) : NaN;
+    const about = cardSkill !== undefined && cardSkill in state.names ? cardSkill : Number.isFinite(askedOn) ? askedOn : undefined;
+    const presented = await this.presentationFor({ dir, topic, state, mode, action: decision?.action ?? null, said, visualAsk, chatPath, concept: about });
     if (presented && presented.decision.trigger === "explicit" && (presented.lesson || (presented.decision.status !== "text" && presented.fallback))) {
       return this.presentLocally({ chatPath, chat, state, session, outcome: presented, decision });
     }
@@ -1150,7 +1159,7 @@ export class Engine {
     if (presented) out.presentation = presented;
     else if (proposal.kind) {
       // The tutor's proposal can only become an offer, and only for a module that exists.
-      const offered = await this.presentationFor({ dir, topic, state, mode, action: decision?.action ?? null, said, visualAsk: null, tutorKind: proposal.kind, chatPath });
+      const offered = await this.presentationFor({ dir, topic, state, mode, action: decision?.action ?? null, said, visualAsk: null, tutorKind: proposal.kind, chatPath, concept: about });
       if (offered) out.presentation = offered;
     }
 

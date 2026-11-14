@@ -1,0 +1,165 @@
+{
+ "note": "Ten real excerpts from the learner's Software Systems notes, used read-only. Only paths, line ranges and SHA-256 of the excerpt text are stored; the benchmark reads the text from the vault and refuses to run if a hash differs. Objectives and expected routes were written before any model was run. Expected routes are for the algorithm module (numeric arrays: index, bubble sort, linear and binary search).",
+ "excerpts": [
+  {
+   "id": "E01",
+   "path": "Software Systems/Notes/Introduction to Software Systems.md",
+   "lines": [
+    17,
+    17
+   ],
+   "sha256": "d590a8eb7be5489b0408f99108fe27f3eaa3837d525e1469a6c342b12d859730",
+   "words": 25,
+   "kind": "simulation",
+   "objective": "Memory as an array of bytes: a byte is read or written by giving its address, like reading an array element by its position",
+   "expected": {
+    "route": "module",
+    "reason": "algorithm (index): reading one element by its zero-based position is what the module traces; virtual-to-physical mapping is not shown"
+   }
+  },
+  {
+   "id": "E02",
+   "path": "Software Systems/Notes/Introduction to Software Systems.md",
+   "lines": [
+    40,
+    42
+   ],
+   "sha256": "e63f0cd563875825bd59a99d557a96f89bea2c64fbbf0c622a1980880f076491",
+   "words": 49,
+   "kind": "simulation",
+   "objective": "argv holds the program path in argv[0] and the user's arguments in argv[1] to argv[argc-1]",
+   "expected": {
+    "route": "unsupported",
+    "reason": "elements are strings (character pointers); the module's arrays are integers only"
+   }
+  },
+  {
+   "id": "E03",
+   "path": "Software Systems/Notes/Process Management II.md",
+   "lines": [
+    92,
+    104
+   ],
+   "sha256": "17ba4a85ae494679ac3b4d5a1d0167792d8f2af451e950d4e264e7b3c455e8ab",
+   "words": 253,
+   "kind": "simulation",
+   "objective": "A pipe is a fixed-size circular buffer: the read and write indices wrap around, and the writer or reader blocks when it is full or empty",
+   "expected": {
+    "route": "unsupported",
+    "reason": "needs a circular buffer with two wrapping indices and blocking; no module has it"
+   }
+  },
+  {
+   "id": "E04",
+   "path": "Software Systems/Quiz/Question Bank.md",
+   "lines": [
+    1691,
+    1694
+   ],
+   "sha256": "8faf659eb12b595ef188c17903bcb5613121adadda9ed9f43a35de856f172825",
+   "words": 62,
+   "kind": "simulation",
+   "objective": "sort orders lines alphabetically, character by character, so 5 comes after 30; sort -r reverses that order",
+   "expected": {
+    "route": "unsupported",
+    "reason": "needs lexicographic string comparison; the module's bubble sort orders numbers ascending, which would teach the wrong order"
+   }
+  },
+  {
+   "id": "E05",
+   "path": "Software Systems/Quiz/Question Bank.md",
+   "lines": [
+    895,
+    904
+   ],
+   "sha256": "2c7b2a1d62f0b7932a80221c61cef485ef40a19907e8b69fd35092be77bb999c",
+   "words": 160,
+   "kind": "simulation",
+   "objective": "Two threads touching disjoint odd and even indices of a shared array need no synchronisation",
+   "expected": {
+    "route": "unsupported",
+    "reason": "needs two concurrent threads over disjoint index sets; a single-threaded trace cannot show it"
+   }
+  },
+  {
+   "id": "E06",
+   "path": "Software Systems/Quiz/Question Bank.md",
+   "lines": [
+    909,
+    929
+   ],
+   "sha256": "5d9594bb688e6be9bec084e5bdb73d3a13f9d952ed96a7b0b5ce25fdb3eb08b0",
+   "words": 264,
+   "kind": "simulation",
+   "objective": "The check, read and increment of index_counter must be one critical section, or two threads can take indexes 999 and 1000",
+   "expected": {
+    "route": "unsupported",
+    "reason": "needs interleaved threads on a check-then-act sequence"
+   }
+  },
+  {
+   "id": "E07",
+   "path": "Software Systems/Notes/Concurrency and Synchronisation I.md",
+   "lines": [
+    90,
+    101
+   ],
+   "sha256": "dcf1e298512c06e91067ea5102e46ec6f9bc87ecd500e7e27766ec6a2bf75c5c",
+   "words": 136,
+   "kind": "simulation",
+   "objective": "A race condition: unsynchronised threads updating a shared counter give a result that depends on their timing",
+   "expected": {
+    "route": "unsupported",
+    "reason": "needs a thread-interleaving trace of a shared counter"
+   }
+  },
+  {
+   "id": "E08",
+   "path": "Software Systems/Notes/Concurrency and Synchronisation II.md",
+   "lines": [
+    15,
+    25
+   ],
+   "sha256": "efb793e431108fbd67ec1e95c53d6601071b386daba54a1798a8f3f368f77358",
+   "words": 159,
+   "kind": "simulation",
+   "objective": "A test-and-set spinlock built from a separate read and write fails when the scheduler interrupts between them",
+   "expected": {
+    "route": "unsupported",
+    "reason": "needs a scheduler interleaving trace with an atomic instruction"
+   }
+  },
+  {
+   "id": "E09",
+   "path": "Software Systems/Notes/Process Management I.md",
+   "lines": [
+    36,
+    44
+   ],
+   "sha256": "a795606168608db78097c1e9d1f1d356a15dc6463983b74f27bb0634f5386ca8",
+   "words": 89,
+   "kind": "diagram",
+   "objective": "A process moves between the running, ready and blocked states",
+   "expected": {
+    "route": "text",
+    "reason": "a stable state diagram: the tutor draws it in the reply; no module needed"
+   }
+  },
+  {
+   "id": "E10",
+   "path": "Software Systems/Software Systems Revision Guide.md",
+   "lines": [
+    167,
+    168
+   ],
+   "sha256": "b6ab3b22b09b5ba7773afbc4437088aaa4122396e0188c329d4a0e5b4a82941a",
+   "words": 64,
+   "kind": "simulation",
+   "objective": "A file descriptor is an index into the process's descriptor table, whose entries point into the system-wide open file table",
+   "expected": {
+    "route": "unsupported",
+    "reason": "needs a two-level table of references with offsets and reference counts"
+   }
+  }
+ ]
+}

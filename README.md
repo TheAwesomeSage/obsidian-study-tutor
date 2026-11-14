@@ -29,7 +29,7 @@ Use **New topic** (the **+**, a button on Home, or the command "Study Tutor: New
 
 Give a level in the Goal box (for example "second-year university"). With a spec or a bare subject you can switch on **Research on the web**: the compile step then searches for what courses at that level cover and cites its sources. This is the only time any tool is enabled, and only web search and fetch.
 
-The topic is **compiled once** into a topic card (concepts, key claims with links back to your notes, common misconceptions), a question bank, and a course graph of how its concepts depend on one another.
+The topic is **compiled once** into a topic card (objectives, concepts, key claims with links back to your notes, common misconceptions, a short worked example each), a question bank grouped into question families with rubrics for open answers, a course graph of how its concepts depend on one another, and a course package (`package.md`) that shows which objectives are covered by lessons and questions and which are not. **Recompile from notes** compares each note with the fingerprint taken at the last compile: with no change it calls no model, a change that reaches a few subskills rewrites only those (keeping every other section, question and review schedule), and new notes get a full compile.
 
 ### Home
 
@@ -74,6 +74,17 @@ Every concept from every topic on one map, drawn by the plugin with no tokens. T
 - Select a concept for its details: its level and whether your answers back it, the suggested next step (**Study this**), its evidence, and what it rests on and what builds on it. Relations read from the topic card are marked inferred; confirm (✓) or reject (✕) each one. **Add a relation or set priority** adds a link by hand or changes how strongly the concept is preferred. Only "requires" orders study; supports, applies to, contrasts with and derived from are for understanding.
 - **Suggest a synoptic connection** (one model call) proposes a link to another concept, with an explanation and a joint problem that needs both. It stays unreviewed until you confirm it, and then **Study connection** opens the joint problem in a new session. A connection never awards mastery.
 - Estimated success is a provisional estimate that your next unaided first answer on the concept is fully correct. It is shown only once there are three unaided answers.
+
+### Diagrams, simulations and games
+
+Interactive activities are used on demand. Opening a topic, a note or a concept in the graph never starts one.
+
+- **Ask for one** ("show me a simulation", "can I see a diagram?") in any study mode. A saved activity opens at once. A new one is configured from a short excerpt of your notes by a small model on this computer through [Ollama](https://ollama.com), and the reply says why it was chosen. Claude is never called for this. If no module can show the idea, you are told so, the compiled worked example is shown instead, and the request is noted in `_logs/capability-requests.md`.
+- **The guide may offer one** beside its reply in Adaptive, Practise and Master, but only for a repeated difficulty of a known kind on a concept the course marked as suited to it. It is configured only if you open it. The tutor's reply may suggest one too; that can only become an offer, for a module that exists.
+- Moving the controls, playing, stepping and resetting use no model at all. An answer inside an activity is marked by the module's own code and counts as helped work: it can show "can do with help" and never counts as unaided evidence. Opening an activity while a question is open makes your answer to that question helped.
+- Saved activities live in each topic's `activities.md`, with the sources (path and SHA-256 of the excerpt), module, schema, model, prompt and catalogue versions, timing and model-call counts. One is reused only while all of those are unchanged; a configuration that failed its checks is saved too, so it is not tried again.
+
+Local configuration needs Ollama running with `qwen2.5:3b` (`ollama pull qwen2.5:3b`). Settings → Study Tutor → **Interactive activities** has the switch, the model name and a **Test** button. Only a local server (127.0.0.1 or localhost) is ever used.
 
 ### The ⋯ menu and settings
 
@@ -122,12 +133,17 @@ Tutor/
     policy.md               how levels and study choices are decided, for reading
     subjects/               one short card per field; add your own
   _logs/decisions.md        what the study guide chose and why, for comparing policies
+  _logs/capability-requests.md  activities learners asked for that no module has yet
   Topics/<topic>/
     topic.md                the compiled topic card
     questions.md            the question bank
     graph.md                the course graph: concept ids and relations, no progress
     state.md                levels, misconceptions, review schedule
     evidence.md             every marked answer and level change, with how it was marked
+    package.md              the course package: objectives and their coverage, worked lessons,
+                            question families, rubrics, sources, visual eligibility
+    activities.md           saved activity configurations (and saved failures)
+    activity-log.md         why each activity was chosen, whether it was opened, assessed answers
     flashcards.md           optional export
     chats/                  one file per chat part
     sessions/               a readable record of where each chat stands
@@ -152,6 +168,8 @@ npm run test:features # live check of research, lessons, quiz and summaries; spe
 npm run test:session # a scripted live study session: hints, reveals, a restart, a dispute, a cross-topic prerequisite, cache use per turn
 npm run preview   # writes tests/out/preview.html, light and dark previews at wide and narrow widths
 npm run build     # writes main.js
+STUDY_VAULT=<vault> VISUAL_REGISTRY=<bundled registry.cjs> npm run bench:qwen
+                  # local-model benchmark on ten real excerpts listed in bench/; needs Ollama
 ```
 
 `npm test` also runs the SymPy checker's Python against a labelled set of checks when a Python with SymPy is on the machine (set `SYMPY_PYTHON` to choose one); without it that one test is skipped. To run the same set through the real in-browser worker, serve `tests/out/` over HTTP after `npm run preview` and open `sympy.html`; the page title ends as "SYMPY PASSED".

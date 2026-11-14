@@ -154,6 +154,30 @@ const CODE = /<\s*script|javascript:|\beval\s*\(|\bfunction\s*\(|=>|\brequire\s*
 const PATHISH = /(^|\s)([a-z]:\\|\.\.\/|\/(usr|etc|home|var|bin)\/)|https?:\/\/|file:\/\//i;
 const LEAK = /\b(the answer is|answer:|it (will )?(equals?|is exactly)|=\s*-?\d)/i;
 
+/**
+ * A module-owned question for an assessment, with {setting} placeholders filled from the
+ * lesson's settings. Used instead of the local model's wording when the module provides one,
+ * so the question always asks what the module's assessment actually checks.
+ */
+export function templateQuestion(d: ModuleDescriptor, assessmentId: string, settings: JsonObject): string | null {
+  const t = d.questionTemplates?.[assessmentId];
+  if (!t) return null;
+  return t.replace(/\{(\w+)\}/g, (all, k: string) => (k in settings ? (Array.isArray(settings[k]) ? `[${(settings[k] as unknown[]).join(", ")}]` : String(settings[k])) : all));
+}
+
+const VAGUE = /^(none|n\/?a|nothing|unsupported|not applicable|none of the (above|provided operations?)|unknown|a simulation of this idea)\b/i;
+
+/**
+ * What the local model said is missing, when it said something usable. A blank, a "none", or
+ * the name of something the module already does is replaced by a plain description from code.
+ */
+export function missingFrom(text: string, d: ModuleDescriptor | undefined, objective: string, kind: PresentationKind): string {
+  const t = text.trim().replace(/\s+/g, " ");
+  const known = new Set(Object.values(((d?.settingsSchema.properties ?? {}) as Record<string, { enum?: unknown[] }>)).flatMap((p) => (Array.isArray(p.enum) ? p.enum.map(String) : [])).map((x) => x.toLowerCase()));
+  const usable = t.split(" ").length >= 3 && !VAGUE.test(t) && !known.has(t.toLowerCase()) && !/^none of\b/i.test(t);
+  return usable ? t.slice(0, 120) : `a ${kind} of: ${objective.split(":").slice(-1)[0].trim().slice(0, 100)}`;
+}
+
 export interface Checked {
   lesson: VisualLesson | null;
   fits: boolean;
@@ -182,7 +206,8 @@ export function checkConfiguration(text: string, req: PresentationRequest, d: Mo
     settings: o.settings as JsonObject,
     assetIds: (o.assetIds as string[]) ?? [],
     assessmentId: String(o.assessmentId),
-    predictionQuestion: String(o.predictionQuestion).trim(),
+    // The module's own question for its assessment, when it has one; otherwise the model's wording.
+    predictionQuestion: templateQuestion(d, String(o.assessmentId), o.settings as JsonObject) ?? String(o.predictionQuestion).trim(),
     hint: String(o.hint).trim(),
   };
   // 2. ids
@@ -261,9 +286,9 @@ export async function configureActivity(p: ConfigureInput): Promise<ActivityReco
     selectionReason: p.request.reason,
     ...over,
   });
-  const missing = (operation: string): MissingCapability => ({ operation: operation.slice(0, 120) || `a ${p.request.kind} of this idea`, objective: p.request.objective, kind: p.request.kind, motivatingTask: p.request.reason });
+  const missing = (operation: string): MissingCapability => ({ operation: missingFrom(operation, d, p.request.objective, p.request.kind), objective: p.request.objective, kind: p.request.kind, motivatingTask: p.request.reason });
 
-  if (!d) return base({ status: "unsupported", reason: `No module can show this as a ${p.request.kind} yet.`, missingCapability: missing(`a ${p.request.kind} of ${p.request.objective.split(/[:.]/)[0]}`) });
+  if (!d) return base({ status: "unsupported", reason: `No module can show this as a ${p.request.kind} yet.`, missingCapability: missing("") });
   if (!d.assessmentIds.length) return base({ status: "invalid", reason: `${d.id} declares no assessment, so it cannot be used for a lesson.`, validationErrors: ["descriptor has no assessmentIds"] });
   if (!p.model) return base({ status: "invalid", reason: "Local configuration is switched off, and there is no saved activity for this.", validationErrors: ["no local model"], transient: true });
 

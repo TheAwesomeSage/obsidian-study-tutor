@@ -130,6 +130,8 @@ export class OllamaClient implements LocalModel {
       stream: false,
       format: ollamaSchema(o.schema),
       keep_alive: this.keepAlive,
+      // Thinking models (qwen3) would spend most of a small budget on hidden reasoning.
+      ...(/^qwen3/i.test(this.model) ? { think: false } : {}),
       options: { temperature: o.temperature ?? 0.1, num_predict: o.maxTokens ?? 400, num_ctx: this.numCtx, seed: o.seed ?? 7 },
       messages: [
         { role: "system", content: o.system },

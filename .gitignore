@@ -7,3 +7,4 @@ test-results/
 tests/out/
 *.map
 release/
+bench/out/
