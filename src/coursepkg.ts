@@ -6,6 +6,7 @@
 // the subskills whose notes changed. Pure functions, no Obsidian imports.
 
 import type { Question, Topic } from "./formats";
+import type { StagedCourse } from "./compiler";
 
 export const PACKAGE_VERSION = 1;
 
@@ -63,6 +64,18 @@ export interface CoursePackage {
   sources: Record<string, string>;
   coverage: { objectives: number; covered: number; missing: string[]; subskillsWithoutQuestions: number[]; lessonsWithoutWorked: number[]; complete: boolean };
   refreshed: { at: string; subskills: number[]; notes: string[] }[];
+  /** Staged compilation metadata. Absent on courses built before staged compilation. */
+  staged?: StagedCourse;
+}
+
+export function withStagedCoverage(pkg: CoursePackage, staged: StagedCourse): CoursePackage {
+  const availability = new Map(staged.availability.map(a => [a.objective, a]));
+  const objectives = staged.inventory.map(o => {
+    const a = availability.get(o.id);
+    return { id: o.id, text: o.text, source: o.references.join(", "), subskills: a?.lessons ?? [], questions: a?.questions ?? [], covered: !!a && !a.gaps.length };
+  });
+  const missing = objectives.filter(o => !o.covered).map(o => o.id);
+  return { ...pkg, objectives, objectivesFrom: "card", staged, coverage: { ...pkg.coverage, objectives: objectives.length, covered: objectives.length - missing.length, missing, complete: staged.status === "complete" } };
 }
 
 const linkName = (l: string): string => l.replace(/^\[\[|\]\]$/g, "").split(/[|#]/)[0].trim();
@@ -131,6 +144,10 @@ export function buildPackage(p: { topic: Topic; questions: Question[]; concepts:
 /** One line on coverage, for the compile notice and the topic page. */
 export function coverageLine(pkg: CoursePackage): string {
   const c = pkg.coverage;
+  if (pkg.staged) {
+    const a = pkg.staged.availability;
+    return `${c.covered}/${c.objectives} objectives verified · ${a.filter(x => x.sources.length).length} with sources · ${a.filter(x => x.lessons.length).length} with lessons · ${a.filter(x => x.questions.length).length} with assessment${c.missing.length ? ` · ${c.missing.length} still have gaps (see course package)` : ""}.`;
+  }
   const parts = [`${c.covered} of ${c.objectives} ${pkg.objectivesFrom === "card" ? "objectives" : "subskills"} covered by lessons and questions`];
   if (c.missing.length) parts.push(`not covered: ${c.missing.join(", ")}`);
   if (c.subskillsWithoutQuestions.length) parts.push(`no questions for subskill ${c.subskillsWithoutQuestions.join(", ")}`);

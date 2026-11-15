@@ -27,9 +27,11 @@ Use **New topic** (the **+**, a button on Home, or the command "Study Tutor: New
 - a spec or syllabus note,
 - the subject alone, with no notes.
 
-Give a level in the Goal box (for example "second-year university"). With a spec or a bare subject you can switch on **Research on the web**: the compile step then searches for what courses at that level cover and cites its sources. This is the only time any tool is enabled, and only web search and fetch.
+Give a level in the Goal box (for example "second-year university"). With a spec or a bare subject you can switch on **Research on the web**. Set `BRAVE_SEARCH_API_KEY` in the environment Obsidian inherits before launching it. The plugin sends topical queries to [Brave Search](https://api-dashboard.search.brave.com/api-reference/web/search/get) and reads selected public pages; the key stays out of the vault and the Claude CLI. If search is unavailable, compilation can still use the material you provided, and the package shows what it could not verify. Research is optional.
 
-The topic is **compiled once** into a topic card (objectives, concepts, key claims with links back to your notes, common misconceptions, a short worked example each), a question bank grouped into question families with rubrics for open answers, a course graph of how its concepts depend on one another, and a course package (`package.md`) that shows which objectives are covered by lessons and questions and which are not. **Recompile from notes** compares each note with the fingerprint taken at the last compile: with no change it calls no model, a change that reaches a few subskills rewrites only those (keeping every other section, question and review schedule), and new notes get a full compile.
+Compilation builds a concise topic card, a question bank, a concept graph and a course package (`package.md`). The package keeps fuller worked lessons and shows the source evidence, teaching and assessment available for each objective. Long inputs are read in batches; the report lists original specification text that could not be mapped. Ollama can select passages from long notes or research pages. When it is off or unavailable, compilation uses text matching.
+
+The progress notice has a **Cancel** button. Finished source work is cached for another run. A partial recompile is saved beside the previous course. An unchanged complete course can be reopened from **Recompile from notes** without calling a model. Changed courses verify the objective inventory again. To study a missing prerequisite or go beyond the specification, run **Study Tutor: Compile a linked prerequisite or extension** from the command palette and choose the concept to start from.
 
 ### Home
 

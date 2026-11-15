@@ -123,7 +123,9 @@ export function callClaude(opts: CallOptions): Promise<CallResult> {
     if (opts.effort) args.push("--effort", opts.effort);
     if (opts.jsonSchema) args.push("--json-schema", JSON.stringify(opts.jsonSchema));
 
-    const child = spawn(opts.claudePath, args, { cwd: dir, windowsHide: true, env: process.env });
+    const env = { ...process.env };
+    delete env.BRAVE_SEARCH_API_KEY;
+    const child = spawn(opts.claudePath, args, { cwd: dir, windowsHide: true, env });
     let out = "";
     let err = "";
     let settled = false;

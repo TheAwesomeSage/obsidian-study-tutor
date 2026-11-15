@@ -8,7 +8,10 @@ import { Attempt, EVIDENCE_RULES, Grading, Outcome, TASK_TYPES, TaskType, checkD
 import { Chat, Frontmatter, Grade, LearnerState, Mode, NextStep, Prereqs, Question, SourceMode, Topic, addDays, answerText, applyStateUpdate, chatWords, codeMark, contentHash, differentNumbers, extractStateTrailer, fmList, fmNum, fmStr, formatQuizQuestion, givesUp, looksLikeQuestion, mastery, mcqLetter, parseCompileOutput, parseMcqReply, parseQuestions, parseTopic, placementQuestions, prereqGaps, sameShortAnswer, schedule, setLevel, splitFrontmatter, stateForPrompt, words, ymd } from "./formats";
 import { ACTION_GUIDE, ACTION_LABEL, Action, DEFAULT_WEIGHTS, Decision, POLICY_VERSION, PolicyInput, PolicyWeights, PrereqCheck, decide, homeStep } from "./policy";
 import { ActivityRecord, CONFIG_PROMPT_VERSION, LESSON_SCHEMA_VERSION, configureActivity, toResult } from "./configure";
-import { CoursePackage, buildPackage, coverageLine, mergeRefresh, sourceChanges, subskillSections } from "./coursepkg";
+import { CoursePackage, buildPackage, coverageLine, mergeRefresh, sourceChanges, subskillSections, withStagedCoverage } from "./coursepkg";
+import { checkCompilation, compileCourse, CompileCancelled, type CompileMetrics, type ExpansionRequest, type StagedCourse } from "./compiler";
+import type { ResearchLimits, ResearchProvider } from "./compile-research";
+import type { SourceRevision } from "./compile-sources";
 import { DEFAULT_LOCAL_MODEL, LocalModel } from "./ollama";
 import { ExplicitRequest, PRESENT_RULE, PresentationDecision, choosePresentation, extractPresent, matchModules, presentationNote, readPresentationRequest } from "./presentation";
 import { AssessmentResult, GenerationResult, ModuleDescriptor, ModuleRegistry, PresentationKind, PresentationRequest, SourceRef, VisualLesson } from "./visualcontract";
@@ -48,7 +51,7 @@ function taskTypeFor(askedUnder: string, mode: Mode, tag: Record<string, unknown
   if (askedUnder.startsWith("diagnose")) return "application";
   return "";
 }
-import { GRADE_SCHEMA, buildCompileInput, buildRefreshInput, buildSystem, buildTurnInput, modeFile, topicForPrompt, utilityPrompt } from "./prompts";
+import { GRADE_SCHEMA, buildRefreshInput, buildSystem, buildTurnInput, modeFile, topicForPrompt, utilityPrompt } from "./prompts";
 import { Route, routeTurn } from "./router";
 import { Intent, SESSION_RULES, SessionRecord, applyIntent, readIntent, readSessionReply, sessionFor } from "./session";
 import { ExternalPrereq, Store } from "./store";
@@ -65,6 +68,7 @@ export interface EngineSettings {
   maxChatWords: number;
   maxTopicWords: number;
   singlePassWords: number;
+  researchLimits?: Partial<ResearchLimits>;
   /** True when another plugin keeps the flashcard schedule; this one then records no schedule of its own. */
   externalFlashcards?: boolean;
   /** Let SymPy compute and check the maths: typed answers, and the tutor's own results. */
@@ -154,6 +158,7 @@ export const looksMathematical = (card: string): boolean => (card.match(/\$[^$\n
 export interface Material {
   name: string;
   text: string;
+  path?: string;
 }
 
 export interface CompileRequest {
@@ -166,6 +171,10 @@ export interface CompileRequest {
   existingDir?: string;
   /** Let the compile call search the web. Costs more; off unless asked for. */
   research?: boolean;
+  signal?: AbortSignal;
+  truncated?: boolean;
+  expansion?: ExpansionRequest;
+  savedSources?: SourceRevision[];
 }
 
 export interface CompileResult {
@@ -182,10 +191,10 @@ export interface CompileResult {
   refresh?: "unchanged" | "partial" | "full";
   subskillsRefreshed?: number[];
   why?: string;
+  status?: "complete" | "partial";
+  metrics?: CompileMetrics;
+  preservedCourse?: string;
 }
-
-const BATCH_WORDS = 3000;
-const PARALLEL = 3;
 
 const MODE_NAME: Record<Mode, string> = { auto: "Adaptive", teach: "Learn", quiz: "Practise", tutor: "Master", expert: "Ask" };
 const TEACHING: string[] = ["explain", "worked-example", "re-explain"];
@@ -213,6 +222,9 @@ export class Engine {
   visuals: ModuleRegistry | null = null;
   /** The local model that configures existing modules on a cache miss. Null when off or absent. */
   local: LocalModel | null = null;
+  /** Uses the same serial client as visual activities in the desktop plugin. */
+  compilationLocal: LocalModel | null = null;
+  researchProvider: ResearchProvider | null = null;
   readonly tools = new ToolRegistry();
 
   constructor(
@@ -1383,77 +1395,84 @@ export class Engine {
     chat.fm.session = JSON.stringify(record);
   }
 
-  /**
-   * Turns notes, a spec or a bare subject into a topic card and question bank.
-   * Small inputs take one call. Large inputs fan out to parallel extraction calls on the
-   * cheap model, and one synthesis call then works from the extracts.
-   */
+  /** Plan, collect evidence and verify a candidate before writing the topic. */
   async compile(req: CompileRequest, onProgress: (msg: string) => void = () => {}): Promise<CompileResult> {
     const s = this.settings();
-    let usage = zeroUsage();
-    let agents = 0;
-    let material = req.material.map((m) => `## [[${m.name}]]\n${m.text.trim()}`).join("\n\n");
-
-    if (req.mode !== "subject" && words(material) > s.singlePassWords) {
-      const batches = batchMaterial(req.material, BATCH_WORDS);
-      const extractPrompt = utilityPrompt(await this.store.skill("utility.md"), "extract");
-      const results: string[] = new Array(batches.length).fill("");
-      let next = 0;
-      let done = 0;
-      onProgress(`Reading ${req.material.length} notes in ${batches.length} ${batches.length === 1 ? "batch" : "parallel batches"}…`);
-      const worker = async () => {
-        while (next < batches.length) {
-          const i = next++;
-          const r = await this.call({ model: s.utilityModel, system: extractPrompt, input: batches[i], timeoutMs: 300000 });
-          results[i] = r.text.trim();
-          usage = addUsage(usage, r.usage);
-          onProgress(`Read ${++done} of ${batches.length} batches…`);
-        }
-      };
-      await Promise.all(Array.from({ length: Math.min(PARALLEL, batches.length) }, worker));
-      agents = batches.length;
-      material = results.join("\n\n");
-    }
-
-    onProgress("Building the topic card and question bank…");
+    checkCompilation(req.signal);
     const subjects = await this.store.subjectNames();
-    const res = await this.call({
-      model: s.compileModel,
-      system: await this.store.skill("compile.md"),
-      input: buildCompileInput({ title: req.title, mode: req.mode, goal: req.goal, subjects, material: req.mode === "subject" ? "" : material, research: req.research }),
-      // The web tools are the only tools ever enabled, and only for this one call.
-      tools: req.research ? ["WebSearch", "WebFetch"] : undefined,
-      timeoutMs: 900000,
+    const candidate = await compileCourse({
+      ...req, model: s.compileModel, subjects, skill: await this.store.skill("compile.md"), singlePassWords: s.singlePassWords,
+      limits: s.researchLimits, progress: onProgress, provider: this.researchProvider, local: this.compilationLocal,
+      cache: { read: key => this.store.readCompileCache(key), write: (key, value) => this.store.writeCompileCache(key, value) },
+      call: o => this.call(o),
     });
-    usage = addUsage(usage, res.usage);
-
-    const parsed = parseCompileOutput(res.text);
-    const topic = parseTopic(parsed.topicBody);
-    const questions = parseQuestions(parsed.questionsBody);
-    if (topic.subskills.length < 2 || !questions.length) {
-      throw new ClaudeError(`The compiled output was not in the expected format (${topic.subskills.length} subskills, ${questions.length} questions). It began: ${res.text.slice(0, 200)}`);
-    }
-    const subject = subjects.includes(parsed.subject) ? parsed.subject : "none";
-    const previous = req.existingDir ? await this.store.loadPackage(req.existingDir).catch(() => null) : null;
+    const existing = req.existingDir ? await this.store.loadPackage(req.existingDir).catch(() => null) : null;
+    const preserve = candidate.staged.status === "partial" && !!req.existingDir;
+    checkCompilation(req.signal);
+    onProgress("Saving the compiled course…");
+    const subject = subjects.includes(candidate.subject) ? candidate.subject : "none";
     const dir = await this.store.saveCompiled({
-      title: req.title,
-      fm: { source: req.mode, subject, goal: req.goal.trim(), research: req.research ? "yes" : "no", ...req.fm },
-      topicBody: parsed.topicBody,
-      questionsBody: parsed.questionsBody,
+      title: preserve ? `${req.title} (partial)` : req.title,
+      fm: { source: req.mode, subject, goal: req.goal.trim(), research: req.research ? "yes" : "no", ...req.fm, ...(preserve ? { candidate_of: req.existingDir! } : {}) },
+      topicBody: candidate.topicBody,
+      questionsBody: candidate.questionsBody,
       target: s.targetLevel,
-      existingDir: req.existingDir,
+      existingDir: preserve ? undefined : req.existingDir,
     });
-    const pkg = await this.writePackage(dir, req, previous);
-    return { dir, subskills: topic.subskills.length, questions: questions.length, usage, agents: agents + 1, coverage: coverageLine(pkg), complete: pkg.coverage.complete };
+    const pkg = await this.writePackage(dir, req, preserve ? null : existing, undefined, candidate.staged);
+    return { dir, subskills: pkg.lessons.length, questions: parseQuestions(candidate.questionsBody).length, usage: candidate.usage, agents: candidate.calls,
+      status: candidate.staged.status, coverage: coverageLine(pkg), complete: pkg.coverage.complete, metrics: candidate.staged.metrics, preservedCourse: preserve ? req.existingDir : undefined };
+  }
+
+  /** Compiler boundary for a single missing prerequisite or requested beyond-spec application. */
+  async expandCourse(request: ExpansionRequest, signal?: AbortSignal, progress?: (message: string) => void, existingDir?: string): Promise<
+    { status: "complete" | "partial"; result: CompileResult; availability: StagedCourse["availability"] } |
+    { status: "cancelled" | "failed"; reason: string }
+  > {
+    try {
+      checkCompilation(signal);
+      const gap = request.gap.trim();
+      if (!gap || gap.length > 600 || !["prerequisite", "extension"].includes(request.kind)) throw new Error("Specify one prerequisite or beyond-spec application.");
+      if (!(await this.store.listTopics()).some(t => t.dir === request.anchorDir)) throw new Error("Select an existing topic to extend.");
+      const topic = await this.store.loadTopic(request.anchorDir);
+      const pkg = await this.store.loadPackage(request.anchorDir);
+      const state = await this.store.loadState(request.anchorDir, this.settings().targetLevel);
+      const concept = request.anchorConcept && Object.entries(state.concepts).find(([, id]) => id === request.anchorConcept);
+      const objective = request.anchorObjective && pkg?.objectives.find(o => o.id === request.anchorObjective);
+      if (!concept && !objective) throw new Error("Select an existing concept or objective to extend.");
+      if (existingDir && (await this.store.loadPackage(existingDir))?.staged?.expansion?.anchorDir !== request.anchorDir) throw new Error("The linked topic no longer matches this expansion.");
+      const anchor = objective ? objective.text : concept ? state.names[Number(concept[0])] : topic.title;
+      const label = request.kind === "extension" ? "Beyond specification" : "Prerequisite";
+      const savedSources = await this.store.compiledSources(request.anchorDir);
+      const anchorNotes: Material[] = [];
+      if (!savedSources.length && this.readSource) {
+        const refs = concept ? topic.subskills.find(s => s.n === Number(concept[0]))?.sources ?? [] : fmList(topic.fm, "sources");
+        for (const ref of [...new Set(refs)].slice(0, 8)) {
+          checkCompilation(signal);
+          const name = ref.replace(/^\[\[|\]\]$/g, "");
+          const source = await this.readSource(name).catch(() => null);
+          if (source) anchorNotes.push({ name, ...source });
+        }
+      }
+      const result = await this.compile({
+        title: `${label}: ${gap.slice(0, 100)}`, mode: "notes", goal: `${label} for ${topic.title} — ${anchor}. ${gap}`,
+        material: anchorNotes, savedSources, signal, expansion: { ...request, gap }, research: request.research, existingDir,
+        fm: { kind: "subject", expansion_of: request.anchorDir, expansion_kind: request.kind },
+      }, progress);
+      return { status: result.status!, result, availability: (await this.store.loadPackage(result.dir))?.staged?.availability ?? [] };
+    } catch (e) {
+      return { status: e instanceof CompileCancelled ? "cancelled" : "failed", reason: (e as Error).message };
+    }
   }
 
   /** Builds and saves the course package for a compiled topic, fingerprinting its source notes. */
-  private async writePackage(dir: string, req: Pick<CompileRequest, "mode" | "material" | "research">, previous: CoursePackage | null, refreshed?: { subskills: number[]; notes: string[] }): Promise<CoursePackage> {
+  private async writePackage(dir: string, req: Pick<CompileRequest, "mode" | "material" | "research">, previous: CoursePackage | null, refreshed?: { subskills: number[]; notes: string[] }, staged?: StagedCourse): Promise<CoursePackage> {
     const s = this.settings();
     const topic = await this.store.loadTopic(dir);
     const state = await this.store.loadState(dir, s.targetLevel);
     const sources = req.mode === "subject" ? {} : Object.fromEntries(req.material.map((m) => [m.name, contentHash(m.text)]));
-    const pkg = buildPackage({ topic, questions: await this.store.loadQuestions(dir), concepts: state.concepts, sources: refreshed && previous ? { ...previous.sources, ...sources } : sources, previous, at: new Date().toISOString(), mode: req.mode, research: !!req.research, refreshed });
+    let pkg = buildPackage({ topic, questions: await this.store.loadQuestions(dir), concepts: state.concepts, sources: refreshed && previous ? { ...previous.sources, ...sources } : sources, previous, at: new Date().toISOString(), mode: req.mode, research: !!req.research, refreshed });
+    if (staged) pkg = withStagedCoverage(pkg, staged);
     await this.store.savePackage(dir, pkg);
     return pkg;
   }
@@ -1469,20 +1488,33 @@ export class Engine {
     const s = this.settings();
     const dir = req.existingDir;
     const pkg = await this.store.loadPackage(dir).catch(() => null);
+    checkCompilation(req.signal);
     const full = async (why: string) => ({ ...(await this.compile(req, onProgress)), refresh: "full" as const, subskillsRefreshed: [] as number[], why });
     if (!pkg || req.mode === "subject" || !req.material.length) return full(!pkg ? "there is no course package yet" : "a topic without notes is always compiled whole");
     const now = Object.fromEntries(req.material.map((m) => [m.name, contentHash(m.text)]));
     const ch = sourceChanges(pkg, now);
     const topic = await this.store.loadTopic(dir);
     const questions = await this.store.loadQuestions(dir);
-    if (!ch.changed.length && !ch.removed.length && !ch.added.length) return { dir, subskills: topic.subskills.length, questions: questions.length, usage: zeroUsage(), agents: 0, coverage: coverageLine(pkg), complete: pkg.coverage.complete, refresh: "unchanged", subskillsRefreshed: [], why: "no source note has changed since the last compile" };
+    const sameScope = pkg.mode === req.mode && pkg.research === !!req.research && fmStr(topic.fm, "goal") === req.goal.trim();
+    if (sameScope && !ch.changed.length && !ch.removed.length && !ch.added.length && (!pkg.staged || pkg.staged.status === "complete")) return { dir, subskills: topic.subskills.length, questions: questions.length, usage: zeroUsage(), agents: 0, coverage: coverageLine(pkg), complete: pkg.coverage.complete, status: pkg.staged?.status, refresh: "unchanged", subskillsRefreshed: [], why: "no source note has changed since the last compile" };
+    if (!sameScope) return full("the compilation scope changed");
+    if (pkg.staged || req.research || req.mode === "spec") return full("the objective inventory and source references need to be checked together");
     if (ch.added.length) return full(`new notes (${ch.added.slice(0, 3).join(", ")}) need a full compile to place them`);
     if (!ch.subskills.length) return full("the changed notes are not cited by any subskill");
     if (ch.subskills.length > Math.max(1, Math.floor(pkg.lessons.length / 2))) return full(`the changes reach ${ch.subskills.length} of ${pkg.lessons.length} subskills`);
 
     onProgress(`Refreshing ${ch.subskills.length} subskill${ch.subskills.length === 1 ? "" : "s"} from ${ch.changed.length + ch.removed.length} changed note${ch.changed.length + ch.removed.length === 1 ? "" : "s"}…`);
     const material = req.material.filter((m) => ch.changed.includes(m.name)).map((m) => `## [[${m.name}]]\n${m.text.trim()}`).join("\n\n");
-    const res = await this.call({ model: s.compileModel, system: await this.store.skill("compile.md"), input: buildRefreshInput({ title: topic.title, goal: req.goal, subjects: await this.store.subjectNames(), card: topic.body, subskills: ch.subskills, removed: ch.removed, material }), timeoutMs: 600000 });
+    const stop = new AbortController();
+    const abort = () => stop.abort();
+    req.signal?.addEventListener("abort", abort, { once: true });
+    const res = await (async () => {
+      try {
+        const system = await this.store.skill("compile.md"), subjects = await this.store.subjectNames();
+        checkCompilation(req.signal);
+        return await this.call({ model: s.compileModel, system, input: buildRefreshInput({ title: topic.title, goal: req.goal, subjects, card: topic.body, subskills: ch.subskills, removed: ch.removed, material }), timeoutMs: 600000, onSpawn: kill => stop.signal.addEventListener("abort", kill, { once: true }) });
+      } finally { req.signal?.removeEventListener("abort", abort); checkCompilation(req.signal); }
+    })();
     const parsed = parseCompileOutput(res.text);
     const sections = subskillSections(parsed.topicBody);
     const missing = ch.subskills.filter((n) => !sections.has(n));
@@ -1494,6 +1526,8 @@ export class Engine {
     const kept = parseQuestions(merged.questionsBody).filter((q) => !merged.replaced.includes(q.subskill)).map((q) => q.id);
     const fm: Frontmatter = { ...topic.fm };
     delete fm.compiled;
+    checkCompilation(req.signal);
+    onProgress("Saving the refreshed course…");
     await this.store.saveCompiled({ title: topic.title, fm, topicBody: merged.topicBody, questionsBody: merged.questionsBody, target: s.targetLevel, existingDir: dir, keepCards: kept });
     const next = await this.writePackage(dir, req, pkg, { subskills: merged.replaced, notes: [...ch.changed, ...ch.removed] });
     return { dir, subskills: check.subskills.length, questions: parseQuestions(merged.questionsBody).length, usage: res.usage, agents: 1, coverage: coverageLine(next), complete: next.coverage.complete, refresh: "partial", subskillsRefreshed: merged.replaced, why: `${[...ch.changed, ...ch.removed].join(", ")} changed` };

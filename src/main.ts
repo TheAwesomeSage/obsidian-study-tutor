@@ -1,5 +1,7 @@
 import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf } from "obsidian";
 import { ClaudeError, callClaude, findClaude, usageLine } from "./claude";
+import { braveResearch, DEFAULT_RESEARCH_LIMITS, researchLimits, type ResearchLimits } from "./compile-research";
+import { CompileCancelled, type ExpansionRequest } from "./compiler";
 import { CompileResult, Engine, EngineSettings, Material } from "./engine";
 import { Frontmatter, SourceMode, fmList, fmStr, splitFrontmatter, words } from "./formats";
 import { DEFAULT_WEIGHTS, PolicyWeights, WEIGHT_LABELS } from "./policy";
@@ -31,6 +33,7 @@ export interface TutorSettings extends EngineSettings {
   minutes: number;
   /** Configure existing visual modules with a local Ollama model when no saved configuration fits. */
   localActivities: boolean;
+  localCompilation: boolean;
   /** The local model, an Ollama tag. */
   localModel: string;
   /** The local Ollama server. Only loopback addresses are used. */
@@ -72,6 +75,8 @@ const DEFAULTS: TutorSettings = {
   weights: { ...DEFAULT_WEIGHTS },
   minutes: 25,
   localActivities: true,
+  localCompilation: true,
+  researchLimits: DEFAULT_RESEARCH_LIMITS,
   localModel: DEFAULT_LOCAL_MODEL,
   ollamaUrl: DEFAULT_OLLAMA_URL,
 };
@@ -113,6 +118,7 @@ export default class StudyTutorPlugin extends Plugin {
   data!: PluginData;
   store!: Store;
   engine!: Engine;
+  private activeCompile: AbortController | null = null;
   /** SymPy in a worker. Nothing is downloaded or started until a check is actually asked for. */
   sympy = new SympyWorker();
 
@@ -152,6 +158,10 @@ export default class StudyTutorPlugin extends Plugin {
     this.addRibbonIcon("graduation-cap", "Open Study Tutor", () => void this.activateView());
     this.addCommand({ id: "open", name: "Open tutor", callback: () => void this.activateView() });
     this.addCommand({ id: "new-topic", name: "New topic", callback: () => this.openNewTopic() });
+    this.addCommand({ id: "expand-topic", name: "Compile a linked prerequisite or extension", callback: () => {
+      if (!this.data.activeTopic) { new Notice("Open a study topic first."); return; }
+      new ExpandTopicModal(this.app, this, this.data.activeTopic).open();
+    } });
     this.addCommand({ id: "home", name: "Open home screen", callback: async () => (await this.activateView())?.go("home") });
     this.addCommand({ id: "review", name: "Review due flashcards", callback: async () => (await this.activateView())?.go("review") });
     this.addCommand({ id: "graph", name: "Open knowledge graph", callback: async () => (await this.activateView())?.go("graph") });
@@ -177,6 +187,8 @@ export default class StudyTutorPlugin extends Plugin {
     const root = this.opts.root.replace(/^\/+|\/+$/g, "") || "Tutor";
     this.store = new Store(this.app.vault.adapter as FS, root);
     this.engine = new Engine(this.store, () => ({ ...this.opts, externalFlashcards: this.usesSr() }));
+    const searchKey = process.env.BRAVE_SEARCH_API_KEY?.trim();
+    this.engine.researchProvider = searchKey ? braveResearch(searchKey) : null;
     this.engine.maths = this.sympy;
     // Source notes are read by name, for the short excerpts a teaching step may need.
     this.engine.readNote = async (name: string) => {
@@ -194,9 +206,11 @@ export default class StudyTutorPlugin extends Plugin {
     this.engine.visuals = adaptRegistry(visualRegistry as unknown as Record<string, unknown>);
   }
 
-  /** The local model client, from the settings. Nothing is contacted until an activity is configured. */
+  /** Share one generation queue between compilation and visual activities. */
   buildLocal(): void {
-    this.engine.local = this.opts.localActivities ? new OllamaClient({ model: this.opts.localModel || DEFAULT_LOCAL_MODEL, baseUrl: this.opts.ollamaUrl || DEFAULT_OLLAMA_URL }) : null;
+    const client = this.opts.localActivities || this.opts.localCompilation ? new OllamaClient({ model: this.opts.localModel || DEFAULT_LOCAL_MODEL, baseUrl: this.opts.ollamaUrl || DEFAULT_OLLAMA_URL }) : null;
+    this.engine.local = this.opts.localActivities ? client : null;
+    this.engine.compilationLocal = this.opts.localCompilation ? client : null;
   }
 
   /** Opens Obsidian's settings on this plugin's tab. The settings API is not typed, so every step is guarded. */
@@ -211,6 +225,7 @@ export default class StudyTutorPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.activeCompile?.abort();
     this.sympy.dispose();
   }
 
@@ -310,7 +325,7 @@ export default class StudyTutorPlugin extends Plugin {
       }
       const text = splitFrontmatter(await this.app.vault.cachedRead(f)).body.trim();
       if (!text) continue;
-      material.push({ name: f.basename, text });
+      material.push({ name: f.basename, path: f.path, text });
       total += words(text);
     }
     if (!material.length) throw new Error("The source notes are empty.");
@@ -320,17 +335,55 @@ export default class StudyTutorPlugin extends Plugin {
   }
 
   async compileTopic(p: { title: string; kind: SourceKind; folder: string; goal: string; research?: boolean; existingDir?: string; sources?: string[] }): Promise<CompileResult | null> {
-    const notice = new Notice("Study Tutor: gathering notes…", 0);
-    try {
+    return this.runCompilation(async (signal, progress) => {
+      progress("Gathering notes…");
       const g = await this.gather(p.kind, p.folder, p.sources);
-      const req = { title: p.title, mode: g.mode, goal: p.goal, material: g.material, fm: g.fm, existingDir: p.existingDir, research: p.research };
-      const progress = (msg: string) => notice.setMessage(`Study Tutor: ${msg}`);
-      // Recompiling a topic first tries a partial refresh: only subskills whose notes changed are rewritten.
-      const res = p.existingDir && !g.truncated ? await this.engine.refresh({ ...req, existingDir: p.existingDir }, progress) : await this.engine.compile(req, progress);
+      const req = { title: p.title, mode: g.mode, goal: p.goal, material: g.material, fm: g.fm, existingDir: p.existingDir, research: p.research, truncated: g.truncated, signal };
+      return p.existingDir && !g.truncated ? this.engine.refresh({ ...req, existingDir: p.existingDir }, progress) : this.engine.compile(req, progress);
+    });
+  }
+
+  async compileExpansion(request: ExpansionRequest, existingDir?: string): Promise<CompileResult | null> {
+    return this.runCompilation(async (signal, progress) => {
+      const result = await this.engine.expandCourse(request, signal, progress, existingDir);
+      if ("result" in result) return result.result;
+      throw new Error(result.reason);
+    });
+  }
+
+  private async runCompilation(run: (signal: AbortSignal, progress: (msg: string) => void) => Promise<CompileResult>): Promise<CompileResult | null> {
+    if (this.activeCompile) {
+      new Notice("Study Tutor: a compilation is already running.");
+      return null;
+    }
+    const controller = new AbortController();
+    this.activeCompile = controller;
+    const notice = new Notice("Study Tutor: preparing compilation…", 0);
+    const progress = (msg: string) => {
+      if (controller.signal.aborted) return;
+      const content = document.createDocumentFragment();
+      content.append(`Study Tutor: ${msg} `);
+      if (!msg.startsWith("Saving ")) {
+        const cancel = document.createElement("button");
+        cancel.textContent = "Cancel";
+        cancel.addEventListener("click", e => {
+          e.stopPropagation();
+          controller.abort();
+          notice.setMessage("Study Tutor: stopping compilation…");
+        }, { once: true });
+        content.append(cancel);
+      }
+      notice.setMessage(content);
+    };
+    try {
+      progress("Preparing compilation…");
+      const res = await run(controller.signal, progress);
       notice.hide();
       const how = res.refresh === "unchanged" ? `Nothing changed (${res.why}); no model was called.` : res.refresh === "partial" ? `Refreshed subskill ${(res.subskillsRefreshed ?? []).join(", ")} (${res.why}).` : res.refresh === "full" ? `Compiled in full: ${res.why}.` : "";
-      new Notice(`Topic ready: ${res.subskills} subskills, ${res.questions} questions.${g.truncated ? " Some notes were left out (size limit)." : ""}${how ? `\n${how}` : ""}${res.coverage ? `\n${res.coverage}` : ""}\n${usageLine(res.usage)} in ${res.usage.calls} call(s)`, 12000);
-      this.data.activeTopic = res.dir;
+      const stats = res.metrics;
+      const activity = stats ? `\n${stats.searches} search attempts · ${stats.pages} pages requested · ${stats.cacheHits} cache hits · Ollama ${(stats.localMs / 1000).toFixed(1)}s (${stats.localCalls} calls)` : "";
+      new Notice(`${res.status === "partial" ? "Partial topic saved" : "Topic ready"}: ${res.subskills} subskills, ${res.questions} questions.${res.preservedCourse ? " The previous topic was kept." : ""}${how ? `\n${how}` : ""}${res.coverage ? `\n${res.coverage}` : ""}${activity}\nClaude: ${usageLine(res.usage)} in ${res.usage.calls} call(s)`, 12000);
+      this.data.activeTopic = res.preservedCourse ?? res.dir;
       await this.save();
       // Keep the flashcard note in step with the new question bank; existing schedules are kept.
       if (this.usesSr()) await this.store.exportFlashcards(res.dir);
@@ -339,16 +392,48 @@ export default class StudyTutorPlugin extends Plugin {
       return res;
     } catch (e) {
       notice.hide();
-      new Notice(`Study Tutor: ${(e as Error).message}`, 12000);
+      new Notice(`Study Tutor: ${controller.signal.aborted ? new CompileCancelled().message : (e as Error).message}`, 12000);
       return null;
+    } finally {
+      this.activeCompile = null;
     }
   }
 
   async recompile(dir: string): Promise<void> {
+    const expansion = (await this.store.loadPackage(dir))?.staged?.expansion;
+    if (expansion) { await this.compileExpansion(expansion, dir); return; }
     const topic = await this.store.loadTopic(dir);
     const kind = (fmStr(topic.fm, "kind", "subject") as SourceKind) || "subject";
     await this.compileTopic({ title: topic.title, kind, folder: fmStr(topic.fm, "folder"), goal: fmStr(topic.fm, "goal"), research: fmStr(topic.fm, "research") === "yes", existingDir: dir, sources: fmList(topic.fm, "sources") });
   }
+}
+
+class ExpandTopicModal extends Modal {
+  constructor(app: App, private plugin: StudyTutorPlugin, private dir: string) { super(app); }
+
+  async onOpen(): Promise<void> {
+    this.titleEl.setText("Compile a linked topic");
+    try {
+      const state = await this.plugin.store.loadState(this.dir, this.plugin.opts.targetLevel);
+      const concepts = Object.entries(state.concepts);
+      if (!concepts.length) { this.contentEl.createEl("p", { text: "This topic has no concept to extend yet." }); return; }
+      let anchorConcept = concepts[0][1], kind: ExpansionRequest["kind"] = "prerequisite", gap = "", research = false;
+      new Setting(this.contentEl).setName("From concept").addDropdown(d => {
+        for (const [n, id] of concepts) d.addOption(id, state.names[Number(n)] ?? id);
+        d.setValue(anchorConcept).onChange(v => { anchorConcept = v; });
+      });
+      new Setting(this.contentEl).setName("Scope").addDropdown(d => d.addOption("prerequisite", "Missing prerequisite").addOption("extension", "Beyond the specification").onChange(v => { kind = v === "extension" ? v : "prerequisite"; }));
+      new Setting(this.contentEl).setName("What would you like to learn?").addTextArea(t => t.setPlaceholder("For example: why projecting twice gives the same result").onChange(v => { gap = v.trim(); }));
+      new Setting(this.contentEl).setName("Research on the web if needed").addToggle(t => t.onChange(v => { research = v; }));
+      new Setting(this.contentEl).addButton(b => b.setButtonText("Compile linked topic").setCta().onClick(() => {
+        if (!gap || gap.length > 600) { new Notice("Describe one gap or application in at most 600 characters."); return; }
+        this.close();
+        void this.plugin.compileExpansion({ kind, anchorDir: this.dir, anchorConcept, gap, research });
+      }));
+    } catch (e) { this.contentEl.createEl("p", { text: (e as Error).message }); }
+  }
+
+  onClose(): void { this.contentEl.empty(); }
 }
 
 class NewTopicModal extends Modal {
@@ -396,7 +481,7 @@ class NewTopicModal extends Modal {
       .addText((t) => t.onChange((v) => (goal = v)));
     new Setting(contentEl)
       .setName("Research on the web")
-      .setDesc("Lets the compile step search the web for what a course at this level covers, and cite its sources. Uses several times more tokens for that one step. Chat turns are unaffected.")
+      .setDesc("Searches through Brave and reads selected public pages. Requires BRAVE_SEARCH_API_KEY in Obsidian's environment. Without it, compilation uses available notes and reports research gaps.")
       .addToggle((t) => {
         researchToggle = t;
         t.setValue(research).onChange((v) => (research = v));
@@ -476,7 +561,7 @@ class TutorSettingTab extends PluginSettingTab {
 
     new Setting(containerEl).setName("Models").setHeading();
     text("Chat model", "Used for study turns in every mode. An alias (sonnet, opus, haiku, fable) or a full model name.", "chatModel", "sonnet");
-    text("Compile model", "Used once per topic to build the topic card and question bank.", "compileModel", "sonnet");
+    text("Compile model", "Plans objectives, writes lessons and questions, and checks coverage.", "compileModel", "sonnet");
     text("Utility model", "Cheap model for reading large note sets, summarising chats and grading flashcards.", "utilityModel", "haiku");
     new Setting(containerEl)
       .setName("Chat effort")
@@ -626,6 +711,24 @@ class TutorSettingTab extends PluginSettingTab {
       );
     num("Chat part size (words)", "When a chat passes this size it is summarised, and the chat continues in a new file that starts from the summary. Smaller means cheaper turns.", "maxChatWords", 200);
     num("Topic card size (words)", "Cards above this size are sent as an outline plus the current subskill only.", "maxTopicWords", 300);
-    num("Single-pass compile size (words)", "Note sets above this size are first read in parallel batches by the utility model.", "singlePassWords", 1000);
+    num("Short input size (words)", "Above this size, compilation reads the specification or notes in batches.", "singlePassWords", 100);
+    new Setting(containerEl).setName("Use Ollama for compilation").setDesc("Selects relevant passages from long notes and research pages. Compilation falls back to text matching if Ollama is unavailable.").addToggle(t =>
+      t.setValue(s.localCompilation).onChange(async v => {
+        s.localCompilation = v;
+        this.plugin.buildLocal();
+        await this.plugin.save();
+      }));
+    for (const [key, name, max] of [
+      ["searches", "Research search attempts", 40], ["pages", "Research page requests", 80],
+      ["largeSearches", "Large specification search ceiling", 40], ["largePages", "Large specification page ceiling", 80],
+    ] as const satisfies [keyof ResearchLimits, string, number][]) {
+      new Setting(containerEl).setName(name).setDesc(`Per compilation (1–${max}). Large specifications can expand to the ceiling when a gap remains.`).addText(t =>
+        t.setValue(String(researchLimits(s.researchLimits)[key])).onChange(async v => {
+          const value = Number(v);
+          if (!Number.isInteger(value) || value < 1 || value > max) return;
+          s.researchLimits = { ...s.researchLimits, [key]: value };
+          await this.plugin.save();
+        }));
+    }
   }
 }

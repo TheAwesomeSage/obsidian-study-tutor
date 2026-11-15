@@ -436,30 +436,15 @@ test("a bank quiz is marked by code and calls the model only when judgement is n
   assert.equal(saved.messages.filter((m) => m.role === "you").length, 6);
 });
 
-test("web research is passed to the compile call only when asked for", async () => {
+test("a summary keeps its Mermaid block in a saved note", async () => {
   const fs = new MemFS();
   const store = new Store(fs, "Tutor", () => "2026-11-12");
   const settings = { claudePath: "", chatModel: "sonnet", compileModel: "sonnet", utilityModel: "haiku", effort: "low", targetLevel: 4, maxChatWords: 1200, maxTopicWords: 2000, singlePassWords: 6000, smartRouting: false, hardEffort: "high" };
   const engine = new Engine(store, () => settings, () => "2026-11-12");
-  const calls: any[] = [];
-  (engine as any).call = async (o: any) => {
-    calls.push(o);
-    return { text: COMPILED.replace("=====QUESTIONS=====", "## Sources\n- [MIT 18.06](https://ocw.mit.edu)\n\n=====QUESTIONS====="), usage: { input: 1, cacheRead: 0, cacheWrite: 0, output: 1, costUsd: 0, calls: 1 } };
-  };
-  const a = await engine.compile({ title: "Linear maps", mode: "spec", goal: "first-year university", material: [{ name: "Spec", text: "Cover linear maps and kernels." }], fm: {}, research: true });
-  assert.deepEqual(calls[0].tools, ["WebSearch", "WebFetch"]);
-  assert.match(calls[0].input, /RESEARCH: on/);
-  assert.match(calls[0].system, /at most 6 searches/);
-  const topic = await store.loadTopic(a.dir);
-  assert.equal(topic.fm.research, "yes");
-  assert.equal(topic.subskills.length, 2, "the Sources section is not read as a subskill");
-  assert.match(topic.body, /## Sources/);
-  assert.ok(!topic.subskills[1].section.includes("Sources"));
-  await engine.compile({ title: "Other", mode: "subject", goal: "", material: [], fm: {} });
-  assert.equal(calls[1].tools, undefined);
-  assert.match(calls[1].input, /RESEARCH: off/);
-
-  const sheet = await ((engine as any).call = async () => ({ text: "# Linear maps summary\n\n## Map\n```mermaid\ngraph TD\n```", usage: { input: 1, cacheRead: 0, cacheWrite: 0, output: 1, costUsd: 0, calls: 1 } }), engine.summarySheet(a.dir));
+  const parsed = F.parseCompileOutput(COMPILED);
+  const dir = await store.saveCompiled({ title: "Linear maps", fm: {}, topicBody: parsed.topicBody, questionsBody: parsed.questionsBody, target: 4 });
+  (engine as any).call = async () => ({ text: "# Linear maps summary\n\n## Map\n```mermaid\ngraph TD\n```", usage: { input: 1, cacheRead: 0, cacheWrite: 0, output: 1, costUsd: 0, calls: 1 } });
+  const sheet = await engine.summarySheet(dir);
   assert.match(await fs.read(sheet.path), /tutor: summary[\s\S]*```mermaid/);
 });
 

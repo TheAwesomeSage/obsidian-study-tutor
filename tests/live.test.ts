@@ -16,7 +16,7 @@ async function main() {
   const engine = new Engine(store, () => settings);
   await store.installSkills();
 
-  console.log("1. Compile from notes (large enough to fan out to parallel helpers)");
+  console.log("1. Compile from notes (plan, synthesize and audit)");
   const filler = (topic: string) => Array.from({ length: 60 }, (_, i) => `Remark ${i + 1} on ${topic}: this line restates the idea in other words for practice.`).join("\n");
   const material = [
     { name: "Binary search", text: "Binary search finds a target in a sorted array by halving the search interval.\nInvariant: if the target is present it lies in [lo, hi].\nmid = lo + (hi - lo) // 2 avoids overflow.\nRuns in O(log n) comparisons.\n" + filler("binary search") },

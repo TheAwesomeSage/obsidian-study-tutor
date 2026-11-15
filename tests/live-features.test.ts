@@ -3,6 +3,7 @@
 // most of all). Run with `npm run test:features`.
 
 import { Engine, EngineSettings } from "../src/engine";
+import { braveResearch } from "../src/compile-research";
 import { Store } from "../src/store";
 import { usageLine, Usage } from "../src/claude";
 import { mcqLetter } from "../src/formats";
@@ -15,8 +16,11 @@ async function main() {
   const fs = new MemFS();
   const store = new Store(fs, "Tutor");
   const engine = new Engine(store, () => settings);
+  const key = process.env.BRAVE_SEARCH_API_KEY?.trim();
+  if (key) engine.researchProvider = braveResearch(key);
 
   console.log("1. Compile from a spec note with web research on");
+  if (!key) console.log("  No Brave key: checking the no-search fallback.");
   const spec = "I want to learn eigenvalues and eigenvectors: definition, characteristic polynomial, computing them for 2x2 and 3x3 matrices, diagonalisation, and one application.";
   const c = await engine.compile({ title: "Eigenvalues and eigenvectors", mode: "spec", goal: "first-year university linear algebra", material: [{ name: "Eigen spec", text: spec }], fm: {}, research: true }, (m) => console.log("  ·", m));
   const topic = await store.loadTopic(c.dir);

@@ -132,7 +132,6 @@ export async function mountPlayer(host: HTMLElement, value: unknown, options: Pl
   } else {
     const s=lesson.settings;
     el(stage,"div","EXTERNAL EXPLORATION","stv-eyebrow"); el(stage,"h3",String(s.simulation).replace(/-/g," "));
-    el(stage,"p",String(s.question));
     const link=el(stage,"a","Open PhET activity ↗","stv-button");link.href=`https://phet.colorado.edu/en/simulations/${s.simulation}`;link.target="_blank";link.rel="noopener noreferrer";
     el(stage,"p","Opens the official activity. Study Tutor cannot observe its controls or results. Return here to explain using the source excerpt.","stv-caption");
   }

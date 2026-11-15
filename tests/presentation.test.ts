@@ -303,7 +303,7 @@ test("an unsupported capability is a structured record, from code or from the lo
   const none = await configureActivity({ request: req({ objective: "Process states: ready, running and blocked" }), conceptId: "c/ps", candidates: [], assets: [], registry: adaptRegistry(makeFixtureRegistry() as any), model: scriptedModel([]), catalogVersion: "c", trigger: "explicit" });
   assert.deepEqual([none.status, none.localCalls], ["unsupported", 0], "nothing matched, so no model was asked");
   assert.equal(none.missingCapability!.kind, "simulation");
-  const pipe = await configure([JSON.stringify({ fits: false, objective: "how a circular buffer wraps", settings: { algorithm: "linear-search", values: [1, 2, 3], target: 1 }, assetIds: [], assessmentId: "predict-comparisons", predictionQuestion: "What happens next?", hint: "Look at the end.", missingOperation: "circular buffer with wrapping read and write indices" })]).run;
+  const pipe = await configure([JSON.stringify({ fits: false, missingOperation: "circular buffer with wrapping read and write indices" })]).run;
   assert.deepEqual([pipe.status, pipe.localCalls, pipe.claudeCalls], ["unsupported", 1, 0]);
   assert.equal(pipe.missingCapability!.operation, "circular buffer with wrapping read and write indices");
   // A server that is down is a transient failure: reported, not cached as a verdict.

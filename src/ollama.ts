@@ -1,4 +1,4 @@
-// A client for a local Ollama server, used only to configure existing visual modules.
+// A client for a local Ollama server, used for visual modules and bounded evidence selection.
 // One request at a time, a short context, bounded output, low temperature and a JSON schema
 // passed as Ollama's `format`, so the model is constrained while it writes. The reply is still
 // checked again by the caller. Note excerpts never leave the machine: only loopback addresses
@@ -46,6 +46,7 @@ export interface ChatJsonOptions {
   maxTokens?: number;
   seed?: number;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 /** What the configuration step needs from a local model. Tests supply a scripted one. */
@@ -54,7 +55,7 @@ export interface LocalModel {
   chatJson(o: ChatJsonOptions): Promise<LocalReply>;
 }
 
-export type Transport = (method: "GET" | "POST", url: string, body: string | null, timeoutMs: number) => Promise<{ status: number; body: string }>;
+export type Transport = (method: "GET" | "POST", url: string, body: string | null, timeoutMs: number, signal?: AbortSignal) => Promise<{ status: number; body: string }>;
 
 /** True for http(s) URLs on a loopback host. */
 export function isLoopback(url: string): boolean {
@@ -66,18 +67,24 @@ export function isLoopback(url: string): boolean {
   }
 }
 
-const nodeTransport: Transport = (method, url, body, timeoutMs) =>
+const nodeTransport: Transport = (method, url, body, timeoutMs, signal) =>
   new Promise((resolve, reject) => {
     // Loaded lazily so that importing this file never needs Node until a request is made.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const http = (url.startsWith("https:") ? require("https") : require("http")) as typeof import("http");
-    const req = http.request(url, { method, headers: body ? { "content-type": "application/json", "content-length": Buffer.byteLength(body) } : {} }, (res) => {
+    const req = http.request(url, { method, signal, headers: body ? { "content-type": "application/json", "content-length": Buffer.byteLength(body) } : {} }, (res) => {
       let data = "";
       res.setEncoding("utf8");
-      res.on("data", (d: string) => (data += d));
+      res.on("data", (d: string) => {
+        if (data.length + d.length > 1_000_000) req.destroy(new LocalModelError("bad-response", "Ollama returned an oversized response."));
+        else data += d;
+      });
+      res.on("error", reject);
+      res.on("aborted", () => reject(new LocalModelError("bad-response", "Ollama interrupted the response.")));
       res.on("end", () => resolve({ status: res.statusCode ?? 0, body: data }));
     });
-    req.setTimeout(timeoutMs, () => req.destroy(new LocalModelError("timeout", `The local model took longer than ${Math.round(timeoutMs / 1000)}s and was stopped.`)));
+    const timer = setTimeout(() => req.destroy(new LocalModelError("timeout", `The local model took longer than ${Math.round(timeoutMs / 1000)}s and was stopped.`)), timeoutMs);
+    req.on("close", () => clearTimeout(timer));
     req.on("error", (e: NodeJS.ErrnoException) => {
       if (e instanceof LocalModelError) reject(e);
       else if (e.code === "ECONNREFUSED" || e.code === "ECONNRESET" || e.code === "EHOSTUNREACH") reject(new LocalModelError("unreachable", `Ollama is not reachable at ${url.replace(/\/api\/.*$/, "")} (${e.code}). Start Ollama, or turn local activities off.`));
@@ -124,7 +131,8 @@ export class OllamaClient implements LocalModel {
   }
 
   private async request(o: ChatJsonOptions): Promise<LocalReply> {
-    if (!isLoopback(this.baseUrl)) throw new LocalModelError("not-local", "Only a local Ollama server is used for activity configuration.");
+    if (o.signal?.aborted) throw new Error("Local request cancelled.");
+    if (!isLoopback(this.baseUrl)) throw new LocalModelError("not-local", "Only a local Ollama server is used.");
     const body = JSON.stringify({
       model: this.model,
       stream: false,
@@ -139,7 +147,7 @@ export class OllamaClient implements LocalModel {
       ],
     });
     const started = Date.now();
-    const r = await this.transport("POST", `${this.baseUrl}/api/chat`, body, o.timeoutMs ?? 120000);
+    const r = await this.transport("POST", `${this.baseUrl}/api/chat`, body, o.timeoutMs ?? 120000, o.signal);
     const wallMs = Date.now() - started;
     let j: Record<string, unknown>;
     try {

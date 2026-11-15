@@ -20,7 +20,7 @@ import { AssetDescriptor, GenerationResult, JsonObject, MissingCapability, Modul
 import { contentHash } from "./formats";
 
 /** Bumped whenever the configuration prompt or output schema changes. Part of every cache key. */
-export const CONFIG_PROMPT_VERSION = "cfg-1";
+export const CONFIG_PROMPT_VERSION = "cfg-2";
 export const LESSON_SCHEMA_VERSION = 1;
 /** One repair attempt after a failed validation, then the record is final. */
 export const MAX_REPAIRS = 1;
@@ -103,6 +103,18 @@ export function outputSchema(d: ModuleDescriptor, assets: AssetDescriptor[]): Sc
   };
 }
 
+const REFUSAL: Schema = {
+  type: "object",
+  properties: { fits: { type: "boolean", const: false }, missingOperation: { type: "string", minLength: 1, maxLength: 120 } },
+  required: ["fits", "missingOperation"],
+  additionalProperties: false,
+};
+
+function generationSchema(d: ModuleDescriptor, assets: AssetDescriptor[]): Schema {
+  const ready = outputSchema(d, assets);
+  return { anyOf: [REFUSAL, { ...ready, properties: { ...ready.properties as Record<string, Schema>, fits: { type: "boolean", const: true } } }] };
+}
+
 /** A compact line per setting for the prompt: name, type, bounds and description. */
 export function describeSettings(schema: JsonObject): string {
   const props = (schema.properties ?? {}) as Record<string, Record<string, unknown>>;
@@ -123,7 +135,7 @@ export function describeSettings(schema: JsonObject): string {
 export const CONFIG_SYSTEM = [
   "You configure one existing interactive teaching module for a learner, from an excerpt of their own notes.",
   "Return one JSON object that matches the schema.",
-  "- fits: true only if this module can show the idea in the excerpt as written. If the excerpt needs something the module does not do, set fits to false, name the missing operation in missingOperation, and fill the other fields with the simplest valid values.",
+  "- fits: true only if this module can show the idea in the excerpt as written. Otherwise return only fits: false and a short missingOperation. Leave out all lesson fields.",
   "- objective: what the learner should understand, in the excerpt's terms.",
   "- settings: values inside the module's limits that make the excerpt's idea visible.",
   "- predictionQuestion: one question the learner answers before running the activity. Do not state its answer.",
@@ -197,7 +209,12 @@ export function checkConfiguration(text: string, req: PresentationRequest, d: Mo
   }
   const errors = validateJson(raw, outputSchema(d, assets));
   const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  if (o.fits === false) return { lesson: null, fits: false, missingOperation: typeof o.missingOperation === "string" ? o.missingOperation.trim() : "", errors: [] };
+  if (o.fits === false) {
+    const refusal = validateJson({ fits: o.fits, missingOperation: o.missingOperation }, REFUSAL);
+    const known = outputSchema(d, assets).properties as Record<string, unknown>;
+    if (refusal.length || Object.keys(o).some(key => !Object.prototype.hasOwnProperty.call(known, key))) return { lesson: null, fits: true, missingOperation: "", errors: refusal.length ? refusal : ["unexpected refusal fields"] };
+    return { lesson: null, fits: false, missingOperation: String(o.missingOperation).trim(), errors: [] };
+  }
   if (errors.length) return { lesson: null, fits: true, missingOperation: "", errors };
   const lesson: VisualLesson = {
     schemaVersion: 1,
@@ -295,7 +312,7 @@ export async function configureActivity(p: ConfigureInput): Promise<ActivityReco
   if (!p.model) return base({ status: "invalid", reason: "Local configuration is switched off, and there is no saved activity for this.", validationErrors: ["no local model"], transient: true });
 
   const assets = assetsFor(d, p.assets);
-  const schema = outputSchema(d, assets);
+  const schema = generationSchema(d, assets);
   const user = configPrompt(p.request, d, assets);
   const t = { localMs: 0, loadMs: 0, promptTokens: 0, evalTokens: 0 };
   const add = (x: LocalTiming) => {

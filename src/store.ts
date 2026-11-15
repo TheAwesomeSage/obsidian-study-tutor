@@ -10,6 +10,7 @@ import type { PolicyCase } from "./policy";
 import { SessionRecord, sessionMarkdown } from "./session";
 import type { ActivityRecord } from "./configure";
 import type { CoursePackage } from "./coursepkg";
+import { passageWindow, type SourceRevision } from "./compile-sources";
 
 /** One learner interaction with an activity. Kept apart from evidence.md; only an assessed answer also becomes an attempt there. */
 export interface ActivityEvent {
@@ -789,7 +790,45 @@ export class Store {
   async savePackage(dir: string, pkg: CoursePackage): Promise<void> {
     const missing = pkg.coverage.missing.length ? `\n\nNot yet covered: ${pkg.coverage.missing.join(", ")}.` : "";
     const head = `The course package for this topic, revision ${pkg.revision}: objectives and what covers them, worked lessons, question families, rubrics, sources and optional visual eligibility. Study Tutor writes it when the topic is compiled or refreshed.${missing}`;
-    await this.writeFile(this.packagePath(dir), withFrontmatter({ tutor: "package", topic: pkg.topic, revision: pkg.revision, complete: pkg.coverage.complete ? "yes" : "no" }, `${head}\n\n${FENCE}json\n${JSON.stringify(pkg, null, 1)}\n${FENCE}\n`));
+    const gaps = pkg.staged?.availability.flatMap(a => {
+      const o = pkg.staged?.inventory.find(o => o.id === a.objective);
+      return a.gaps.length ? [`- ${o?.text ?? a.objective}: ${a.gaps.map(g => g.replace(/\s+/g, " ")).join("; ")}`] : [];
+    }) ?? [];
+    const report = [...(pkg.staged?.issues ?? []).map(s => `- ${s}`), ...gaps];
+    await this.writeFile(this.packagePath(dir), withFrontmatter({ tutor: "package", topic: pkg.topic, revision: pkg.revision, complete: pkg.coverage.complete ? "yes" : "no" }, `${head}${report.length ? "\n\n## Compilation report\n\n" + report.join("\n") : ""}\n\n${FENCE}json\n${JSON.stringify(pkg, null, 1)}\n${FENCE}\n`));
+  }
+
+  private compileCachePath(key: string): string {
+    if (!/^(source|page|search|select|plan)-[a-f\d]{64}$/.test(key)) throw new Error("Invalid compilation cache key.");
+    return `${this.root}/_compile-cache/${key}.json`;
+  }
+
+  async readCompileCache<T>(key: string): Promise<T | null> {
+    const path = this.compileCachePath(key);
+    if (!(await this.fs.exists(path))) return null;
+    try { return JSON.parse(await this.fs.read(path)) as T; } catch { return null; }
+  }
+
+  async writeCompileCache<T>(key: string, value: T): Promise<void> {
+    const path = this.compileCachePath(key);
+    if (key.startsWith("source-") && await this.readCompileCache(key)) return;
+    await this.writeFile(path, JSON.stringify(value));
+  }
+
+  async compiledSources(dir: string): Promise<SourceRevision[]> {
+    const pkg = await this.loadPackage(dir);
+    const out: SourceRevision[] = [];
+    for (const id of pkg?.staged?.sourceRevisions ?? []) {
+      if (!/^[a-f\d]{64}$/.test(id)) continue;
+      const s = await this.readCompileCache<SourceRevision>(`source-${id}`);
+      if (s?.id === id && Array.isArray(s.passages)) out.push(s);
+    }
+    return out;
+  }
+
+  /** Read an original and up to two neighboring passages on each side, scoped to the course. */
+  async compiledPassage(dir: string, id: string, radius = 0) {
+    return passageWindow(await this.compiledSources(dir), id, radius);
   }
 
   /** Writes a note under the tutor folder and returns its path. */
