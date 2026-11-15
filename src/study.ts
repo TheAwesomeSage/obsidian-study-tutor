@@ -13,6 +13,9 @@ import { Mode, fmStr, splitFrontmatter } from "./formats";
 import { ACTION_LABEL, Action, POLICY_VERSION } from "./policy";
 import { SessionRecord, openQuestion, sessionFor } from "./session";
 import { toolLine } from "./tools";
+import { moveLine } from "./tutormove";
+import { reasoningLines } from "./reasoning";
+import { expansionLine } from "./expansion";
 import type { Screen, TutorView } from "./view";
 import { MODE_INFO, button, chip, confirmAction, iconButton, modeInfo } from "./ui";
 
@@ -143,6 +146,12 @@ export class StudyScreen implements Screen {
       else if (this.input.value.trim()) void this.send(this.input.value);
     };
     this.diagEl = inner.createEl("details", { cls: "st-diag" });
+    // A request for linked material that settles while this chat is open updates its chip.
+    v.plugin.engine.onExpansion = (_dir, rec) => {
+      if (!this.el || this.last?.expansion?.request.id !== rec.request.id) return;
+      this.last = { ...this.last, expansion: rec };
+      this.sync();
+    };
 
     this.shownPath = null;
     this.sync();
@@ -393,6 +402,7 @@ export class StudyScreen implements Screen {
 
     if (this.changes.length) chip(tail, `Progress updated: ${this.changes.join("; ")}`, "good", "trending-up");
     if (this.marked) this.feedback(tail, this.marked);
+    this.expansionChip(tail);
     const activity = this.activity;
     if (activity && activity.dir === v.dir && activity.chatPath === v.chatPath) {
       const out = activity.outcome;
@@ -476,6 +486,29 @@ export class StudyScreen implements Screen {
   }
 
   /** What was recorded for the answer just marked, how it was checked, and a way to contest it. */
+  /** A request for linked material: preparing (with Cancel), ready, or not available. Study goes on either way. */
+  private expansionChip(parent: HTMLElement): void {
+    const v = this.view;
+    const rec = this.last?.expansion;
+    if (!rec || !v.dir) return;
+    const tone = rec.status === "complete" ? "good" : rec.status === "partial" ? "warn" : rec.status === "pending" ? "accent" : "";
+    const icon = rec.status === "pending" ? "loader" : rec.status === "complete" || rec.status === "partial" ? "link" : "circle-slash";
+    const row = parent.createDiv({ cls: "st-actions st-expansion" });
+    chip(row, expansionLine(rec), tone, icon);
+    if (rec.status !== "pending") return;
+    const dir = v.dir;
+    button(row, {
+      label: "Cancel",
+      icon: "x",
+      tone: "ghost",
+      onClick: async () => {
+        const done = await v.plugin.engine.cancelExpansion(dir, rec.request.id);
+        if (done && this.last) this.last = { ...this.last, expansion: done };
+        this.sync();
+      },
+    });
+  }
+
   private feedback(parent: HTMLElement, a: Attempt): void {
     const v = this.view;
     const tone = a.verification === "disputed" || a.result === "ungraded" ? "" : a.result === "correct" ? "good" : a.result === "partial" ? "warn" : "bad";
@@ -495,6 +528,8 @@ export class StudyScreen implements Screen {
     if (a.assumptions) more.createDiv({ cls: "st-meta", text: `Basis: ${a.assumptions}.` });
     more.createDiv({ cls: "st-meta", text: a.assisted || a.answerExposed ? "Because help was given or the answer had been seen, this does not count as unaided evidence." : a.grading === "self" ? "A self-rating does not count as evidence for a level." : a.result === "ungraded" ? "An unmarked answer changes nothing." : "This counts as unaided evidence." });
     if (a.note) more.createDiv({ cls: "st-meta", text: a.note });
+    // The result, the method and the assumptions, each with who decided it.
+    if (a.reasoning) for (const l of reasoningLines(a.reasoning)) more.createDiv({ cls: "st-meta st-reasoning", text: l });
     if (this.markedNote) box.createDiv({ cls: "st-meta", text: this.markedNote });
     if (a.result === "ungraded" || a.result === "skipped" || a.grading === "self" || this.busy || !v.dir) return;
     const row = box.createDiv({ cls: "st-actions" });
@@ -614,6 +649,11 @@ export class StudyScreen implements Screen {
       if (r.route && v.plugin.opts.smartRouting) body.createDiv({ text: `Model: ${ROUTE_NOTE[r.route.route]} (${r.route.model}), because: ${r.route.reason}.` });
       if (r.maths && (r.maths.computed || r.maths.checked)) body.createDiv({ text: `SymPy: computed ${r.maths.computed}, checked ${r.maths.checked}${r.maths.corrected ? ", one draft rewritten" : ""}${r.maths.disputed ? ", still disagrees" : ""}.` });
     }
+    // Why the tutor did what it did: the move and its reason code, how deep the turn went, and any request for linked material.
+    if (r?.move) body.createDiv({ cls: "st-diag-move", text: `${moveLine(r.move)}${r.move.chosen && r.move.chosen !== r.move.move ? ` · the tutor said it made: ${r.move.chosen}` : ""}.` });
+    if (r?.depth?.level === "lesson") body.createDiv({ text: `Depth: lesson material, because ${r.depth.reason}.${r.depth.missing.length ? ` Missing from the course: ${r.depth.missing.join("; ")}.` : ""}` });
+    if (r?.expansion) body.createDiv({ text: `${expansionLine(r.expansion)}.` });
+    for (const n of r?.notes ?? []) body.createDiv({ text: `Note: ${n}.` });
     for (const t of r?.tools ?? []) body.createDiv({ text: `Tool: ${toolLine(t)}.` });
     const su = v.sessionUsage;
     const st = su.input + su.cacheRead + su.cacheWrite;

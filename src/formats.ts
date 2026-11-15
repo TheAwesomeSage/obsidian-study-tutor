@@ -1,5 +1,6 @@
 import { Attempt, LevelChange, normaliseAttempt, skillEvidence, supportedLevel } from "./evidence";
 import type { Relation } from "./course";
+import type { Misconception } from "./misconceptions";
 // Parsing and serialising of the plugin's markdown files. Pure functions, no Obsidian imports.
 
 export type Mode = "auto" | "tutor" | "teach" | "quiz" | "expert";
@@ -418,7 +419,13 @@ export interface LearnerState {
   names: Record<number, string>;
   levels: Record<number, number | null>;
   bank: Record<number, { right: number; total: number }>;
+  /**
+   * Active misconception descriptions, derived from `misconceptionRecords` when the store loaded
+   * them (misconceptions.ts). Kept as a plain list for older code and older files.
+   */
   misconceptions: string[];
+  /** Misconceptions as evidence-backed records, kept in evidence.md. Absent in states built before 0.9. */
+  misconceptionRecords?: Misconception[];
   cards: Record<string, CardSched>;
   newDate: string;
   newCount: number;
@@ -447,6 +454,7 @@ export function newState(topic: Topic, target: number, previous?: LearnerState, 
   };
   s.target = previous.target;
   s.misconceptions = [...previous.misconceptions];
+  if (previous.misconceptionRecords) s.misconceptionRecords = previous.misconceptionRecords.map((m) => ({ ...m }));
   s.changes = [...(previous.changes ?? [])];
   for (const old of Object.keys(previous.names).map(Number)) {
     const n = now(old);

@@ -46,6 +46,13 @@ export interface SessionRecord {
   exactExcerpts: string[];
   /** Id of an attempt whose grading the learner disputes, until the tutor has looked again. */
   disputed: string;
+  /** Master mode: the move this turn made, its reason code, the evidence behind it, and the move the tutor said it made. */
+  move?: { move: string; reason: string; evidence: string[]; misconception: string; chosen: string };
+  /** Misconception ids the pending question is aimed at, or was set to tell apart. Empty when neither. */
+  targets?: string;
+  discriminates?: string;
+  /** Hints given for the pending question, for the graduated ladder. */
+  hints?: number;
 }
 
 const strings = (x: unknown, max = 8): string[] => (Array.isArray(x) ? x.filter((i): i is string => typeof i === "string" && !!i.trim()).map((i) => i.trim().slice(0, 400)).slice(-max) : []);
@@ -103,6 +110,10 @@ export function sessionFor(chat: Chat, state: LearnerState, mode: Mode): Session
     sources: strings(p.sources, 6),
     exactExcerpts: chat.messages.slice(-2).map((m) => `${m.role}: ${m.text}`),
     disputed: str(p.disputed),
+    ...(p.move && typeof p.move === "object" && typeof p.move.move === "string" ? { move: { move: p.move.move, reason: str(p.move.reason), evidence: strings(p.move.evidence, 6), misconception: str(p.move.misconception), chosen: str(p.move.chosen) } } : {}),
+    targets: pending ? str(p.targets) : "",
+    discriminates: pending ? str(p.discriminates) : "",
+    hints: pending && typeof p.hints === "number" && p.hints >= 0 ? Math.min(8, Math.floor(p.hints)) : 0,
   };
 }
 
@@ -157,7 +168,7 @@ Follow the app's instructional action for this turn. Finish the current step bef
  * question must not wipe the record that help was given for it.
  * A reply that ends by asking something always leaves a question pending, whatever the tag says.
  */
-export function readSessionReply(text: string, record: SessionRecord, opts: { now?: string; resolved?: boolean; assesses?: string } = {}): { text: string; record: SessionRecord; tagged: boolean } {
+export function readSessionReply(text: string, record: SessionRecord, opts: { now?: string; resolved?: boolean; assesses?: string; aim?: { targets: string; discriminates: string } } = {}): { text: string; record: SessionRecord; tagged: boolean } {
   let tag: Record<string, unknown> | null = null;
   const clean = text
     .replace(/`{0,3}\s*<session>([\s\S]*?)<\/session>\s*`{0,3}/g, (_all, raw: string) => {
@@ -187,6 +198,10 @@ export function readSessionReply(text: string, record: SessionRecord, opts: { no
       next.attempt = "";
       next.helpGiven = [];
       next.answerExposed = false;
+      // What a Master-mode question is aimed at goes with it, and the hint ladder starts again.
+      next.targets = pending ? opts.aim?.targets ?? "" : "";
+      next.discriminates = pending ? opts.aim?.discriminates ?? "" : "";
+      next.hints = 0;
     }
   } else if (opts.resolved && !pending) {
     next.helpGiven = [];
@@ -195,6 +210,9 @@ export function readSessionReply(text: string, record: SessionRecord, opts: { no
   if (!next.pendingQuestion) {
     next.askedUnder = "";
     next.assesses = "";
+    next.targets = "";
+    next.discriminates = "";
+    next.hints = 0;
   }
   if (t) {
     next.helpGiven = [...new Set([...next.helpGiven, ...strings(t.helpGiven)])].slice(-8);

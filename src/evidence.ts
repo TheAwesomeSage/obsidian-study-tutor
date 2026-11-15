@@ -3,6 +3,8 @@
 // routing weight or model reply can raise a level past what `supportedLevel` returns.
 // docs/policy.md describes the same rules in prose.
 
+import { ReasoningAssessment, normaliseReasoning } from "./reasoning";
+
 export type Outcome = "correct" | "partial" | "incorrect" | "skipped" | "ungraded";
 
 /**
@@ -74,6 +76,12 @@ export interface Attempt {
   taskType?: TaskType | "";
   /** The question family: questions that test the same thing the same way. Empty when unknown. */
   family?: string;
+  /**
+   * The outcome kept apart from the reasoning: result, method and assumptions judged separately,
+   * the earliest error, and any SymPy check labelled with what it evaluated. Open answers only;
+   * exact answers, multiple choice and attempts from before 0.9 have none.
+   */
+  reasoning?: ReasoningAssessment;
 }
 
 /** One change of level, with what caused it. Every change is logged so it can be explained later. */
@@ -151,6 +159,7 @@ export function normaliseAttempt(raw: unknown): Attempt | null {
     assumptions: str("assumptions"),
     taskType: TASK_TYPES.includes(r.taskType as TaskType) ? (r.taskType as TaskType) : "",
     family: str("family").slice(0, 80),
+    ...(normaliseReasoning(r.reasoning) ? { reasoning: normaliseReasoning(r.reasoning) } : {}),
   };
 }
 

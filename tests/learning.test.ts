@@ -922,7 +922,7 @@ test("tools validate input, time out, cancel and report failures as results", as
 
   // The engine's own tools.
   const t = await setup();
-  assert.deepEqual(t.engine.tools.list().map((x) => x.name), ["maths.equivalent", "maths.check", "maths.compute", "vault.transcript", "vault.source", "graph.inspect"]);
+  assert.deepEqual(t.engine.tools.list().map((x) => x.name), ["maths.equivalent", "maths.check", "maths.compute", "vault.transcript", "vault.source", "vault.passage", "course.lesson", "graph.inspect"]);
   const state = await t.store.loadState(t.dir, 4);
   state.levels = { 1: 1, 2: 3, 3: null };
   await t.store.saveState(t.dir, state);

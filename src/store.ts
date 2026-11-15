@@ -10,6 +10,8 @@ import type { PolicyCase } from "./policy";
 import { SessionRecord, sessionMarkdown } from "./session";
 import type { ActivityRecord } from "./configure";
 import type { CoursePackage } from "./coursepkg";
+import { Misconception, parseMisconception, reconcile } from "./misconceptions";
+import { ExpansionRecord, parseExpansion } from "./expansion";
 
 /** One learner interaction with an activity. Kept apart from evidence.md; only an assessed answer also becomes an attempt there. */
 export interface ActivityEvent {
@@ -110,15 +112,19 @@ const safeName = (s: string): string => s.replace(/[\\/:*?"<>|#^[\]]/g, " ").rep
 const EVIDENCE_HEAD = "Every answer Study Tutor has marked on this topic and every change of level, one record per line.\nThis is the evidence behind the levels in state.md. Edit it only if you know what you are changing.";
 const FENCE = "```";
 
-function parseEvidence(md: string): { attempts: Attempt[]; changes: LevelChange[] } {
+function parseEvidence(md: string): { attempts: Attempt[]; changes: LevelChange[]; misconceptions: Misconception[] } {
   const attempts: Attempt[] = [];
   const changes: LevelChange[] = [];
+  const misconceptions: Misconception[] = [];
   for (const line of md.split(/\r?\n/)) {
     if (!line.startsWith("{")) continue;
     try {
       const r = JSON.parse(line);
       if (r.kind === "change" && typeof r.t === "string" && Number.isInteger(r.skill)) changes.push({ t: r.t, skill: r.skill, concept: String(r.concept ?? ""), from: r.from ?? null, to: r.to ?? null, cause: String(r.cause ?? ""), note: String(r.note ?? "") });
-      else {
+      else if (r.kind === "misconception") {
+        const m = parseMisconception(r);
+        if (m && !misconceptions.some((x) => x.id === m.id)) misconceptions.push(m);
+      } else {
         const a = normaliseAttempt(r);
         if (a) attempts.push(a);
       }
@@ -126,11 +132,14 @@ function parseEvidence(md: string): { attempts: Attempt[]; changes: LevelChange[
       /* one damaged line does not cost the rest */
     }
   }
-  return { attempts, changes };
+  return { attempts, changes, misconceptions };
 }
 
+/** A legacy note nothing has happened to is rebuilt from state.md on every load, so it is not written to the evidence log. */
+const pristineLegacy = (m: Misconception): boolean => !!m.legacy && m.status === "suspected" && m.history.length <= 1;
+
 function serializeEvidence(title: string, s: LearnerState): string {
-  const lines = [...s.attempts.map((a) => JSON.stringify({ kind: "attempt", ...a })), ...s.changes.map((c) => JSON.stringify({ kind: "change", ...c }))];
+  const lines = [...s.attempts.map((a) => JSON.stringify({ kind: "attempt", ...a })), ...s.changes.map((c) => JSON.stringify({ kind: "change", ...c })), ...(s.misconceptionRecords ?? []).filter((m) => !pristineLegacy(m)).map((m) => JSON.stringify({ kind: "misconception", ...m }))];
   return withFrontmatter({ tutor: "evidence", topic: title, attempts: s.attempts.length }, `${EVIDENCE_HEAD}\n\n${FENCE}jsonl\n${lines.join("\n")}\n${FENCE}\n`);
 }
 
@@ -415,13 +424,20 @@ export class Store {
     }
     const s = parseState(await this.fs.read(p));
     const legacy = s.attempts.length > 0;
+    let records: Misconception[] = [];
     if (await this.fs.exists(this.evidencePath(dir))) {
       const stored = parseEvidence(await this.fs.read(this.evidencePath(dir)));
       // The evidence file is the record. Attempts still in the old place are added, never doubled.
       const ids = new Set(stored.attempts.map((a) => a.id));
       s.attempts = [...stored.attempts, ...s.attempts.filter((a) => !ids.has(a.id))];
       s.changes = stored.changes;
+      records = stored.misconceptions;
     }
+    // Misconceptions are records with evidence; the plain list in state.md is derived from them.
+    // A description listed there with no record (an older file, or one added by hand) is kept as a legacy suspicion.
+    const mis = reconcile(records, s.misconceptions, s.attempts, `${this.today()}T00:00:00.000Z`);
+    s.misconceptionRecords = mis.records;
+    s.misconceptions = mis.list;
     // Keep the state in step with the topic card if it was edited by hand.
     for (const sk of topic.subskills) {
       if (!(sk.n in s.names)) {
@@ -453,7 +469,12 @@ export class Store {
    */
   async saveState(dir: string, s: LearnerState): Promise<void> {
     const p = this.evidencePath(dir);
-    if (s.attempts.length || s.changes.length || this.evidenceWritten.has(p) || (await this.fs.exists(p))) {
+    if (s.misconceptionRecords) {
+      const mis = reconcile(s.misconceptionRecords, s.misconceptions, s.attempts, `${this.today()}T00:00:00.000Z`);
+      s.misconceptionRecords = mis.records;
+      s.misconceptions = mis.list;
+    }
+    if (s.attempts.length || s.changes.length || s.misconceptionRecords?.some((m) => !m.legacy) || this.evidenceWritten.has(p) || (await this.fs.exists(p))) {
       const evidence = serializeEvidence(s.topic, s);
       if (this.evidenceWritten.get(p) !== evidence) {
         await this.writeFile(p, evidence);
@@ -723,6 +744,30 @@ export class Store {
     all.push(rec);
     const head = "Interactive activities configured for this topic, one per line. Each is bounded settings for an existing module, with its sources, versions and how it was made. Your answers in them are in activity-log.md and, when assessed, evidence.md.";
     await this.writeFile(this.activitiesPath(dir), withFrontmatter({ tutor: "activities", count: all.length }, `${head}\n\n${FENCE}jsonl\n${all.map((r) => JSON.stringify(r)).join("\n")}\n${FENCE}\n`));
+  }
+
+  // ----- requests to the compiler for linked material, and what came back -----
+
+  expansionsPath(dir: string): string {
+    return `${dir}/expansions.md`;
+  }
+
+  /** Requests for prerequisite or extension material made while studying this topic. They are never evidence. */
+  async loadExpansions(dir: string): Promise<ExpansionRecord[]> {
+    const p = this.expansionsPath(dir);
+    if (!(await this.fs.exists(p))) return [];
+    return jsonl(await this.fs.read(p)).flatMap((r) => {
+      const x = parseExpansion(r);
+      return x ? [x] : [];
+    });
+  }
+
+  /** Adds or replaces one record by request id. */
+  async saveExpansion(dir: string, rec: ExpansionRecord): Promise<void> {
+    const all = (await this.loadExpansions(dir)).filter((r) => r.request.id !== rec.request.id);
+    all.push(rec);
+    const head = "Requests for linked material (a missing prerequisite, or going further than the course), one per line, with what the compiler returned. These are study material only: they change no level.";
+    await this.writeFile(this.expansionsPath(dir), withFrontmatter({ tutor: "expansions", count: all.length }, `${head}\n\n${FENCE}jsonl\n${all.slice(-100).map((r) => JSON.stringify(r)).join("\n")}\n${FENCE}\n`));
   }
 
   async logActivity(dir: string, ev: ActivityEvent): Promise<void> {
