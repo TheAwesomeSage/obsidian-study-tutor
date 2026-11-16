@@ -1,5 +1,6 @@
 import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf } from "obsidian";
-import { ClaudeError, callClaude, findClaude, usageLine } from "./claude";
+import { usageLine } from "./claude";
+import { callModel, modelCliPath, modelFor, MODEL_PROVIDERS, providerFor } from "./model-provider";
 import { braveResearch, DEFAULT_RESEARCH_LIMITS, researchLimits, type ResearchLimits } from "./compile-research";
 import { CompileCancelled, type ExpansionRequest } from "./compiler";
 import { CompileResult, Engine, EngineSettings, Material } from "./engine";
@@ -57,10 +58,15 @@ interface PluginData {
 
 const DEFAULTS: TutorSettings = {
   root: "Tutor",
+  modelProvider: "claude",
   claudePath: "",
+  codexPath: "",
   chatModel: "sonnet",
   compileModel: "sonnet",
   utilityModel: "haiku",
+  codexChatModel: "",
+  codexCompileModel: "",
+  codexUtilityModel: "",
   effort: "low",
   targetLevel: 4,
   maxChatWords: 600,
@@ -401,7 +407,7 @@ export default class StudyTutorPlugin extends Plugin {
       const how = res.refresh === "unchanged" ? `Nothing changed (${res.why}); no model was called.` : res.refresh === "partial" ? `Refreshed subskill ${(res.subskillsRefreshed ?? []).join(", ")} (${res.why}).` : res.refresh === "full" ? `Compiled in full: ${res.why}.` : "";
       const stats = res.metrics;
       const activity = stats ? `\n${stats.searches} search attempts · ${stats.pages} pages requested · ${stats.cacheHits} cache hits · Ollama ${(stats.localMs / 1000).toFixed(1)}s (${stats.localCalls} calls)` : "";
-      new Notice(`${res.status === "partial" ? "Partial topic saved" : "Topic ready"}: ${res.subskills} subskills, ${res.questions} questions.${res.preservedCourse ? " The previous topic was kept." : ""}${how ? `\n${how}` : ""}${res.coverage ? `\n${res.coverage}` : ""}${activity}\nClaude: ${usageLine(res.usage)} in ${res.usage.calls} call(s)`, 12000);
+      new Notice(`${res.status === "partial" ? "Partial topic saved" : "Topic ready"}: ${res.subskills} subskills, ${res.questions} questions.${res.preservedCourse ? " The previous topic was kept." : ""}${how ? `\n${how}` : ""}${res.coverage ? `\n${res.coverage}` : ""}${activity}\nModel: ${usageLine(res.usage)} in ${res.usage.calls} call(s)`, 12000);
       this.data.activeTopic = res.preservedCourse ?? res.dir;
       await this.save();
       // Keep the flashcard note in step with the new question bank; existing schedules are kept.
@@ -537,11 +543,12 @@ class TutorSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     const s = this.plugin.opts;
     containerEl.empty();
-    const text = (name: string, desc: string, key: "root" | "claudePath" | "chatModel" | "compileModel" | "utilityModel", placeholder = "", after?: () => void) =>
+    type TextSetting = "root" | "claudePath" | "codexPath" | "chatModel" | "compileModel" | "utilityModel" | "codexChatModel" | "codexCompileModel" | "codexUtilityModel";
+    const text = (name: string, desc: string, key: TextSetting, placeholder = "", after?: () => void) =>
       new Setting(containerEl).setName(name).setDesc(desc).addText((t) =>
         t
           .setPlaceholder(placeholder)
-          .setValue(s[key])
+          .setValue(s[key] ?? "")
           .onChange(async (v) => {
             s[key] = v.trim();
             await this.plugin.save();
@@ -559,29 +566,42 @@ class TutorSettingTab extends PluginSettingTab {
       );
 
     text("Tutor folder", "Where topics, chats and the editable skill files live in this vault.", "root", "Tutor", () => this.plugin.buildStore());
-    const detected = findClaude(s.claudePath);
-    text("Claude CLI path", detected ? `Using: ${detected}` : "Not found. Install Claude Code or enter the full path to the claude binary.", "claudePath", "auto-detect").addButton((b) =>
+    const provider = providerFor(s);
+    const codex = provider === "codex";
+    new Setting(containerEl)
+      .setName("Model provider")
+      .setDesc("Choose the signed-in CLI for tutoring, course compilation, and grading.")
+      .addDropdown(d => d.addOptions(MODEL_PROVIDERS).setValue(provider).onChange(async value => {
+        s.modelProvider = value === "codex" ? "codex" : "claude";
+        await this.plugin.save();
+        this.display();
+      }));
+    const detected = modelCliPath(s);
+    const name = MODEL_PROVIDERS[provider];
+    const signIn = codex ? "codex login" : "claude";
+    text(`${name} path`, detected ? `Using ${detected}` : `Install ${name} or enter the full path to its executable. Sign in by running ${signIn}.`,
+      codex ? "codexPath" : "claudePath", "Auto-detect").addButton((b) =>
       b.setButtonText("Test").onClick(async () => {
-        const p = findClaude(s.claudePath);
-        if (!p) {
-          new Notice("Claude CLI not found.");
-          return;
-        }
+        const settings = { ...s };
         b.setDisabled(true);
         try {
-          const r = await callClaude({ claudePath: p, model: s.utilityModel, system: "Reply with exactly: OK", input: "Test.", timeoutMs: 60000 });
-          new Notice(`Claude replied "${r.text.trim().slice(0, 40)}".\nOverhead for this call: ${usageLine(r.usage)}`, 10000);
+          const r = await callModel(settings, { model: modelFor(settings, "chatModel"), system: "Reply with exactly OK.", input: "Test.", timeoutMs: 60000 });
+          new Notice(`${MODEL_PROVIDERS[providerFor(settings)]} replied "${r.text.trim().slice(0, 40)}".\n${usageLine(r.usage)}`, 10000);
         } catch (e) {
-          new Notice(`Test failed: ${e instanceof ClaudeError ? e.message : String(e)}`, 12000);
+          new Notice(`Connection test failed. ${e instanceof Error ? e.message : String(e)}`, 12000);
+        } finally {
+          b.setDisabled(false);
         }
-        b.setDisabled(false);
       }),
     );
 
     new Setting(containerEl).setName("Models").setHeading();
-    text("Chat model", "Used for study turns in every mode. An alias (sonnet, opus, haiku, fable) or a full model name.", "chatModel", "sonnet");
-    text("Compile model", "Plans objectives, writes lessons and questions, and checks coverage.", "compileModel", "sonnet");
-    text("Utility model", "Cheap model for reading large note sets, summarising chats and grading flashcards.", "utilityModel", "haiku");
+    text("Chat model", codex ? "Used in study chats. Leave blank to use the CLI default." : "Used in study chats. Enter an alias or a full model name.",
+      codex ? "codexChatModel" : "chatModel", codex ? "CLI default" : "sonnet");
+    text("Compile model", "Plans objectives, writes lessons and questions, and checks coverage.",
+      codex ? "codexCompileModel" : "compileModel", codex ? "CLI default" : "sonnet");
+    text("Utility model", "Used for summaries, flashcard grading and simpler requests.",
+      codex ? "codexUtilityModel" : "utilityModel", codex ? "CLI default" : "haiku");
     new Setting(containerEl)
       .setName("Chat effort")
       .setDesc("How hard the chat model thinks before replying. Low uses the least. Raise it for proof-heavy maths.")

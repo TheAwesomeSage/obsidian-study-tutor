@@ -3,6 +3,7 @@
 // engine has a method of the same name that calls it. No Obsidian imports.
 
 import { ClaudeError, Usage } from "./claude";
+import { modelFor } from "./model-provider";
 import { Attempt } from "./evidence";
 import { Grade, LearnerState, Mode, Question, fmStr, setLevel, stateForPrompt } from "./formats";
 import { GRADE_SCHEMA, utilityPrompt } from "./prompts";
@@ -103,12 +104,12 @@ export async function summarySheet(eng: Engine, dir: string): Promise<{ path: st
   const topic = await eng.store.loadTopic(dir);
   const state = await eng.store.loadState(dir, s.targetLevel);
   const res = await eng.call({
-    model: s.chatModel,
+    model: modelFor(s, "chatModel"),
     effort: s.effort || undefined,
     system: await eng.store.skill("summary.md"),
     input: `# Topic card\n\n${topic.body}\n\n# Learner state\n\n${stateForPrompt(state, eng.today())}`,
     timeoutMs: 300000,
-  });
+  }, s);
   const body = res.text.trim().replace(/^```(?:markdown|md)?\r?\n([\s\S]*?)\r?\n```$/, "$1");
   if (!body) throw new ClaudeError("The summary came back empty.");
   return { path: await eng.store.saveSummary(dir, topic.title, body), usage: res.usage };
@@ -129,12 +130,12 @@ export async function grade(eng: Engine, q: Question, answer: string, careful = 
   const open = q.type === "open";
   const brief = open && q.rubric ? rubricBrief(q.rubric) : "";
   const res = await eng.call({
-    model: strong ? s.chatModel : s.utilityModel,
+    model: modelFor(s, strong ? "chatModel" : "utilityModel"),
     effort: careful ? s.hardEffort || s.effort || undefined : strong ? s.effort || undefined : undefined,
     system: utilityPrompt(await eng.store.skill("utility.md"), "grade"),
     input: `Question: ${q.question}\n\nModel answer: ${q.answer}\n${q.explanation ? `Explanation: ${q.explanation}\n` : ""}${q.rubric ? `Rubric: ${q.rubric}\n` : ""}${brief ? `Rubric by what it checks:\n${brief}\n` : ""}${open ? `\n${REASONING_RULE} Give this as "reasoning", answering the rubric points in order in rubric_met.\n` : ""}\nLearner's answer: ${answer.trim() || "(blank)"}`,
     jsonSchema: open ? GRADE_REASONING_SCHEMA : GRADE_SCHEMA,
-  });
+  }, s);
   let o = res.structured as { grade?: string; feedback?: string; reasoning?: unknown } | undefined;
   if (!o) {
     try {

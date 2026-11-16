@@ -590,6 +590,26 @@ test("a chat saved by an older version reopens with its question open, and nothi
   await tick();
   assert.equal(plugin.opts.chatModel, "opus", "saved settings are kept");
   assert.equal(plugin.opts.weights.errors, 1.5, "and new ones take their defaults");
+  const tab = plugin.settingTabs[0];
+  tab.display();
+  const field = (label: string, control: string) => {
+    const rows = Array.from(tab.containerEl.querySelectorAll(".setting-item")) as HTMLElement[];
+    return rows.find(row => row.firstElementChild?.textContent === label)?.querySelector(control) as HTMLInputElement | HTMLSelectElement;
+  };
+  const change = (control: HTMLInputElement | HTMLSelectElement, value: string) => {
+    control.value = value;
+    control.dispatchEvent(new control.ownerDocument.defaultView!.Event("change"));
+  };
+  assert.equal(field("Model provider", "select").value, "claude");
+  change(field("Model provider", "select"), "codex");
+  await tick();
+  assert.equal(field("Chat model", "input").value, "");
+  change(field("Chat model", "input"), "gpt-test");
+  await tick();
+  change(field("Model provider", "select"), "claude");
+  await tick();
+  assert.equal(field("Chat model", "input").value, "opus");
+  assert.equal(plugin.stored.settings.codexChatModel, "gpt-test");
   const out = parseCompileOutput(COMPILED);
   const dir = await plugin.store.saveCompiled({ title: "Linear maps", fm: { subject: "none" }, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
   // A user-edited teaching file, and a chat with no session record, exactly as 0.4.0 wrote them.

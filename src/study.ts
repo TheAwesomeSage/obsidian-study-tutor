@@ -19,7 +19,7 @@ import { expansionLine } from "./expansion";
 import type { Screen, TutorView } from "./view";
 import { MODE_INFO, button, chip, confirmAction, iconButton, modeInfo } from "./ui";
 
-const ROUTE_NOTE: Record<string, string> = { simple: "cheaper model", standard: "chat model", complex: "chat model, extra thinking" };
+const ROUTE_NOTE: Record<string, string> = { simple: "utility model", standard: "chat model", complex: "chat model, extra thinking" };
 const k = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 /** A trailing status line the engine appends to a reply when SymPy computed or checked something. */
 const SYMPY_LINE = /\n\n(\*SymPy [^\n]*\*|\*\*SymPy disagrees\*\*[^\n]*)\s*$/;
@@ -602,7 +602,7 @@ export class StudyScreen implements Screen {
       quick("Hint", "life-buoy", "Hint please.", "ask for a hint. The answer then counts as helped.");
       quick("Explain", "book-open", "Explain this to me.", "ask for an explanation. The answer then counts as helped.");
       quick("Skip", "skip-forward", "skip", "skip this question and see the answer. It is recorded as skipped.");
-      const activity = button(q, { label: "Visual", icon: "play", tone: "ghost", title: "Visual activity: ask for a simulation of this concept. Uses a saved activity or the local model, never Claude.", onClick: () => void this.send("Show me a simulation for this concept.") });
+      const activity = button(q, { label: "Visual", icon: "play", tone: "ghost", title: "Visual activity: ask for a simulation of this concept. Uses a saved activity or Ollama.", onClick: () => void this.send("Show me a simulation for this concept.") });
       activity.disabled = this.busy;
     }
 

@@ -5,6 +5,8 @@ import { BUNDLED, buildSystem, buildTurnInput, topicForPrompt, utilityPrompt } f
 import { Store } from "../src/store";
 import { Engine, batchMaterial } from "../src/engine";
 import { findClaude, workDir } from "../src/claude";
+import { CodexTurn, codexSchema } from "../src/codex-cli";
+import { modelFor, providerFor } from "../src/model-provider";
 import { neutraliseDeep, neutraliseRemote } from "../src/safemd";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -605,4 +607,39 @@ test("prompt files are written where only this user can read them", () => {
     fs.rmSync(base, { recursive: true, force: true });
     fs.rmSync(taken, { recursive: true, force: true });
   }
+});
+
+test("model selection preserves saved settings and uses an independent Codex default", () => {
+  const legacy = { claudePath: "", chatModel: "opus", compileModel: "sonnet", utilityModel: "haiku" };
+  assert.equal(providerFor(legacy), "claude");
+  assert.equal(modelFor(legacy, "chatModel"), "opus");
+  const settings = { ...legacy, modelProvider: "codex" as const, codexCompileModel: " test-model " };
+  assert.equal(modelFor(settings, "chatModel"), "");
+  assert.equal(modelFor(settings, "compileModel"), "test-model");
+  assert.equal(modelFor({ ...settings, modelProvider: "claude" }, "compileModel"), "sonnet");
+});
+
+test("Codex final events produce sanitized structured output and account for cached tokens once", () => {
+  const schema = {
+    type: "object", required: ["feedback"], properties: {
+      feedback: { type: "string" }, reasoning: { type: "object", properties: { result: { type: "string" } } },
+    },
+  };
+  assert.deepEqual(codexSchema(schema), {
+    type: "object", required: ["feedback", "reasoning"], additionalProperties: false, properties: {
+      feedback: { type: "string" }, reasoning: { anyOf: [
+        { type: "object", required: ["result"], additionalProperties: false, properties: { result: { anyOf: [{ type: "string" }, { type: "null" }] } } },
+        { type: "null" },
+      ] },
+    },
+  });
+  const turn = new CodexTurn();
+  turn.read(JSON.stringify({ type: "item.completed", item: { type: "reasoning", text: "private reasoning" } }));
+  turn.read(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: '{"feedback":"![remote](https://example.org/pixel.png)","reasoning":null}' } }));
+  turn.read(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 25, cache_write_input_tokens: 10, output_tokens: 20 } }));
+  const result = turn.result(0, "", schema);
+  assert.deepEqual(result.structured, { feedback: neutraliseRemote("![remote](https://example.org/pixel.png)") });
+  assert.deepEqual(result.usage, { input: 65, cacheRead: 25, cacheWrite: 10, output: 20, costUsd: 0, calls: 1 });
+  assert.throws(() => turn.read(JSON.stringify({ type: "item.started", item: { type: "command_execution" } })), /tool outside the tutor/);
+  assert.throws(() => new CodexTurn().result(1, "Sign in"), /Sign in/);
 });

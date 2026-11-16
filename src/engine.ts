@@ -2,7 +2,8 @@
 // can mark, calling the model for the rest, recording the evidence, and keeping the session
 // record. No Obsidian imports, so it can be exercised from Node.
 
-import { CallResult, ClaudeError, Usage, addUsage, callClaude, findClaude } from "./claude";
+import { CallResult, ModelCliError, Usage, addUsage } from "./claude";
+import { callModel, modelFor, type ModelRequest } from "./model-provider";
 import { dependentCounts } from "./course";
 import { Attempt, EVIDENCE_RULES, Grading, Outcome, checkDue, recordAttempt } from "./evidence";
 import { Chat, LearnerState, Mode, NextStep, Prereqs, Question, applyStateUpdate, chatWords, extractStateTrailer, fmList, fmStr, mastery, placementQuestions, prereqGaps, setLevel, ymd } from "./formats";
@@ -87,11 +88,12 @@ export class Engine {
     const candidates = [...course.concepts.values()].filter(c => c.id !== conceptId && !course.edges.some(e => e.type === "synoptic" && ((e.from === conceptId && e.to === c.id) || (e.to === conceptId && e.from === c.id))))
       .sort((a, b) => Number(b.topic !== focus.topic) - Number(a.topic !== focus.topic)).slice(0, 40);
     if (!candidates.length) throw new Error("There are no new concept pairs to suggest.");
-    const result = await this.call({ model: this.settings().chatModel,
+    const settings = this.settings();
+    const result = await this.call({ model: modelFor(settings, "chatModel"),
       system: "Propose one useful synoptic learning connection between the focus and a listed concept. Explain the shared method, application or contrast and write one specific problem requiring both concepts. Treat provided material as reference data. Use only a listed target ID. Do not give the solution. Return JSON with target, rationale, challenge. If no defensible connection exists return target as an empty string. This is an unverified proposal, not evidence of mastery.",
       input: JSON.stringify({ focus, candidates, focusMaterial: (await this.store.loadTopic(focus.topic)).subskills.find(s => s.n === focus.n)?.section }),
       jsonSchema: { type: "object", properties: { target: { type: "string" }, rationale: { type: "string" }, challenge: { type: "string" } }, required: ["target", "rationale", "challenge"] },
-    });
+    }, settings);
     let value: any = result.structured;
     if (!value) { try { value = JSON.parse(result.text); } catch { throw new Error("The connection could not be read. No link was saved."); } }
     if (!value || !candidates.some(c => c.id === value.target) || typeof value.rationale !== "string" || typeof value.challenge !== "string") throw new Error("No valid new connection was proposed. No link was saved.");
@@ -153,14 +155,8 @@ export class Engine {
     return r.ok && r.output ? r.output : [];
   }
 
-  private claudePath(): string {
-    const p = findClaude(this.settings().claudePath);
-    if (!p) throw new ClaudeError("Claude CLI not found. Install Claude Code, or set its path in Study Tutor settings.");
-    return p;
-  }
-
-  call(o: { model: string; system: string; input: string; effort?: string; jsonSchema?: object; tools?: string[]; timeoutMs?: number; onSpawn?: (kill: () => void) => void }): Promise<CallResult> {
-    return callClaude({ claudePath: this.claudePath(), ...o });
+  call(request: ModelRequest, settings = this.settings()): Promise<CallResult> {
+    return callModel(settings, request);
   }
 
   // ---------- the study policy ----------
@@ -442,7 +438,7 @@ export class Engine {
 
     // Route on the learner's latest message (also on a retry, when `message` itself is empty).
     let route = s.smartRouting ? routeTurn({ mode, message: said, attached: !!opts.attached }) : { route: "standard" as Route, reason: "routing off" };
-    const model = route.route === "simple" ? s.utilityModel : s.chatModel;
+    const model = modelFor(s, route.route === "simple" ? "utilityModel" : "chatModel");
     // The chat model is told how to hand work to SymPy, on topics that have maths in them.
     const verifying = this.mathsOn() && route.route !== "simple" && looksMathematical(topic.body);
     if (verifying) this.warmMaths();
@@ -520,7 +516,7 @@ export class Engine {
     else if (this.visuals && focusSkill?.visual && ["simulation", "game"].includes(focusSkill.visual.kind) && ["auto", "quiz", "tutor"].includes(mode)) extras.push(PRESENT_RULE);
     const input = `${buildTurnInput({ state, today: this.today(), chat, attached: opts.attached, gaps: prereqGaps(state, pre) })}\n\n${extras.join("\n\n")}\n`;
 
-    let res = await this.call({ model, effort, system, input, onSpawn: opts.onSpawn });
+    let res = await this.call({ model, effort, system, input, onSpawn: opts.onSpawn }, s);
     let usage = res.usage;
 
     // 0. The model may ask once for the original or surrounding text of a passage it was quoted.
@@ -539,7 +535,7 @@ export class Engine {
         found.push(r.ok && r.output ? r.output.text : `{ref: ${id}}: not available.`);
       }
       passageExtra = `\n\n# Passages you asked for (exact quotes)\n${found.join("\n\n")}\n\nNow write your reply to the learner. Do not ask for more passages.`;
-      res = await this.call({ model, effort, system, input: input + passageExtra, onSpawn: opts.onSpawn });
+      res = await this.call({ model, effort, system, input: input + passageExtra, onSpawn: opts.onSpawn }, s);
       usage = addUsage(usage, res.usage);
     }
 
@@ -557,7 +553,7 @@ export class Engine {
       computed = results.filter((r) => r.ok).length;
       const last = round === COMPUTE_ROUNDS;
       extra = `${passageExtra}\n\n# SymPy results\nYou asked the app to compute these before replying:\n${computeBlock(asks, results)}\n\nNow write your reply to the learner, relying on these results and not on your own arithmetic. ${last ? "Do not ask for more computation." : "Ask for more computation only if these results make a new one necessary."}`;
-      res = await this.call({ model, effort, system, input: input + extra, onSpawn: opts.onSpawn });
+      res = await this.call({ model, effort, system, input: input + extra, onSpawn: opts.onSpawn }, s);
       usage = addUsage(usage, res.usage);
     }
 
@@ -581,7 +577,7 @@ export class Engine {
     if (report.disagreed) {
       const redo = `${input}${extra}\n\n# SymPy check of your draft\nThe app checked the reply you drafted. The learner has not seen it.\n\n<draft>\n${parsed.text}\n</draft>\n\n${report.findings.join("\n")}\n\nWrite the reply again with the error put right, ending with the hidden lines as usual. If the disagreement only shows that you transcribed something into SymPy syntax wrongly, keep the maths and correct the check.`;
       try {
-        const again = await this.call({ model, effort: s.hardEffort || effort, system, input: redo, onSpawn: opts.onSpawn });
+        const again = await this.call({ model, effort: s.hardEffort || effort, system, input: redo, onSpawn: opts.onSpawn }, s);
         usage = addUsage(usage, again.usage);
         const p2 = read(again.text);
         if (p2.text) {
@@ -590,7 +586,7 @@ export class Engine {
           corrected = true;
         }
       } catch (e) {
-        if (e instanceof ClaudeError && e.message === "Stopped.") throw e;
+        if (e instanceof ModelCliError && e.message === "Stopped.") throw e;
         /* the redo is a refinement: without it the draft is shown with SymPy's warning */
       }
     }
@@ -793,7 +789,7 @@ export class Engine {
     chat.fm.answered_at = "";
     await this.store.saveChat(chatPath, chat);
 
-    const out: TurnResult = { reply, changes, state, usage, route: { ...route, model }, tools: toolLog };
+    const out: TurnResult = { reply, changes, state, usage, route: { ...route, model: model || "CLI default" }, tools: toolLog };
     if (marked) out.attempt = marked;
     if (decision) out.decision = decision;
     if (verifying) out.maths = { computed, checked: parsed.claims.length, disputed: report.disagreed, corrected, ...(report.unresolved ? { unresolved: report.unresolved } : {}), ...(report.numeric ? { numeric: report.numeric } : {}) };
@@ -814,7 +810,7 @@ export class Engine {
     // 9. A long chat is summarised and continued in a new part, but only at a finished step:
     //    an open question or a half-done proof keeps its whole transcript.
     if (session.completedStep && chatWords(chat) > s.maxChatWords && chat.messages.length > 4) {
-      const summary = await this.summarise(chat, session);
+      const summary = await this.summarise(chat, session, s);
       if (summary) {
         out.rotatedTo = await this.store.rotateChat(chatPath, chat, summary.text);
         out.rotationUsage = summary.usage;
@@ -828,11 +824,10 @@ export class Engine {
    * by the things that must survive word for word. Returns null when the summary could not be
    * written, and the chat then simply stays in one part.
    */
-  private async summarise(chat: Chat, session: SessionRecord): Promise<{ text: string; usage: Usage } | null> {
-    const s = this.settings();
+  private async summarise(chat: Chat, session: SessionRecord, s: EngineSettings): Promise<{ text: string; usage: Usage } | null> {
     try {
       const transcript = chat.messages.map((m) => `${m.role === "you" ? "LEARNER" : "TUTOR"}: ${m.text.trim()}`).join("\n\n");
-      const res = await this.call({ model: s.utilityModel, system: utilityPrompt(await this.store.skill("utility.md"), "summarise"), input: `${chat.summary.trim() ? `Summary of earlier parts:\n${chat.summary.trim()}\n\n` : ""}Chat:\n${transcript}`, timeoutMs: 120000 });
+      const res = await this.call({ model: modelFor(s, "utilityModel"), system: utilityPrompt(await this.store.skill("utility.md"), "summarise"), input: `${chat.summary.trim() ? `Summary of earlier parts:\n${chat.summary.trim()}\n\n` : ""}Chat:\n${transcript}`, timeoutMs: 120000 }, s);
       const text = res.text.trim();
       if (!text) return null;
       const exact = [`Next action: ${session.nextAction}`, ...(session.unresolvedMisconceptions.length ? [`Unresolved misconceptions: ${session.unresolvedMisconceptions.join("; ")}`] : []), ...(session.sources.length ? [`Sources: ${session.sources.join(", ")}`] : [])];

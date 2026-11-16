@@ -4,6 +4,7 @@ What changed in each version of Study Tutor, newest first.
 
 ## Unreleased
 
+- Choose Claude Code or Codex CLI (ChatGPT) in Study Tutor settings. The selected provider handles tutoring, compilation and grading. Settings remember the path and models for each CLI.
 - Replies and researched web pages can no longer load anything from outside the vault. A remote picture becomes a plain link, a tag that would fetch something is shown as text, and a block that Dataview or JS Engine would run as JavaScript is shown as ordinary code. Fenced code is left exactly as written. The same check runs again on whatever the study view renders, so chats saved by earlier versions are covered when they are reopened.
 - Prompt files, which hold the topic card, are written to a folder only your account can read, and are rewritten on every call.
 - For anyone reading the code: `src/engine.ts` is split by concern. Activities, question-bank turns, compilation, linked-material requests, marks and the turn's tools each have their own `src/engine-*.ts` file, and the shared types and rules are in `src/engine-common.ts`. The method bodies moved unchanged, and `Engine` exports what it did before. The study turn itself (`turn()`) is still one long method.

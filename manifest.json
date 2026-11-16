@@ -3,7 +3,7 @@
   "name": "Study Tutor",
   "version": "0.9.0",
   "minAppVersion": "1.5.0",
-  "description": "A Socratic tutor, quizzer and subject expert for your notes, running on the Claude CLI with minimal token overhead.",
+  "description": "A Socratic tutor, quizzer and subject expert for your notes, using Claude Code or Codex CLI.",
   "author": "Ojas",
   "isDesktopOnly": true
 }

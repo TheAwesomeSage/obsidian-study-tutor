@@ -58,6 +58,7 @@ export interface CallResult {
 }
 
 export class ClaudeError extends Error {}
+export { ClaudeError as ModelCliError };
 
 let cleaned = false;
 /** Per temp folder: one made for this run alone, used when the usual one turns out to belong to someone else. */

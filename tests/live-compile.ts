@@ -1,16 +1,21 @@
 // One small, synthetic compile using the real CLI, optionally with local passage selection.
-// Run with npm run test:compile-live; optionally set COMPILE_OLLAMA_URL.
+// Run with npm run test:compile-live. Set TUTOR_TEST_PROVIDER=codex to test the other CLI.
+// COMPILE_OLLAMA_URL optionally enables local passage selection.
 import assert from "node:assert/strict";
 import { Engine, type EngineSettings } from "../src/engine";
 import { OllamaClient } from "../src/ollama";
 import { usageLine } from "../src/claude";
+import { MODEL_PROVIDERS, providerFor } from "../src/model-provider";
 import { Store } from "../src/store";
 import { courseLessons, courseSources } from "../src/tutoring-adapters";
 import { MemFS } from "./memfs";
 
 async function main() {
   const settings: EngineSettings = {
+    modelProvider: process.env.TUTOR_TEST_PROVIDER === "codex" ? "codex" : "claude",
     claudePath: "", chatModel: "haiku", compileModel: process.env.COMPILE_TEST_MODEL || "haiku", utilityModel: "haiku",
+    codexPath: process.env.TUTOR_TEST_CODEX_PATH, codexCompileModel: process.env.TUTOR_TEST_CODEX_MODEL,
+    codexChatModel: process.env.TUTOR_TEST_CODEX_MODEL, codexUtilityModel: process.env.TUTOR_TEST_CODEX_MODEL,
     effort: "low", targetLevel: 4, maxChatWords: 600, maxTopicWords: 2000, singlePassWords: process.env.COMPILE_OLLAMA_URL ? 10 : 600,
     smartRouting: false, hardEffort: "high",
   };
@@ -35,7 +40,7 @@ async function main() {
   };
   const r = await engine.compile(input, line => console.log(line));
   const pkg = (await store.loadPackage(r.dir))!;
-  console.log(`${r.status} · ${r.coverage} · ${r.questions} questions · Claude: ${usageLine(r.usage)} in ${r.usage.calls} calls`);
+  console.log(`${r.status} · ${r.coverage} · ${r.questions} questions · ${MODEL_PROVIDERS[providerFor(settings)]} · ${usageLine(r.usage)} in ${r.usage.calls} calls`);
   console.log(JSON.stringify({ metrics: r.metrics, issues: pkg.staged?.issues, availability: pkg.staged?.availability }));
   assert.ok(pkg.staged?.availability.some(a => a.sources.length && a.lessons.length && a.questions.length), "expected a source-backed lesson and assessment");
   assert.ok(r.questions > 0);

@@ -1,8 +1,8 @@
 # Study Tutor
 
-An Obsidian plugin that teaches you from your own notes. It has a Socratic tutor, a strict quizzer and a subject expert in a main-workspace study view, plus flashcard review that uses no tokens. It runs on the Claude CLI (your Claude subscription), and is built to load as little as possible on every turn.
+An Obsidian plugin that teaches you from your own notes. It has a Socratic tutor, a strict quizzer and a subject expert in a main-workspace study view, plus flashcard review that uses no tokens. The current source supports both Claude Code and the Codex CLI.
 
-Desktop only: it starts the `claude` program, which mobile Obsidian cannot do.
+Desktop only. The plugin launches the model provider's CLI on your computer.
 
 | Home | Study | Knowledge graph |
 | --- | --- | --- |
@@ -10,10 +10,10 @@ Desktop only: it starts the `claude` program, which mobile Obsidian cannot do.
 
 ## Install
 
-1. Install [Claude Code](https://claude.com/claude-code) and sign in once by running `claude` in a terminal.
+1. Install [Claude Code](https://claude.com/claude-code) and sign in by running `claude`, or install a current [Codex CLI](https://developers.openai.com/codex/cli/) and sign in with `codex login`.
 2. Download `study-tutor-<version>.zip` from the [latest release](https://github.com/TheAwesomeSage/obsidian-study-tutor/releases/latest) and unzip it into `<your vault>/.obsidian/plugins/`, so that you get `<your vault>/.obsidian/plugins/study-tutor/` with `main.js`, `manifest.json`, `styles.css`, `player.js`, `plot.js`, and the `assets` and `pyodide` folders. To build it yourself instead, run `npm install` and then `npm run build`; the whole folder is written to `release/study-tutor/`, so copy all of it. `player.js` and `plot.js` hold the activity player and the function plotter (JSXGraph), and `pyodide` holds Python and SymPy for the maths checks (about 30 MB). Each is loaded only when it is needed, and without them everything else still works. Obsidian's own plugin updater fetches only the first three files, so update by copying the folder.
 3. In Obsidian: Settings → Community plugins → enable **Study Tutor**.
-4. Settings → Study Tutor → **Test** checks that the CLI is found and shows the overhead of one call.
+4. Under **Settings → Study Tutor → Model provider**, pick Claude Code or **Codex CLI (ChatGPT)**, then click **Test**. The provider picker is available in builds from the current source. Each provider remembers its own executable path and optional model settings. Blank Codex model fields use the CLI default.
 
 The plugin works in any vault. On first load it creates one folder (default `Tutor/`) and keeps everything there.
 
@@ -31,7 +31,7 @@ Use **New topic** (the **+**, a button on Home, or the command "Study Tutor: New
 - a spec or syllabus note,
 - the subject alone, with no notes.
 
-Give a level in the Goal box (for example "second-year university"). With a spec or a bare subject you can switch on **Research on the web**. Set `BRAVE_SEARCH_API_KEY` in the environment Obsidian inherits before launching it. The plugin sends topical queries to [Brave Search](https://api-dashboard.search.brave.com/api-reference/web/search/get) and reads selected public pages; the key stays out of the vault and the Claude CLI. If search is unavailable, compilation can still use the material you provided, and the package shows what it could not verify. Research is optional.
+Give a level in the Goal box (for example "second-year university"). With a spec or a bare subject you can switch on **Research on the web**. Set `BRAVE_SEARCH_API_KEY` in the environment Obsidian inherits before launching it. The plugin sends topical queries to [Brave Search](https://api-dashboard.search.brave.com/api-reference/web/search/get) and reads selected public pages. The key stays out of the vault and both model CLIs. If search is unavailable, compilation can still use the material you provided, and the package shows what it could not verify. Research is optional.
 
 Compilation builds a concise topic card, a question bank, a concept graph and a course package (`package.md`). The package keeps fuller worked lessons and shows the source evidence, teaching and assessment available for each objective. Long inputs are read in batches; the report lists original specification text that could not be mapped. Ollama can select passages from long notes or research pages. When it is off or unavailable, compilation uses text matching.
 

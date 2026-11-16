@@ -3,6 +3,7 @@
 // engine has a method of the same name that calls it. No Obsidian imports.
 
 import { ClaudeError, zeroUsage } from "./claude";
+import { modelFor, providerFor } from "./model-provider";
 import { Frontmatter, contentHash, fmList, fmStr, parseCompileOutput, parseQuestions, parseTopic, splitFrontmatter } from "./formats";
 import { CoursePackage, buildPackage, coverageLine, mergeRefresh, sourceChanges, subskillSections, withStagedCoverage } from "./coursepkg";
 import { checkCompilation, compileCourse, CompileCancelled, type ExpansionRequest as CompileExpansionRequest, type StagedCourse } from "./compiler";
@@ -13,13 +14,15 @@ import type { Engine } from "./engine";
 /** Plan, collect evidence and verify a candidate before writing the topic. */
 export async function compile(eng: Engine, req: CompileRequest, onProgress: (msg: string) => void = () => {}): Promise<CompileResult> {
   const s = eng.settings();
+  const model = modelFor(s, "compileModel");
   checkCompilation(req.signal);
   const subjects = await eng.store.subjectNames();
   const candidate = await compileCourse({
-    ...req, model: s.compileModel, subjects, skill: await eng.store.skill("compile.md"), singlePassWords: s.singlePassWords,
+    ...req, model, planModelKey: providerFor(s) === "codex" ? `codex:${model || "default"}` : undefined,
+    subjects, skill: await eng.store.skill("compile.md"), singlePassWords: s.singlePassWords,
     limits: s.researchLimits, progress: onProgress, provider: eng.researchProvider, local: eng.compilationLocal,
     cache: { read: key => eng.store.readCompileCache(key), write: (key, value) => eng.store.writeCompileCache(key, value) },
-    call: o => eng.call(o),
+    call: o => eng.call(o, s),
   });
   const existing = req.existingDir ? await eng.store.loadPackage(req.existingDir).catch(() => null) : null;
   const preserve = candidate.staged.status === "partial" && !!req.existingDir;
@@ -127,7 +130,7 @@ export async function refresh(eng: Engine, req: CompileRequest & { existingDir: 
     try {
       const system = await eng.store.skill("compile.md"), subjects = await eng.store.subjectNames();
       checkCompilation(req.signal);
-      return await eng.call({ model: s.compileModel, system, input: buildRefreshInput({ title: topic.title, goal: req.goal, subjects, card: topic.body, subskills: ch.subskills, removed: ch.removed, material }), timeoutMs: 600000, onSpawn: kill => stop.signal.addEventListener("abort", kill, { once: true }) });
+      return await eng.call({ model: modelFor(s, "compileModel"), system, input: buildRefreshInput({ title: topic.title, goal: req.goal, subjects, card: topic.body, subskills: ch.subskills, removed: ch.removed, material }), timeoutMs: 600000, onSpawn: kill => stop.signal.addEventListener("abort", kill, { once: true }) }, s);
     } finally { req.signal?.removeEventListener("abort", abort); checkCompilation(req.signal); }
   })();
   const parsed = parseCompileOutput(res.text);

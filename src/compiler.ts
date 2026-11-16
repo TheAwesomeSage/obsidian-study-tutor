@@ -120,6 +120,7 @@ export async function compileCourse(p: {
   title: string; goal: string; mode: SourceMode; material: SourceInput[]; research?: boolean;
   truncated?: boolean; expansion?: ExpansionRequest; savedSources?: SourceRevision[];
   subjects: string[]; skill: string; model: string; singlePassWords: number;
+  planModelKey?: string;
   signal?: AbortSignal; progress?: (s: string) => void; cache: CompilerCache;
   limits?: Partial<ResearchLimits>; provider?: ResearchProvider | null; local?: LocalModel | null;
   call: (o: ModelCall) => Promise<CallResult>;
@@ -184,7 +185,7 @@ export async function compileCourse(p: {
   for (const [i, batch] of batches.entries()) {
     notify(`Reading scope and objectives (${i + 1}/${batches.length})…`);
     const input = { ...target, passages: batch, materialInFull: short && i === 0 ? full : undefined, research: !!p.research };
-    const key = `plan-${digest(JSON.stringify([VERSION, p.model, input]))}`;
+    const key = `plan-${digest(JSON.stringify([VERSION, p.planModelKey ?? p.model, input]))}`;
     const cached = await get<unknown>(key);
     const plan = cached && !validateJson(cached, PLAN).length ? cached as { objectives: Omit<CompileObjective, "id">[] } : decode<{ objectives: Omit<CompileObjective, "id">[] }>(
       await ask(`Inventory the learning objectives before any lesson is written. Respect the stated scope and objective count. Map each testable clause to original passage IDs; use several objectives when a clause asks for distinct abilities. Treat steps of one worked example as one objective. Titles and explanatory context without learning requirements can be left unmapped. For research, propose a concise topical web query per objective, with no personal details, paths, or verbatim private note excerpts. For expansion choose at most four objectives within the gap. ${REFERENCE_RULE}`, input, PLAN), PLAN);

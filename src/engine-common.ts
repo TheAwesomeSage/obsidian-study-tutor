@@ -3,6 +3,7 @@
 // Obsidian imports.
 
 import { Usage } from "./claude";
+import type { ModelProviderSettings } from "./model-provider";
 import { Attempt, Grading, TASK_TYPES, TaskType } from "./evidence";
 import { Chat, Frontmatter, LearnerState, Mode, Question, SourceMode, Topic, fmStr, mastery, setLevel, words } from "./formats";
 import { ACTION_LABEL, Action, Decision, PolicyWeights, PrereqCheck } from "./policy";
@@ -59,11 +60,7 @@ export function taskTypeFor(askedUnder: string, mode: Mode, tag: Record<string, 
   return "";
 }
 
-export interface EngineSettings {
-  claudePath: string;
-  chatModel: string;
-  compileModel: string;
-  utilityModel: string;
+export interface EngineSettings extends ModelProviderSettings {
   effort: string;
   targetLevel: number;
   maxChatWords: number;
