@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { parseCompileOutput, parseState } from "../src/formats";
 import { MemFS } from "./memfs";
 import { FIXTURES } from "../src/visuals/fixtures";
+import { dropRemote } from "../src/safemd";
 
 const COMPILED = `# Linear maps
 subject: linear-algebra
@@ -670,4 +671,19 @@ test("normal study entry mounts the real player, caches configurations and recor
   assert.ok(plugin.commands.find((c:any)=>c.id==="open-saved-activity"));
   assert.equal(FIXTURES.projectile.moduleId,"projectile");
   player.parentElement?.remove();await view.onClose();
+});
+
+test("what was rendered is checked again: anything still pointing outside the vault is taken out", () => {
+  const box = document.createElement("div");
+  box.innerHTML =
+    '<p>Before <img src="https://host.example/x.png"> and <img src="app://local/vault/diagram.png" alt="kept"> and <img src="data:image/png;base64,AAAA" alt="inline"></p>' +
+    '<iframe src="https://host.example/frame"></iframe><video poster="//host.example/p.png"></video>' +
+    '<img src="diagram.png" srcset="diagram.png 1x, https://host.example/d2.png 2x">' +
+    '<a href="https://host.example/page">a link stays a link</a>' +
+    '<svg><use href="#local-shape"></use><image href="https://host.example/i.png"></image></svg>';
+  dropRemote(box);
+  assert.equal(box.querySelectorAll("iframe, video, image").length, 0);
+  assert.deepEqual(Array.from(box.querySelectorAll("img"), (i) => i.getAttribute("alt")), ["kept", "inline"]);
+  assert.equal(box.querySelectorAll("a, use").length, 2, "a link is only followed on a click, and a shape in the same picture is local");
+  assert.equal((box.textContent ?? "").split("[remote content blocked]").length - 1, 5);
 });

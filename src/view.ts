@@ -4,6 +4,7 @@
 // discarding any of it, so going Home never loses the session in progress.
 
 import { Component, ItemView, MarkdownRenderer, Menu, Notice, WorkspaceLeaf, setIcon } from "obsidian";
+import { dropRemote, neutraliseRemote } from "./safemd";
 import { Usage, zeroUsage } from "./claude";
 import { Chat, LearnerState, Mode, NextStep, Prereqs, SrStats, Topic, fmStr, ymd } from "./formats";
 import { GraphScreen } from "./graphscreen";
@@ -315,7 +316,8 @@ export class TutorView extends ItemView {
   }
 
   md(el: HTMLElement, text: string): void {
-    void MarkdownRenderer.render(this.app, text, el, this.chatPath ?? this.dir ?? "", this.rendered ?? this);
+    // Everything shown here is a model's words, a web page's, or a chat saved by an earlier version.
+    void MarkdownRenderer.render(this.app, neutraliseRemote(text), el, this.chatPath ?? this.dir ?? "", this.rendered ?? this).then(() => dropRemote(el));
   }
 
   // ---------- navigation ----------

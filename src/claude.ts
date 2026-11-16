@@ -14,6 +14,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { createHash } from "crypto";
+import { neutraliseDeep, neutraliseRemote } from "./safemd";
 
 export interface Usage {
   input: number;
@@ -59,10 +60,30 @@ export interface CallResult {
 export class ClaudeError extends Error {}
 
 let cleaned = false;
+/** Per temp folder: one made for this run alone, used when the usual one turns out to belong to someone else. */
+const ownDirs = new Map<string, string>();
 
-function workDir(): string {
-  const dir = path.join(os.tmpdir(), "study-tutor-cli");
-  fs.mkdirSync(dir, { recursive: true });
+/**
+ * Where prompt files are written. They hold the topic card, which comes from the learner's notes,
+ * and on Linux the temp folder is shared by every account. So the folder and its files are
+ * readable by this user only, and a folder of that name owned by another account is not used:
+ * whoever made it could read the prompts, or have left one there to be sent in place of ours.
+ */
+export function workDir(base = os.tmpdir()): string {
+  const own = ownDirs.get(base);
+  if (own) return own;
+  let dir = path.join(base, "study-tutor-cli");
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const st = fs.lstatSync(dir);
+    const uid = process.getuid?.();
+    if (!st.isDirectory() || st.isSymbolicLink() || (uid !== undefined && st.uid !== uid)) throw new Error("not ours");
+    // Created by an earlier version with the default mode. Windows has no such bits and ignores this.
+    if (uid !== undefined && (st.mode & 0o077) !== 0) fs.chmodSync(dir, 0o700);
+  } catch {
+    dir = fs.mkdtempSync(path.join(base, "study-tutor-cli-"));
+    ownDirs.set(base, dir);
+  }
   if (!cleaned) {
     // Once per run, remove prompt files left over from earlier days.
     cleaned = true;
@@ -113,7 +134,8 @@ export function callClaude(opts: CallOptions): Promise<CallResult> {
     const dir = workDir();
     const sysFile = path.join(dir, `system-${createHash("sha1").update(opts.system).digest("hex").slice(0, 12)}.md`);
     try {
-      if (!fs.existsSync(sysFile)) fs.writeFileSync(sysFile, opts.system, "utf8");
+      // Written every time: a file already there is only trusted to be ours if we put it there now.
+      fs.writeFileSync(sysFile, opts.system, { encoding: "utf8", mode: 0o600 });
     } catch (e) {
       reject(new ClaudeError(`Could not write the prompt file: ${(e as Error).message}`));
       return;
@@ -162,7 +184,8 @@ export function callClaude(opts: CallOptions): Promise<CallResult> {
           reject(new ClaudeError(String(j.result ?? "The Claude CLI reported an error.").slice(0, 600)));
           return;
         }
-        resolve({ text: String(j.result ?? ""), structured: j.structured_output, usage });
+        // A reply is rendered as Markdown and saved into notes, so nothing in it may load from outside the vault.
+        resolve({ text: neutraliseRemote(String(j.result ?? "")), structured: neutraliseDeep(j.structured_output), usage });
       }),
     );
     child.stdin.on("error", () => {

@@ -4,6 +4,7 @@ import { request as https } from "node:https";
 import { isIPv4 } from "node:net";
 import { parse, serializeOuter, type DefaultTreeAdapterMap } from "parse5";
 import { indexSource, type SourceRevision } from "./compile-sources";
+import { neutraliseRemote } from "./safemd";
 
 export interface SearchHit { title: string; url: string }
 export interface ResearchProvider {
@@ -132,6 +133,9 @@ export function readablePage(html: string): { title: string; text: string } {
   return { title: title ? text(title).trim().slice(0, 200) : "", text: text(main).trim() };
 }
 
+/** A page's author also decides where its code fences fall, so none of its text is skipped as code. */
+const UNTRUSTED = { trustFences: false };
+
 /** Fixed search endpoint. The key is sent only to Brave and never to the model or pages. */
 export function braveResearch(key: string): ResearchProvider {
   return {
@@ -145,7 +149,7 @@ export function braveResearch(key: string): ResearchProvider {
       if (!Array.isArray(hits)) return [];
       return hits.slice(0, 6).flatMap((h: { title?: unknown; url?: unknown } | null) => {
         if (typeof h?.url !== "string" || typeof h.title !== "string") return [];
-        try { return [{ title: h.title.slice(0, 200), url: canonicalPage(h.url) }]; } catch { return []; }
+        try { return [{ title: neutraliseRemote(h.title.slice(0, 200), UNTRUSTED), url: canonicalPage(h.url) }]; } catch { return []; }
       });
     },
     async fetch(raw, signal) {
@@ -160,7 +164,8 @@ export function braveResearch(key: string): ResearchProvider {
         if (r.type === "application/json") throw new Error("JSON pages are unsupported.");
         const p = r.type === "text/plain" || r.type === "text/markdown" ? { title: "", text: r.body.trim() } : readablePage(r.body);
         if (!p.text) throw new Error("Page has no readable text.");
-        return indexSource({ name: p.title || new URL(url).hostname, text: p.text, url });
+        // Passages from this page are quoted in notes Obsidian renders, so nothing in them may load from elsewhere.
+        return indexSource({ name: neutraliseRemote(p.title, UNTRUSTED) || new URL(url).hostname, text: neutraliseRemote(p.text, UNTRUSTED), url });
       }
       throw new Error("Page exceeded the redirect limit.");
     },
