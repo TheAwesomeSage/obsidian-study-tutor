@@ -1,12 +1,11 @@
-# Runs on every push to main and on every pull request: the type check, the production build
-# (which also fetches the pinned SymPy wheels and checks their hashes), and the unit tests.
-# Nothing here calls a model: the live tests (npm run test:live and friends) spend usage and
-# stay manual.
+# Runs on every push, to any branch, and on pull requests from forks: the type check, the
+# production build (which also fetches the pinned SymPy wheels and checks their hashes), the unit
+# tests and the browser tests. Nothing here calls a model: the live tests (npm run test:live and
+# friends) spend usage and stay manual.
 name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
 
 permissions:
@@ -19,6 +18,8 @@ concurrency:
 jobs:
   test:
     name: Build and test (${{ matrix.os }})
+    # A pull request from a branch of this repository was already checked when the branch was pushed.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
