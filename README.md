@@ -189,6 +189,16 @@ STUDY_VAULT=<vault> VISUAL_REGISTRY=<bundled registry.cjs> npm run bench:qwen
 MIT. See `LICENSE`. `NOTICE.md` lists the sources the teaching method draws on.
 
 
+## Version 0.9.0
+
+- Master mode chooses a tutoring move and shows its reason in Details. Misconceptions are tied to attempts and can change when an answer is disputed or regraded.
+- Open-answer feedback separates the result, method and assumptions. SymPy is identified separately when it checks the result.
+- Detailed turns can read the compiled lesson and original passages. Retrieval follows at most one relevant course link and skips rejected links.
+- Study Tutor can compile a prerequisite or an application beyond the specification from chat. The session can continue during compilation, and the request can be cancelled.
+- Course packages show which objectives have sources, teaching and assessment. Research is optional and has configurable limits. Completed source work is cached, and partial recompiles keep the previous course.
+
+Versions before 0.9.0 retain the plain misconception list. If an older version saves the topic, it drops the new misconception history and reasoning breakdowns.
+
 ## Version 0.8.0
 
 SymPy now ships with the plugin and works offline.

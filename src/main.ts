@@ -9,6 +9,7 @@ import { DEFAULT_LOCAL_MODEL, DEFAULT_OLLAMA_URL, OllamaClient } from "./ollama"
 import { FS, Store } from "./store";
 import { BundleFiles, SympyWorker } from "./sympy";
 import { TutorView, VIEW_TYPE } from "./view";
+import { courseExpansions, courseLessons, courseSources } from "./tutoring-adapters";
 import { SavedActivityModal, configureVisualRuntime } from "./visuals/obsidian";
 import { join } from "path";
 import { existsSync, promises as fsp } from "fs";
@@ -191,17 +192,35 @@ export default class StudyTutorPlugin extends Plugin {
     this.engine.researchProvider = searchKey ? braveResearch(searchKey) : null;
     this.engine.maths = this.sympy;
     // Source notes are read by name, for the short excerpts a teaching step may need.
-    this.engine.readNote = async (name: string) => {
+    const readNote = async (name: string) => {
       const f = this.app.metadataCache.getFirstLinkpathDest(name, "");
       if (!f || f.extension !== "md" || f.path.startsWith(this.store.root + "/")) return null;
       return splitFrontmatter(await this.app.vault.cachedRead(f)).body;
     };
+    this.engine.readNote = readNote;
     // The same, with the note's vault path, for the provenance of activities. Read only.
     this.engine.readSource = async (name: string) => {
       const f = this.app.metadataCache.getFirstLinkpathDest(name, "");
       if (!f || f.extension !== "md" || f.path.startsWith(this.store.root + "/")) return null;
       return { path: f.path, text: splitFrontmatter(await this.app.vault.cachedRead(f)).body };
     };
+    const engine = this.engine;
+    engine.sources = courseSources(this.store, readNote);
+    engine.material = courseLessons(this.store);
+    engine.expander = courseExpansions(this.store, async (request, signal) => {
+      if (this.activeCompile) return { status: "failed", reason: "Another compilation is running. Try again after it finishes." };
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+      this.activeCompile = controller;
+      try {
+        return await engine.expandCourse(request, controller.signal);
+      } finally {
+        signal?.removeEventListener("abort", abort);
+        this.activeCompile = null;
+      }
+    });
     this.buildLocal();
     this.engine.visuals = adaptRegistry(visualRegistry as unknown as Record<string, unknown>);
   }

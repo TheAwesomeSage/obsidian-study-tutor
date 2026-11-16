@@ -7,6 +7,8 @@ import { Engine, type EngineSettings } from "../src/engine";
 import { zeroUsage } from "../src/claude";
 import type { LocalModel } from "../src/ollama";
 import { Store } from "../src/store";
+import { expansionRequest } from "../src/expansion";
+import { courseExpansions, courseLessons, courseSources } from "../src/tutoring-adapters";
 import { MemFS } from "./memfs";
 
 const material = [{ name: "Working notes", path: "Math/Working notes.md", text: "# Linear maps\n\nThe kernel consists of x for which T(x) = 0.\n" }];
@@ -197,17 +199,45 @@ test("saved courses reopen, unchanged refresh costs nothing, and expansion leave
   const pkg = (await store.loadPackage(complete.dir))!;
   const original = pkg.staged!.inventory[0].references[0];
   assert.match((await store.compiledPassage(complete.dir, original))[0].text, /T\(x\) = 0/);
+  engine.sources = courseSources(store, async () => null);
+  engine.material = courseLessons(store);
+  engine.expander = courseExpansions(store, engine.expandCourse.bind(engine));
+  const quoted = await engine.tools.run<{ passages: { id: string }[] }>("vault.source", { dir: complete.dir, skill: 1, query: "How is the kernel defined?" });
+  assert.ok(quoted.output?.passages.some(p => p.id === original));
+  const passage = await engine.tools.run<{ found: boolean; text: string }>("vault.passage", { id: original, topic: complete.dir });
+  assert.ok(passage.output?.found);
+  assert.match(passage.output.text, /T\(x\) = 0/);
+  assert.equal(await engine.sources.passage(original, 1, "Tutor/Topics/Other"), null);
+  const lesson = await engine.tools.run<{ from: string; text: string }>("course.lesson", { dir: complete.dir, skill: 1 });
+  assert.equal(lesson.output?.from, "compiled");
+  assert.match(lesson.output.text, /coordinate y is arbitrary/);
+  const scripted = fake();
+  (engine as unknown as { call: Model }).call = o => o.jsonSchema ? scripted(o) : Promise.resolve({
+    text: "The map uses only the first coordinate. What does it return for (0,3)?", usage: zeroUsage(),
+  });
+  const chat = await store.newChat(complete.dir, "Linear maps", "tutor");
+  const explained = await engine.turn(complete.dir, chat, "Why does the kernel include every value of y?");
+  assert.equal(explained.state.focus, 1);
+  assert.ok(explained.tools?.some(tool => tool.tool === "vault.source" && tool.ok));
+  assert.ok(explained.tools?.some(tool => tool.tool === "course.lesson" && tool.ok));
   const unchanged = await engine.refresh({ ...req, existingDir: complete.dir });
   assert.deepEqual([unchanged.refresh, unchanged.usage.calls], ["unchanged", 0]);
   const state = await store.loadState(complete.dir, 4);
   state.levels[1] = 3;
   await store.saveState(complete.dir, state);
   const saved = await fs.read(`${complete.dir}/state.md`);
-  const extension = await engine.expandCourse({ kind: "extension", anchorDir: complete.dir, anchorConcept: state.concepts[1], gap: "Kernel of a projection" });
-  assert.equal(extension.status, "complete");
-  if (extension.status !== "complete") assert.fail("extension was not compiled");
-  assert.notEqual(extension.result.dir, complete.dir);
-  assert.equal((await store.loadPackage(extension.result.dir))?.staged?.expansion?.kind, "extension");
+  const pending = await engine.requestExpansion(complete.dir, expansionRequest({
+    kind: "extension", topicDir: complete.dir, conceptId: state.concepts[1], conceptName: state.names[1],
+    application: "Kernel of a projection", evidence: [], at: "2026-11-16",
+  }));
+  assert.equal(pending.status, "pending");
+  const extension = await engine.expansionSettled(pending.request.id);
+  assert.equal(extension?.status, "complete");
+  const linked = extension.result?.linked[0];
+  assert.ok(linked && linked.topicDir !== complete.dir);
+  assert.equal((await store.loadPackage(linked.topicDir))?.staged?.expansion?.kind, "extension");
+  const graph = await store.loadGraph(complete.dir);
+  assert.ok(graph.edges.some(edge => edge.from === state.concepts[1] && edge.to === linked.conceptId && edge.type === "applies_to"));
   assert.equal(await fs.read(`${complete.dir}/state.md`), saved);
   assert.equal((await store.loadPackage(complete.dir))?.revision, pkg.revision);
   (engine as unknown as { call: Model }).call = fake({ uncovered: true });

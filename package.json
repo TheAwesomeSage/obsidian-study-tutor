@@ -1,12 +1,12 @@
 {
   "name": "study-tutor",
-  "version": "0.9.0-rc.1",
+  "version": "0.9.0",
   "description": "Obsidian plugin: a Socratic tutor, quizzer and subject expert that runs on the Claude CLI with minimal token overhead.",
   "main": "main.js",
   "scripts": {
     "build": "tsc --noEmit && node scripts/vendor-pyodide.mjs && node esbuild.config.mjs production",
     "dev": "node esbuild.config.mjs",
-    "test": "node esbuild.config.mjs test && node --test tests/out/unit.test.cjs tests/out/learning.test.cjs tests/out/graph.test.cjs tests/out/router.test.cjs tests/out/maths.test.cjs tests/out/ui.test.cjs tests/out/visuals.test.cjs tests/out/presentation.test.cjs tests/out/compiler.test.cjs",
+    "test": "node esbuild.config.mjs test && node --test tests/out/unit.test.cjs tests/out/learning.test.cjs tests/out/tutoring.test.cjs tests/out/graph.test.cjs tests/out/router.test.cjs tests/out/maths.test.cjs tests/out/ui.test.cjs tests/out/visuals.test.cjs tests/out/presentation.test.cjs tests/out/compiler.test.cjs",
     "test:live": "node esbuild.config.mjs test && node tests/out/live.test.cjs",
     "test:compile-live": "node esbuild.config.mjs test && node tests/out/live-compile.cjs",
     "test:features": "node esbuild.config.mjs test && node tests/out/live-features.test.cjs",

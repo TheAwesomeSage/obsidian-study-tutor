@@ -922,7 +922,7 @@ test("tools validate input, time out, cancel and report failures as results", as
 
   // The engine's own tools.
   const t = await setup();
-  assert.deepEqual(t.engine.tools.list().map((x) => x.name), ["maths.equivalent", "maths.check", "maths.compute", "vault.transcript", "vault.source", "graph.inspect"]);
+  assert.deepEqual(t.engine.tools.list().map((x) => x.name), ["maths.equivalent", "maths.check", "maths.compute", "vault.transcript", "vault.source", "vault.passage", "course.lesson", "graph.inspect"]);
   const state = await t.store.loadState(t.dir, 4);
   state.levels = { 1: 1, 2: 3, 3: null };
   await t.store.saveState(t.dir, state);
@@ -943,11 +943,11 @@ test("source excerpts are sent only when a step needs them, quoted exactly", asy
   t.replies.push(`Lesson.\n${session('{"pendingQuestion":"Differentiate $x^7$","helpGiven":[],"nextAction":"check","completedStep":false}')}`, "Checked.");
   const r = await t.engine.study(t.dir, chat, "");
   assert.equal(r.decision!.action, "explain");
-  assert.match(t.calls[0].input, /# From the learner's source notes \(exact quotes\)\n\[\[Calc notes\]\]: The derivative of \$x\^n\$ is \$nx\^\{n-1\}\$/);
+  assert.match(t.calls[0].input, /# From the course sources \(exact quotes\)\n\[\[Calc notes\]\]: The derivative of \$x\^n\$ is \$nx\^\{n-1\}\$/);
   assert.ok(!/Shopping list/.test(t.calls[0].input));
   // Checking an answer needs no source excerpt.
   await t.engine.study(t.dir, chat, "7x^6");
-  assert.ok(!/From the learner's source notes/.test(t.calls[1].input));
+  assert.ok(!/From the course sources/.test(t.calls[1].input));
   assert.deepEqual(JSON.parse(String((await t.store.loadChat(chat)).fm.session)).sources, ["[[Calc notes]]"]);
 });
 

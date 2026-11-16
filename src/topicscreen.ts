@@ -5,6 +5,7 @@ import { Notice } from "obsidian";
 import { addUsage, usageLine } from "./claude";
 import { MIN_ESTIMATE_N, missingFor } from "./evidence";
 import { fmStr, mastery } from "./formats";
+import { isActive, misconceptionLine } from "./misconceptions";
 import { ago } from "./overview";
 import type { Screen, TutorView } from "./view";
 import { MODE_INFO, button, chip, emptyState, iconButton, levelPips, panel, pct, progressBar } from "./ui";
@@ -105,8 +106,17 @@ export class TopicScreen implements Screen {
     }
 
     // ----- misconceptions -----
+    // Each with its status and what stands behind it; ones resolved or set aside are listed after, muted.
     const mis = panel(page, "Misconceptions being tracked");
-    if (s.misconceptions.length) {
+    const records = s.misconceptionRecords ?? [];
+    const active = records.filter((m) => isActive(m, s.attempts));
+    const past = records.filter((m) => !isActive(m, s.attempts)).slice(-6);
+    if (records.length) {
+      const ul = mis.body.createEl("ul", { cls: "st-plain-list" });
+      for (const m of active) ul.createEl("li", { text: misconceptionLine(m, s.attempts) });
+      for (const m of past) ul.createEl("li", { cls: "st-meta", text: misconceptionLine(m, s.attempts) });
+      if (!active.length) mis.body.createDiv({ cls: "st-meta", text: "None active." });
+    } else if (s.misconceptions.length) {
       const ul = mis.body.createEl("ul", { cls: "st-plain-list" });
       for (const m of s.misconceptions) ul.createEl("li", { text: m });
     } else mis.body.createDiv({ cls: "st-meta", text: "None recorded." });

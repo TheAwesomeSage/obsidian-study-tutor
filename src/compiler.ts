@@ -21,6 +21,7 @@ export interface ExpansionRequest {
   anchorObjective?: string;
   gap: string;
   research?: boolean;
+  maxObjectives?: number;
 }
 export interface CompileMetrics {
   searches: number;
@@ -163,7 +164,8 @@ export async function compileCourse(p: {
   const original = sources.flatMap(s => s.passages);
   const full = p.material.map(x => ({ title: x.name, text: x.text }));
   const short = !p.expansion && p.material.reduce((n, x) => n + x.text.length, 0) <= Math.min(16_000, p.singlePassWords * 5);
-  const target = { title: p.title, goal: p.goal, mode: p.mode, expansion: p.expansion && { kind: p.expansion.kind, gap: p.expansion.gap } };
+  const maxObjectives = p.expansion ? Math.min(4, Math.max(1, Math.floor(p.expansion.maxObjectives ?? 4))) : Infinity;
+  const target = { title: p.title, goal: p.goal, mode: p.mode, expansion: p.expansion && { kind: p.expansion.kind, gap: p.expansion.gap, maxObjectives } };
   const planSource = p.expansion ? rankPassages(original, p.expansion.gap).slice(0, 10) : original;
   const batches = short && original.length <= 100 ? [original.map(k => excerpt(k, k.text.length))] : planningBatches(planSource);
   if (!batches.length) batches.push([]);
@@ -190,7 +192,8 @@ export async function compileCourse(p: {
     if (!plan) issues.push(`Objective inventory batch ${i + 1} could not be read.`);
     const allowed = new Set(batch.map(k => k.id));
     const mappedHere = new Set<string>();
-    for (const row of (plan?.objectives ?? []).slice(0, p.expansion ? 4 : undefined)) {
+    for (const row of plan?.objectives ?? []) {
+      if (inventory.length >= maxObjectives) break;
       const refs = unique(row.references.filter(r => allowed.has(r)));
       const text = inline(row.text, 600);
       if (!text || (p.mode === "spec" && !p.expansion && !refs.length)) continue;

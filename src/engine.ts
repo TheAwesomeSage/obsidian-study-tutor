@@ -9,12 +9,15 @@ import { Chat, Frontmatter, Grade, LearnerState, Mode, NextStep, Prereqs, Questi
 import { ACTION_GUIDE, ACTION_LABEL, Action, DEFAULT_WEIGHTS, Decision, POLICY_VERSION, PolicyInput, PolicyWeights, PrereqCheck, decide, homeStep } from "./policy";
 import { ActivityRecord, CONFIG_PROMPT_VERSION, LESSON_SCHEMA_VERSION, configureActivity, toResult } from "./configure";
 import { CoursePackage, buildPackage, coverageLine, mergeRefresh, sourceChanges, subskillSections, withStagedCoverage } from "./coursepkg";
-import { checkCompilation, compileCourse, CompileCancelled, type CompileMetrics, type ExpansionRequest, type StagedCourse } from "./compiler";
+import { checkCompilation, compileCourse, CompileCancelled, type CompileMetrics, type ExpansionRequest as CompileExpansionRequest, type StagedCourse } from "./compiler";
 import type { ResearchLimits, ResearchProvider } from "./compile-research";
 import type { SourceRevision } from "./compile-sources";
 import { DEFAULT_LOCAL_MODEL, LocalModel } from "./ollama";
 import { ExplicitRequest, PRESENT_RULE, PresentationDecision, choosePresentation, extractPresent, matchModules, presentationNote, readPresentationRequest } from "./presentation";
 import { AssessmentResult, GenerationResult, ModuleDescriptor, ModuleRegistry, PresentationKind, PresentationRequest, SourceRef, VisualLesson } from "./visualcontract";
+
+/** The grading schema with the reasoning breakdown added. Only the overall mark is required, so a grader that gives no breakdown is read as before. */
+const GRADE_REASONING_SCHEMA = { ...GRADE_SCHEMA, properties: { ...GRADE_SCHEMA.properties, reasoning: REASONING_SCHEMA } };
 
 /** A registry with no modules, for code decisions when the host has none. */
 const NO_MODULES: ModuleRegistry = { listModuleDescriptors: () => [], validateLesson: () => ({ ok: false, errors: ["no modules are installed"] }), assessLesson: () => ({ correct: null, score: null, feedback: "", status: "invalid", detail: {} }), listAssets: () => [], catalogVersion: () => "none", createVariant: () => null };
@@ -57,6 +60,12 @@ import { Intent, SESSION_RULES, SessionRecord, applyIntent, readIntent, readSess
 import { ExternalPrereq, Store } from "./store";
 import { CheckReport, Claim, ClaimResult, MathBackend, checkReport, computeBlock, extractCompute, extractVerify, plainMaths } from "./sympy";
 import { ToolRegistry, ToolResult, need } from "./tools";
+import { NoteSourceStore, PASSAGE_RULE, Retrieval, RetrievalConcept, SourceStore, extractPassageAsk, gapNote, renderContext, renderRetrieval, retrieve } from "./retrieval";
+import { activeDescriptions, applyObservation, courseMisconceptions, onConcept, recompute } from "./misconceptions";
+import { ATTEMPT_REASONING, REASONING_RULE, REASONING_SCHEMA, ReasoningAssessment, finalExpression, parseReasoning, resultConflict, rubricBrief, withCheck } from "./reasoning";
+import { MoveDecision, REASON_TEXT, afterMark, chooseMove, moveBrief } from "./tutormove";
+import { CourseMaterial, Depth, fallbackMaterial, lessonDepth, missingEvidence, renderLesson } from "./lessondepth";
+import { CourseExpander, ExpansionRecord, ExpansionRequest, ExpansionResult, GO_FURTHER, expansionNote, expansionRequest, inCourse, readResult } from "./expansion";
 
 export interface EngineSettings {
   claudePath: string;
@@ -136,6 +145,14 @@ export interface TurnResult {
   tools?: ToolResult[];
   /** An activity opened, offered or declined this turn, with its reason. Absent when the text alone is the format. */
   presentation?: PresentationOutcome;
+  /** Master mode: the move code chose, its reason code and evidence, and the move the tutor said it made. */
+  move?: MoveDecision & { chosen: string };
+  /** How deep this turn went (the card, or the lesson with its sources), why, and what the course is missing. */
+  depth?: Depth & { missing: string[] };
+  /** A request for linked material made this turn, or one whose result this turn used. */
+  expansion?: ExpansionRecord;
+  /** Requests about misconceptions or material that could not be honoured, for Details. */
+  notes?: string[];
 }
 
 export interface TurnOpts {
@@ -173,7 +190,7 @@ export interface CompileRequest {
   research?: boolean;
   signal?: AbortSignal;
   truncated?: boolean;
-  expansion?: ExpansionRequest;
+  expansion?: CompileExpansionRequest;
   savedSources?: SourceRevision[];
 }
 
@@ -218,6 +235,24 @@ export class Engine {
   readNote: ((name: string) => Promise<string | null>) | null = null;
   /** Resolves a source note to its vault path and text, for activity provenance. Falls back to readNote. */
   readSource: ((name: string) => Promise<{ path: string; text: string } | null>) | null = null;
+  /**
+   * The saved source passages, as the compiler's source store provides them. Null falls back to
+   * reading the cited notes through `readSource` or `readNote` (see retrieval.ts).
+   */
+  sources: SourceStore | null = null;
+  /**
+   * The compiler's lesson store: the deeper lesson and per-objective coverage for a concept. Null
+   * falls back to the course package and the topic card (see lessondepth.ts).
+   */
+  material: CourseMaterial | null = null;
+  /** The compiler's narrow requests for linked material. Null means unavailable: tutoring goes on from the course as it is. */
+  expander: CourseExpander | null = null;
+  /** Told when a request for linked material settles, so a view can show it. */
+  onExpansion: ((dir: string, rec: ExpansionRecord) => void) | null = null;
+  private inflight = new Map<string, { ctl: AbortController; done: Promise<ExpansionRecord> }>();
+  /** The latest run of each request, kept after it settles, for `expansionSettled`. */
+  private runs = new Map<string, Promise<ExpansionRecord>>();
+  private expansionWrites: Promise<void> = Promise.resolve();
   /** The visual modules, when the host has them. Null means no interactive can be offered. */
   visuals: ModuleRegistry | null = null;
   /** The local model that configures existing modules on a cache miss. Null when off or absent. */
@@ -258,6 +293,13 @@ export class Engine {
 
   private mathsOn(): boolean {
     return !!this.settings().mathCheck && !!this.maths;
+  }
+
+  /** The compiler's source store when the host wired one; otherwise the cited notes, read directly. */
+  private sourceStore(): SourceStore | null {
+    if (this.sources) return this.sources;
+    const read = this.readSource ? (n: string) => this.readSource!(n).then((x) => x?.text ?? null) : this.readNote;
+    return read ? new NoteSourceStore(read) : null;
   }
 
   // ---------- tools: maths checking, vault retrieval, graph inspection ----------
@@ -326,9 +368,9 @@ export class Engine {
         return { output: { excerpts: bestExcerpts(messages.map((m) => `${m.role === "you" ? "LEARNER" : "TUTOR"}: ${m.text}`), input.query, input.maxWords) }, assumptions: ["matched by shared words; quoted exactly, possibly out of order"] };
       },
     });
-    this.tools.register<{ notes: string[]; query: string; maxWords: number }, { excerpts: string[] }>({
+    this.tools.register<{ dir: string; skill: number | null; notes: string[]; query: string; maxWords: number }, Retrieval & { excerpts: string[] }>({
       name: "vault.source",
-      description: "Pulls the paragraphs of the learner's source notes most relevant to the current subskill.",
+      description: "Pulls the saved source passages most relevant to the question: the focus concept's sources first, then at most one related concept the question names.",
       kind: "retrieval",
       timeoutMs: 8000,
       validate: (raw) => {
@@ -336,16 +378,74 @@ export class Engine {
         if (typeof o === "string") return o;
         const notes = Array.isArray(o.notes) ? o.notes.filter((n): n is string => typeof n === "string").slice(0, 4) : [];
         const query = need.text(o, "query", 4000);
-        return notes.length && query ? { notes, query, maxWords: need.int(o, "maxWords") ?? 160 } : "notes and query are required";
+        const dir = need.text(o, "dir", 600) ?? "";
+        const skill = need.int(o, "skill");
+        if (!query) return "query is required";
+        if (!(dir && skill !== null) && !notes.length) return "a concept (dir and skill) or notes are required";
+        return { dir, skill, notes, query, maxWords: Math.min(600, need.int(o, "maxWords") ?? 160) };
       },
       run: async (input) => {
-        if (!this.readNote) throw new Error("Source notes cannot be read here.");
-        const paragraphs: string[] = [];
-        for (const name of input.notes) {
-          const text = await this.readNote(name.replace(/^\[\[|\]\]$/g, ""));
-          if (text) for (const para of text.split(/\n\s*\n/)) if (words(para) >= 6) paragraphs.push(`[[${name.replace(/^\[\[|\]\]$/g, "")}]]: ${para.trim()}`);
+        const focus: RetrievalConcept = { id: "", name: "", sources: input.notes };
+        let neighbours: Parameters<typeof retrieve>[1]["neighbours"] = [];
+        if (input.dir && input.skill !== null) {
+          const topic = await this.store.loadTopic(input.dir);
+          const sk = topic.subskills.find((k) => k.n === input.skill);
+          if (!sk) throw new Error("No such subskill.");
+          const course = await this.store.loadCourse();
+          const id = [...course.concepts.values()].find((c) => c.topic === input.dir && c.n === sk.n)?.id ?? "";
+          const mine = id ? course.concepts.get(id) : undefined;
+          Object.assign(focus, { id, name: sk.name, sources: [...new Set([...sk.sources, ...(mine?.sources ?? []), ...input.notes])], section: sk.section, topic: input.dir });
+          neighbours = course.edges
+            .filter((e) => id && (e.from === id || e.to === id))
+            .flatMap((e) => {
+              const other = course.concepts.get(e.from === id ? e.to : e.from);
+              return other ? [{ edge: e, concept: { id: other.id, name: other.name, sources: other.sources, topic: other.topic } }] : [];
+            });
         }
-        return { output: { excerpts: bestExcerpts(paragraphs, input.query, input.maxWords) }, assumptions: ["matched by shared words; quoted exactly from the note"] };
+        const r = await retrieve(this.sourceStore(), { query: input.query, focus, neighbours, maxWords: input.maxWords });
+        return { output: { ...r, excerpts: r.passages.map((x) => renderRetrieval({ ...r, via: null, passages: [x] })) }, assumptions: ["ranked by shared words with the question; quoted exactly from the saved source", ...(r.via ? [`followed one ${r.via.type} link to ${r.via.otherName}`] : []), ...(r.gap ? [`${r.gap.name}: ${r.gap.reason}`] : [])] };
+      },
+    });
+    this.tools.register<{ id: string; around: number; topic?: string }, { text: string; found: boolean }>({
+      name: "vault.passage",
+      description: "Returns a quoted passage's original text, and the passages around it, by its reference id.",
+      kind: "retrieval",
+      timeoutMs: 8000,
+      validate: (raw) => {
+        const o = need.object(raw);
+        if (typeof o === "string") return o;
+        const id = need.text(o, "id", 300);
+        return id ? { id, topic: need.text(o, "topic", 600) ?? undefined, around: Math.max(0, Math.min(2, need.int(o, "around") ?? 1)) } : "id is required";
+      },
+      run: async (input) => {
+        const store = this.sourceStore();
+        const c = store ? await store.passage(input.id, input.around, input.topic) : null;
+        return { output: { text: renderContext(c, input.id), found: !!c }, assumptions: ["the passage as saved; neighbours are capped in length"] };
+      },
+    });
+    this.tools.register<{ dir: string; skill: number }, { text: string; missing: string[]; from: string }>({
+      name: "course.lesson",
+      description: "Returns the compiled lesson for a concept, its references, and what the course is missing for its objectives.",
+      kind: "retrieval",
+      timeoutMs: 8000,
+      validate: (raw) => {
+        const o = need.object(raw);
+        if (typeof o === "string") return o;
+        const dir = need.text(o, "dir", 600);
+        const skill = need.int(o, "skill");
+        return dir && skill !== null ? { dir, skill } : "dir and skill are required";
+      },
+      run: async (input) => {
+        const topic = await this.store.loadTopic(input.dir);
+        const sk = topic.subskills.find((k) => k.n === input.skill);
+        if (!sk) throw new Error("No such subskill.");
+        const course = await this.store.loadCourse();
+        const id = [...course.concepts.values()].find((c) => c.topic === input.dir && c.n === sk.n)?.id ?? "";
+        // The compiler's lesson when it has one; otherwise what an older course has, with the gaps marked.
+        const compiled = this.material && id ? await this.material.lessonFor(input.dir, id).catch(() => null) : null;
+        const m = compiled ?? fallbackMaterial({ conceptId: id, subskill: sk, pkg: await this.store.loadPackage(input.dir).catch(() => null), objectives: topic.objectives ?? [] });
+        const missing = missingEvidence(m);
+        return { output: { text: renderLesson(m, sk.name), missing, from: m.from }, assumptions: [m.from === "compiled" ? "the compiled lesson for this concept" : "assembled from the course package and topic card: the course has no deeper lesson", ...(missing.length ? [`missing: ${missing.join("; ")}`] : [])] };
       },
     });
     this.tools.register<{ dir: string; skill: number }, { name: string; prerequisites: string[]; dependents: string[]; weak: string[]; outside: string[] }>({
@@ -871,6 +971,8 @@ export class Engine {
       await this.store.saveChat(chatPath, chat);
     }
     const mode = (fmStr(chat.fm, "mode", "tutor") as Mode) || "tutor";
+    const defaultFocus = (mode === "tutor" || mode === "expert") && topic.subskills.length === 1 ? topic.subskills[0].n : null;
+    if (state.focus === null && defaultFocus !== null) state.focus = defaultFocus;
     const subjectName = fmStr(topic.fm, "subject", "none");
     const lastMsg = chat.messages[chat.messages.length - 1];
     const said = lastMsg?.role === "you" ? lastMsg.text : "";
@@ -907,6 +1009,17 @@ export class Engine {
       session.action = intent === "attempt" ? "check" : intent === "hint" ? "hint" : "continue";
       session.reason = `${MODE_NAME[mode]} mode, chosen by you.`;
     }
+    // Master mode makes one move a turn, chosen in code from the evidence and what the learner asked.
+    let move: MoveDecision | null = null;
+    const focusConcept = (before.pendingQuestion && before.concept) || (state.focus !== null ? state.concepts[state.focus] ?? "" : "");
+    if (mode === "tutor") {
+      move = chooseMove({ intent, pending: !!before.pendingQuestion, concept: focusConcept, attempts: state.attempts, misconceptions: onConcept(state.misconceptionRecords ?? [], focusConcept, state.attempts), askedUnder, targets: before.targets ?? "", discriminates: before.discriminates ?? "", helpGiven: before.hints ?? 0 });
+      session.action = move.move;
+      session.reason = `${move.reason}: ${REASON_TEXT[move.reason]}`;
+      if (move.move === "hint") session.hints = (before.hints ?? 0) + 1;
+    }
+    // Card or lesson: routine turns work from the card; a turn that needs depth gets the lesson and its sources.
+    const depth = lessonDepth({ mode, action: decision?.action ?? null, move, said, intent });
     // The concept this turn's question assesses, when it lives in another topic. A hint or a nudge
     // to go on leaves the same question open, so it keeps the link. A worked example after a
     // reveal or skip may go on to ask about either concept, so the link stops there and the
@@ -966,16 +1079,47 @@ export class Engine {
       if (r.ok && r.output?.excerpts.length) extras.push(`# Retrieved from earlier in this chat (exact quotes)\n${r.output.excerpts.join("\n\n")}`);
     }
     const focusSkill = topic.subskills.find((k) => k.n === state.focus);
-    if (this.readNote && focusSkill?.sources.length && ((decision && [...TEACHING, "diagnose-error"].includes(decision.action)) || (mode === "expert" && said))) {
-      const r = await this.tools.run<{ excerpts: string[] }>("vault.source", { notes: focusSkill.sources, query: `${focusSkill.name} ${said}`, maxWords: 160 });
+    // Source passages only when the step needs them: teaching, error diagnosis, a direct question in
+    // Ask mode, or a Master-mode move that needs more than the card (see lessondepth.ts).
+    const quoted = new Map<string, string | undefined>();
+    const wantSources = (decision && [...TEACHING, "diagnose-error"].includes(decision.action)) || (mode === "expert" && !!said) || depth.sources;
+    if (focusSkill && wantSources && (focusSkill.sources.length || this.sources)) {
+      const r = await this.tools.run<Retrieval & { excerpts: string[] }>("vault.source", { dir, skill: focusSkill.n, query: `${focusSkill.name} ${said}`.trim(), maxWords: depth.sourceWords });
       toolLog.push(r);
-      if (r.ok && r.output?.excerpts.length) {
-        extras.push(`# From the learner's source notes (exact quotes)\n${r.output.excerpts.join("\n\n")}`);
-        session.sources = focusSkill.sources.slice(0, 6);
+      if (r.ok && r.output) {
+        if (r.output.passages.length) {
+          for (const passage of r.output.passages) if (passage.tier !== "card") quoted.set(passage.id, passage.topic);
+          extras.push(`# From the course sources (exact quotes)\n${renderRetrieval(r.output)}${quoted.size ? `\n\n${PASSAGE_RULE}` : ""}`);
+          const cited = [...new Set(r.output.passages.filter((x) => x.tier !== "card" && !x.url).map((x) => `[[${x.sourceId}]]`))];
+          session.sources = (cited.length ? cited : focusSkill.sources).slice(0, 6);
+        }
+        const gap = gapNote(r.output);
+        if (gap) extras.push(gap);
       }
     }
+    // The deeper lesson, in the turn input (the card in the system prompt stays cached), with what the course lacks.
+    let missing: string[] = [];
+    if (depth.level === "lesson" && focusSkill) {
+      const r = await this.tools.run<{ text: string; missing: string[]; from: string }>("course.lesson", { dir, skill: focusSkill.n });
+      toolLog.push(r);
+      if (r.ok && r.output?.text) {
+        extras.push(r.output.text);
+        missing = r.output.missing;
+      }
+    }
+    // Going further than the course: one narrow request, anchored to the concept in focus. The turn does not wait for it.
+    let expansion: ExpansionRecord | null = null;
+    if (said && focusSkill && mode !== "quiz" && GO_FURTHER.test(said)) expansion = await this.requestExpansion(dir, expansionRequest({ kind: "extension", topicDir: dir, conceptId: focusConcept, conceptName: focusSkill.name, application: said, evidence: [], at: now }));
+    const told = await this.expansionsToTell(dir, expansion);
+    for (const rec of told) extras.push(expansionNote(rec));
     extras.push(`# Session record\n${JSON.stringify(session)}`);
     if (decision) extras.push(`Instructional action: ${decision.action}. ${ACTION_GUIDE[decision.action]}\nWhy: ${decision.reason}${decision.suggestIndependent ? "\nThe learner looks ready to practise this unaided. Say so in one line and let them choose; stay in guided practice unless they switch." : ""}`);
+    if (move) extras.push(moveBrief(move));
+    // An answer to mark: its result, method and assumptions are judged apart, and a misconception it shows is named.
+    if (before.pendingQuestion && intent === "attempt") {
+      const known = onConcept(state.misconceptionRecords ?? [], focusConcept, state.attempts);
+      extras.push(`${ATTEMPT_REASONING}\nIf a wrong answer shows a misconception, add "misconception": the id of one listed here, or a short description of a new one.${known.length ? ` On record for this concept: ${known.map((m) => `${m.id} (${m.status}) "${m.description}"`).join("; ")}.` : ""} If it shows a missing prerequisite, add "prerequisite_gap": its name.`);
+    }
     if (session.disputed) extras.push("# Disputed grading\nThe learner disputes how their last answer was marked, and the app has set that mark aside. Check that answer again step by step. If the mark was wrong, say so plainly. Do not add an <attempt> line for this re-check.");
     const note = presented ? presentationNote(presented.decision) : "";
     if (note) extras.push(note);
@@ -986,11 +1130,31 @@ export class Engine {
     let res = await this.call({ model, effort, system, input, onSpawn: opts.onSpawn });
     let usage = res.usage;
 
+    // 0. The model may ask once for the original or surrounding text of a passage it was quoted.
+    //    The lookup is bounded: two ids, two neighbours each side, capped in words, one round.
+    let passageExtra = "";
+    const passageAsk = quoted.size ? extractPassageAsk(res.text) : null;
+    if (passageAsk?.ids.length) {
+      const found: string[] = [];
+      for (const id of passageAsk.ids) {
+        if (!quoted.has(id)) {
+          found.push(`{ref: ${id}}: not quoted in this turn.`);
+          continue;
+        }
+        const r = await this.tools.run<{ text: string; found: boolean }>("vault.passage", { id, around: passageAsk.around, topic: quoted.get(id) });
+        toolLog.push(r);
+        found.push(r.ok && r.output ? r.output.text : `{ref: ${id}}: not available.`);
+      }
+      passageExtra = `\n\n# Passages you asked for (exact quotes)\n${found.join("\n\n")}\n\nNow write your reply to the learner. Do not ask for more passages.`;
+      res = await this.call({ model, effort, system, input: input + passageExtra, onSpawn: opts.onSpawn });
+      usage = addUsage(usage, res.usage);
+    }
+
     // 1. The model may ask SymPy to do the computing before it answers. It reasons about what
     //    needs working out and how the pieces connect; SymPy works each piece out.
     const asks: Claim[] = [];
     let computed = 0;
-    let extra = "";
+    let extra = passageExtra;
     for (let round = 1; verifying && round <= COMPUTE_ROUNDS; round++) {
       const more = extractCompute(res.text, asks.length).asks;
       if (!more.length) break;
@@ -999,14 +1163,14 @@ export class Engine {
       const results = await this.runMaths("maths.compute", asks, toolLog);
       computed = results.filter((r) => r.ok).length;
       const last = round === COMPUTE_ROUNDS;
-      extra = `\n\n# SymPy results\nYou asked the app to compute these before replying:\n${computeBlock(asks, results)}\n\nNow write your reply to the learner, relying on these results and not on your own arithmetic. ${last ? "Do not ask for more computation." : "Ask for more computation only if these results make a new one necessary."}`;
+      extra = `${passageExtra}\n\n# SymPy results\nYou asked the app to compute these before replying:\n${computeBlock(asks, results)}\n\nNow write your reply to the learner, relying on these results and not on your own arithmetic. ${last ? "Do not ask for more computation." : "Ask for more computation only if these results make a new one necessary."}`;
       res = await this.call({ model, effort, system, input: input + extra, onSpawn: opts.onSpawn });
       usage = addUsage(usage, res.usage);
     }
 
     // 2. Hidden lines may follow the reply: results for SymPy to check, and a state update.
     const read = (raw: string) => {
-      const verify = extractVerify(extractCompute(raw).text);
+      const verify = extractVerify(extractPassageAsk(extractCompute(raw).text).text);
       return { ...extractStateTrailer(verify.text), claims: verifying ? verify.claims : [] };
     };
     let decided = 0;
@@ -1041,6 +1205,7 @@ export class Engine {
     // 4. The state is read again here. The call above can take a minute, and a review or a
     //    setting changed in that time must not be overwritten by a copy from before it.
     state = await this.store.loadState(dir, s.targetLevel);
+    if (state.focus === null && defaultFocus !== null && defaultFocus in state.names) state.focus = defaultFocus;
     const changes: string[] = [];
     const push = (line: string | null) => {
       if (line) changes.push(line);
@@ -1051,13 +1216,13 @@ export class Engine {
     /** The attempt was recorded in another topic, against a prerequisite this turn checked. */
     let elsewhere = false;
     let tagRaw: string | null = null;
+    let tag: Record<string, unknown> | null = null;
     parsed.text = parsed.text.replace(/`{0,3}\s*<attempt>([\s\S]*?)<\/attempt>\s*`{0,3}/g, (_all, raw: string) => ((tagRaw = raw), "")).trim();
     // The tutor's optional proposal of an interactive, a field in a reply it was writing anyway.
     const proposal = extractPresent(parsed.text);
     parsed.text = proposal.text;
     const canMark = !!said && !!before.pendingQuestion && (intent === "attempt" || intent === "skip");
     if (canMark) {
-      let tag: Record<string, unknown> | null = null;
       try {
         const v = tagRaw === null ? null : JSON.parse(tagRaw);
         tag = v && typeof v === "object" ? v : null;
@@ -1114,6 +1279,10 @@ export class Engine {
           taskType: taskTypeFor(askedUnder, mode, tag),
           family: "",
         };
+        // The result, the method and the assumptions, judged apart. SymPy's check of the reply is kept
+        // beside the judgement: it recomputed the results the reply states, not the learner's method.
+        const reasoning = tag && result !== "skipped" ? parseReasoning(tag.reasoning) : null;
+        if (reasoning) marked.reasoning = checkedBySympy ? { ...reasoning, checks: [{ evaluated: "the results the tutor's reply states", kind: report.numeric ? "numeric" : "symbolic", outcome: true, assumptions: "SymPy recomputed the reply's results; it does not check the learner's method" }] } : reasoning;
         // A check on a prerequisite in another topic is evidence about that concept. It is kept
         // with that topic's evidence, and counts neither for nor against the concept in focus.
         // The app knows when it set the question as such a check; otherwise the tutor's mark may
@@ -1161,12 +1330,65 @@ export class Engine {
 
     // 7. The model's own proposals, within what the evidence allows. Levels are never changed on
     //    the word of the cheap model, in Ask mode, or on a turn SymPy disputes.
-    if (parsed.update) for (const line of applyStateUpdate(state, parsed.update, { levels: mode !== "expert" && route.route !== "simple" && !report.disagreed, attempt: elsewhere ? null : marked })) changes.push(line);
+    //    Misconceptions are evidence-backed records: the tutor's classification goes with the marked
+    //    answer, and the record moves by misconceptions.ts. Nothing about them changes a level.
+    const notes: string[] = [];
+    let update = parsed.update;
+    const listed = (x: unknown): string[] => (Array.isArray(x) ? x.filter((i): i is string => typeof i === "string" && !!i.trim()).map((i) => i.trim().slice(0, 200)) : []);
+    const proposed = { add: listed(update?.add_misconceptions), clear: listed(update?.clear_misconceptions) };
+    if (update && state.misconceptionRecords) {
+      const { add_misconceptions: _added, clear_misconceptions: _cleared, ...rest } = update;
+      update = rest;
+    }
+    if (update) for (const line of applyStateUpdate(state, update, { levels: mode !== "expert" && route.route !== "simple" && !report.disagreed, attempt: elsewhere ? null : marked })) changes.push(line);
+    if (state.misconceptionRecords) {
+      if (marked && !elsewhere) {
+        const named = tag && typeof tag.misconception === "string" ? tag.misconception.trim().slice(0, 200) : "";
+        const byId = named ? state.misconceptionRecords.find((m) => m.id === named) : undefined;
+        const pattern = byId ? { id: byId.id, description: byId.description } : named ? { description: named } : proposed.add[0] ? { description: proposed.add[0] } : null;
+        const sk = topic.subskills.find((k) => k.n === marked!.skill);
+        const r = applyObservation(state.misconceptionRecords, { attempt: marked, pattern, discriminates: before.discriminates, targets: before.targets, cleared: proposed.clear, known: sk ? courseMisconceptions(sk.section) : [] }, state.attempts);
+        state.misconceptionRecords = r.list;
+        state.misconceptions = activeDescriptions(r.list, state.attempts);
+        changes.push(...r.changes);
+        notes.push(...r.notes);
+      } else if (proposed.add.length || proposed.clear.length) notes.push("a misconception is recorded or cleared only with a marked answer, so the tutor's note this turn was not applied");
+    }
     await this.store.saveState(dir, state);
+
+    // 7b. Master mode: after an answer, the follow-up is worked out from its recorded mark by code's
+    //     rule. The move the tutor says it made is kept beside it, so a difference shows in Details.
+    let applied: MoveDecision | null = move;
+    if (move?.move === "check" && marked && !elsewhere) {
+      const recs = state.misconceptionRecords ?? [];
+      applied = afterMark(marked, onConcept(recs, marked.concept, state.attempts), { askedUnder, targets: before.targets ?? "", discriminates: before.discriminates ?? "", pattern: recs.find((m) => m.evidence.includes(marked!.id))?.id });
+    }
+    const chosen = tag && typeof tag.next_move === "string" ? tag.next_move.trim().slice(0, 40) : "";
+    if (applied) {
+      session.action = applied.move;
+      session.move = { move: applied.move, reason: applied.reason, evidence: applied.evidence, misconception: applied.misconception?.id ?? "", chosen };
+    }
+    let aim: { targets: string; discriminates: string } | undefined;
+    if (applied) {
+      const targets = applied.move === "address-misconception" ? applied.misconception?.id ?? "" : "";
+      const discriminates = applied.move === "probe" && applied.reason === "SUSPECTED_MISCONCEPTION" ? applied.misconception?.id ?? "" : "";
+      if (move?.move !== "check" || chosen === applied.move) aim = { targets, discriminates };
+      else if (targets || discriminates) notes.push("The tutor did not report the chosen diagnostic move. This question was recorded without the misconception target.");
+    }
+
+    // 7c. A missing prerequisite the course has no material for: one narrow request to the compiler.
+    //     One the course has is taught from what is there.
+    const gapName = tag && typeof tag.prerequisite_gap === "string" ? tag.prerequisite_gap.trim().slice(0, 120) : "";
+    if (gapName && marked && !elsewhere && !expansion) {
+      const course = await this.store.loadCourse();
+      const have = inCourse(gapName, [...course.concepts.values()].map((c) => ({ id: c.id, name: c.name, topic: c.topic })));
+      if (have) notes.push(`the prerequisite "${gapName}" is in the course as ${have.name}, so its existing material is used`);
+      else expansion = await this.requestExpansion(dir, expansionRequest({ kind: "prerequisite", topicDir: dir, conceptId: marked.concept, conceptName: state.names[marked.skill] ?? "", gap: gapName, evidence: [marked.id], at: now }));
+    }
 
     // 8. The session record, saved with the reply so the next turn and a restart both resume from it.
     const resolved = (!!marked && marked.result !== "ungraded") || intent === "skip" || intent === "reveal";
-    const continuation = readSessionReply(parsed.text, session, { now: new Date().toISOString(), resolved, assesses });
+    const continuation = readSessionReply(parsed.text, session, { now: new Date().toISOString(), resolved, assesses, aim });
     session = continuation.record;
     session.unresolvedMisconceptions = [...state.misconceptions];
     session.disputed = "";
@@ -1182,6 +1404,13 @@ export class Engine {
     if (marked) out.attempt = marked;
     if (decision) out.decision = decision;
     if (verifying) out.maths = { computed, checked: parsed.claims.length, disputed: report.disagreed, corrected, ...(report.unresolved ? { unresolved: report.unresolved } : {}), ...(report.numeric ? { numeric: report.numeric } : {}) };
+    if (applied) out.move = { ...applied, chosen };
+    out.depth = { ...depth, missing };
+    if (expansion) out.expansion = expansion;
+    else if (told.length) out.expansion = told[0];
+    if (notes.length) out.notes = notes;
+    // A settled result the tutor has now been told about is not repeated next turn.
+    for (const rec of told) if (rec.status !== "pending" && !rec.delivered) await this.saveExpansionRecord(dir, { ...rec, delivered: true });
     if (presented) out.presentation = presented;
     else if (proposal.kind) {
       // The tutor's proposal can only become an offer, and only for a module that exists.
@@ -1425,7 +1654,7 @@ export class Engine {
   }
 
   /** Compiler boundary for a single missing prerequisite or requested beyond-spec application. */
-  async expandCourse(request: ExpansionRequest, signal?: AbortSignal, progress?: (message: string) => void, existingDir?: string): Promise<
+  async expandCourse(request: CompileExpansionRequest, signal?: AbortSignal, progress?: (message: string) => void, existingDir?: string): Promise<
     { status: "complete" | "partial"; result: CompileResult; availability: StagedCourse["availability"] } |
     { status: "cancelled" | "failed"; reason: string }
   > {
@@ -1594,6 +1823,7 @@ export class Engine {
         let note = "";
         let grading: Grading = "deterministic";
         let assumptions = "";
+        let reasoning: ReasoningAssessment | null = null;
         const skipped = givesUp(answer);
         if (skipped) [grade, assumptions] = ["again", "the learner skipped the question"];
         else if (pending.type === "mcq") {
@@ -1628,16 +1858,33 @@ export class Engine {
             usage = g.usage;
             grading = "model";
             assumptions = "one model judgement against the model answer, not independently checked";
+            reasoning = g.reasoning;
+            // Where both answers end in an expression, SymPy compares the final results. That settles
+            // the result and nothing else: the method and the assumptions stay the grader's judgement.
+            if (reasoning && pending.type === "open") {
+              const given = finalExpression(answer);
+              const expected = finalExpression(pending.answer);
+              const sym = given && expected ? await this.checkEquivalent(expected, given) : null;
+              if (sym?.tool) tools.push(sym.tool);
+              if (sym && sym.equal !== null) {
+                reasoning = withCheck(reasoning, { evaluated: `the final result ${given} against the expected ${expected}`, kind: sym.grading === "numeric" ? "numeric" : "symbolic", outcome: sym.equal, assumptions: sym.assumptions || "compared as expressions" });
+                assumptions += "; SymPy checked the final result only, not the method";
+              }
+            }
           }
         }
-        const result: Outcome = skipped ? "skipped" : grade === "again" ? "incorrect" : grade === "hard" ? "partial" : "correct";
+        // SymPy and the grader disagree about the final result: the answer is left ungraded, never guessed.
+        const conflict = resultConflict(reasoning ?? undefined);
+        if (conflict) note = "SymPy and the grader disagree about the final result, so this answer was left ungraded. Dispute it for a second look.";
+        const result: Outcome = skipped ? "skipped" : conflict ? "ungraded" : grade === "again" ? "incorrect" : grade === "hard" ? "partial" : "correct";
         const id = `${chatPath}:${chat.messages.length}:${pending.id}`;
         // If the state was saved and the chat was not (an interrupted turn), this is the same
         // attempt arriving again: the record is replaced, and the counters are left alone.
         const repeat = state.attempts.some((a) => a.id === id);
         attempt = this.bankAttempt({ id, chat, state, q: pending, answer, result, activity: opts.adaptive ? (sessionFor(chat, state, mode).action === "retrieval" ? "retrieval" : "independent-practice") : "quiz", mode, grading, assumptions, note: result === "correct" ? "" : note, now });
+        if (reasoning) attempt.reasoning = reasoning;
         state.attempts = recordAttempt(state.attempts, attempt);
-        if (!repeat) {
+        if (!repeat && result !== "ungraded") {
           if (!s.externalFlashcards) state.cards[pending.id] = schedule(state.cards[pending.id], grade, today);
           if (pending.subskill in state.names) {
             const b = state.bank[pending.subskill] ?? (state.bank[pending.subskill] = { right: 0, total: 0 });
@@ -1647,15 +1894,17 @@ export class Engine {
           for (const line of applyAttempt(state, attempt)) changes.push(line);
         }
         // The chat's own score is saved with the verdict message, so it moves with that write.
-        chat.fm.right = fmNum(chat.fm, "right", 0) + (grade === "good" || grade === "easy" ? 1 : 0);
-        chat.fm.total = fmNum(chat.fm, "total", 0) + 1;
+        if (result !== "ungraded") {
+          chat.fm.right = fmNum(chat.fm, "right", 0) + (grade === "good" || grade === "easy" ? 1 : 0);
+          chat.fm.total = fmNum(chat.fm, "total", 0) + 1;
+        }
         await this.store.saveState(dir, state);
         chat.fm.card = "";
         chat.fm.pending_confidence = "";
-        const head = skipped ? "**Skipped.**" : grade === "again" ? "**Incorrect.**" : grade === "hard" ? "**Partly right.**" : "**Correct.**";
+        const head = skipped ? "**Skipped.**" : conflict ? "**Left ungraded.**" : grade === "again" ? "**Incorrect.**" : grade === "hard" ? "**Partly right.**" : "**Correct.**";
         const parts = [note ? `${head} ${note}` : head];
         // The solution is shown only now, after an attempt or an explicit skip.
-        if (grade === "again" || grade === "hard") parts.push(`Answer: ${answerText(pending)}${pending.explanation ? `\n\n${pending.explanation}` : ""}`);
+        if (grade === "again" || grade === "hard" || conflict) parts.push(`Answer: ${answerText(pending)}${pending.explanation ? `\n\n${pending.explanation}` : ""}`);
         if (!opts.adaptive && fmNum(chat.fm, "total", 0) % 5 === 0) parts.push(`*Score so far: ${fmNum(chat.fm, "right", 0)}/${fmNum(chat.fm, "total", 0)}.*`);
         verdict = parts.join("\n\n");
       }
@@ -1713,6 +1962,95 @@ export class Engine {
     return decision;
   }
 
+  // ---------- linked material: narrow requests to the compiler ----------
+
+  /** Writes one request record, one write at a time, so a result arriving mid-turn is not lost. */
+  private saveExpansionRecord(dir: string, rec: ExpansionRecord): Promise<void> {
+    const next = this.expansionWrites.then(() => this.store.saveExpansion(dir, rec)).catch(() => undefined);
+    this.expansionWrites = next;
+    return next;
+  }
+
+  /**
+   * Sends one narrow request for linked material and returns at once, with the request pending.
+   * The same request is not sent again while it runs or after it succeeded. Without a compiler
+   * adapter it is recorded as unavailable. Nothing here reads or writes learner state.
+   */
+  async requestExpansion(dir: string, req: ExpansionRequest): Promise<ExpansionRecord> {
+    const same = (await this.store.loadExpansions(dir)).find((r) => r.request.id === req.id);
+    if (same && ((same.status === "pending" && this.inflight.has(req.id)) || same.status === "complete" || same.status === "partial")) return same;
+    const at = new Date().toISOString();
+    if (!this.expander) {
+      const rec: ExpansionRecord = { v: 1, request: req, status: "unavailable", result: null, updated: at, delivered: false };
+      await this.saveExpansionRecord(dir, rec);
+      return rec;
+    }
+    const rec: ExpansionRecord = { v: 1, request: req, status: "pending", result: null, updated: at, delivered: false };
+    await this.saveExpansionRecord(dir, rec);
+    const ctl = new AbortController();
+    const expander = this.expander;
+    const done = (async (): Promise<ExpansionRecord> => {
+      let result: ExpansionResult;
+      try {
+        result = readResult(await expander.request(req, ctl.signal), req);
+      } catch (e) {
+        result = { requestId: req.id, status: "failed", linked: [], coverage: [], beyondSpec: req.kind === "extension", message: e instanceof Error ? e.message.slice(0, 200) : "the request failed" };
+      }
+      // A cancelled request stays cancelled, whatever came back after.
+      if (ctl.signal.aborted) result = { ...result, status: "cancelled", message: result.message || "cancelled" };
+      const settled: ExpansionRecord = { ...rec, status: result.status, result, updated: new Date().toISOString() };
+      this.inflight.delete(req.id);
+      await this.saveExpansionRecord(dir, settled);
+      this.onExpansion?.(dir, settled);
+      return settled;
+    })();
+    this.inflight.set(req.id, { ctl, done });
+    this.runs.set(req.id, done);
+    return rec;
+  }
+
+  /** Cancels a request. One still running settles as cancelled; one left pending by a closed app is marked so. */
+  async cancelExpansion(dir: string, requestId: string): Promise<ExpansionRecord | null> {
+    const live = this.inflight.get(requestId);
+    if (live) {
+      live.ctl.abort();
+      return live.done;
+    }
+    const rec = (await this.store.loadExpansions(dir)).find((r) => r.request.id === requestId) ?? null;
+    if (rec?.status !== "pending") return rec;
+    const stopped: ExpansionRecord = { ...rec, status: "cancelled", updated: new Date().toISOString() };
+    await this.saveExpansionRecord(dir, stopped);
+    return stopped;
+  }
+
+  /** Resolves when the latest run of a request settles; null when it was never run here. */
+  expansionSettled(requestId: string): Promise<ExpansionRecord | null> {
+    return this.runs.get(requestId) ?? Promise.resolve(null);
+  }
+
+  /**
+   * The requests to tell the tutor about this turn: the one just made, any still running, and any
+   * settled since it was last told. A request left pending when the app closed is cancelled.
+   */
+  private async expansionsToTell(dir: string, current: ExpansionRecord | null): Promise<ExpansionRecord[]> {
+    let all: ExpansionRecord[];
+    try {
+      all = await this.store.loadExpansions(dir);
+    } catch {
+      return current ? [current] : [];
+    }
+    const out: ExpansionRecord[] = current ? [current] : [];
+    for (const rec of all) {
+      if (rec.request.id === current?.request.id) continue;
+      if (rec.status === "pending" && !this.inflight.has(rec.request.id)) {
+        const stopped: ExpansionRecord = { ...rec, status: "cancelled", result: { requestId: rec.request.id, status: "cancelled", linked: [], coverage: [], beyondSpec: rec.request.kind === "extension", message: "stopped when the app was closed" }, updated: new Date().toISOString() };
+        await this.saveExpansionRecord(dir, stopped);
+        out.push(stopped);
+      } else if (rec.status === "pending" || !rec.delivered) out.push(rec);
+    }
+    return out.slice(0, 3);
+  }
+
   // ---------- disputed marks ----------
 
   /**
@@ -1752,6 +2090,8 @@ export class Engine {
         const line = setLevel(state, change.skill, change.from, "dispute", "the mark behind this change is disputed");
         if (line) changes.push(found.dir === dir ? line : `${state.topic}: ${line}`);
       }
+      // A misconception this answer supported or resolved is worked out again without it.
+      for (const line of this.recomputeMisconceptions(state)) changes.push(found.dir === dir ? line : `${state.topic}: ${line}`);
       await this.store.saveState(found.dir, state);
     }
     const mine = found.dir === dir ? state : await this.store.loadState(dir, s.targetLevel);
@@ -1782,9 +2122,20 @@ export class Engine {
     a.verification = "unverified";
     a.note = `Regraded after a dispute. ${g.feedback}`.trim();
     a.assumptions = "a second model judgement with more thinking, after the first mark was disputed";
-    const changes = applyAttempt(state, a);
+    if (g.reasoning) a.reasoning = g.reasoning;
+    else delete a.reasoning;
+    const changes = [...applyAttempt(state, a), ...this.recomputeMisconceptions(state)];
     await this.store.saveState(dir, state);
     return { state, attempt: a, changes, usage: g.usage };
+  }
+
+  /** Brings misconception records into line with the attempts as they now stand (a dispute or a regrade changed one). */
+  private recomputeMisconceptions(state: LearnerState): string[] {
+    if (!state.misconceptionRecords?.length) return [];
+    const r = recompute(state.misconceptionRecords, state.attempts, new Date().toISOString());
+    state.misconceptionRecords = r.list;
+    state.misconceptions = activeDescriptions(r.list, state.attempts);
+    return r.changes;
   }
 
   /** Writes a revision summary note for the topic, with a concept map, into the topic folder. */
@@ -1808,20 +2159,24 @@ export class Engine {
    * Grades one free-text answer. A reply that cannot be read as a grade throws, so a failed
    * grading leaves the answer ungraded; it never becomes a wrong answer by default.
    */
-  async grade(q: Question, answer: string, careful = false): Promise<{ grade: Grade; feedback: string; usage: Usage }> {
+  async grade(q: Question, answer: string, careful = false): Promise<{ grade: Grade; feedback: string; usage: Usage; reasoning: ReasoningAssessment | null }> {
     const s = this.settings();
     // Marking maths wrongly is worse than spending a little more, so answers with symbols or
     // numbers in them go to the chat model. Plain-prose answers stay on the cheap one.
     const mathsy = /\$|\\[a-zA-Z]+|[=<>^]|\d/.test(`${q.answer} ${answer}`);
     const strong = careful || (s.smartRouting && mathsy);
+    // An open answer is judged on its result, method and assumptions apart as well as overall.
+    // Exact answers and multiple choice keep the overall mark alone.
+    const open = q.type === "open";
+    const brief = open && q.rubric ? rubricBrief(q.rubric) : "";
     const res = await this.call({
       model: strong ? s.chatModel : s.utilityModel,
       effort: careful ? s.hardEffort || s.effort || undefined : strong ? s.effort || undefined : undefined,
       system: utilityPrompt(await this.store.skill("utility.md"), "grade"),
-      input: `Question: ${q.question}\n\nModel answer: ${q.answer}\n${q.explanation ? `Explanation: ${q.explanation}\n` : ""}${q.rubric ? `Rubric: ${q.rubric}\n` : ""}\nLearner's answer: ${answer.trim() || "(blank)"}`,
-      jsonSchema: GRADE_SCHEMA,
+      input: `Question: ${q.question}\n\nModel answer: ${q.answer}\n${q.explanation ? `Explanation: ${q.explanation}\n` : ""}${q.rubric ? `Rubric: ${q.rubric}\n` : ""}${brief ? `Rubric by what it checks:\n${brief}\n` : ""}${open ? `\n${REASONING_RULE} Give this as "reasoning", answering the rubric points in order in rubric_met.\n` : ""}\nLearner's answer: ${answer.trim() || "(blank)"}`,
+      jsonSchema: open ? GRADE_REASONING_SCHEMA : GRADE_SCHEMA,
     });
-    let o = res.structured as { grade?: string; feedback?: string } | undefined;
+    let o = res.structured as { grade?: string; feedback?: string; reasoning?: unknown } | undefined;
     if (!o) {
       try {
         o = JSON.parse(res.text);
@@ -1831,7 +2186,7 @@ export class Engine {
     }
     if (!["again", "hard", "good", "easy"].includes(String(o?.grade))) throw new ClaudeError("The answer could not be graded. It remains ungraded. Retry to check it.");
     const grade = o!.grade as Grade;
-    return { grade, feedback: String(o?.feedback ?? ""), usage: res.usage };
+    return { grade, feedback: String(o?.feedback ?? ""), usage: res.usage, reasoning: open ? parseReasoning(o?.reasoning, q.rubric ?? "") : null };
   }
 }
 

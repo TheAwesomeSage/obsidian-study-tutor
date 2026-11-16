@@ -92,6 +92,26 @@ try {
   });
   assert.deepEqual([initial?.status, initial?.questions], ["complete", 1]);
   output.push("Packaged plugin compiled a note and saved one verified assessment.");
+  const tutored = await page.evaluate(async parent => {
+    const plugin = window.app.plugins.plugins["study-tutor"];
+    const engine = plugin.engine;
+    const compile = engine.call;
+    engine.call = o => o.jsonSchema ? compile(o) : Promise.resolve({
+      text: "The first coordinate determines the output. What happens to the second coordinate?",
+      usage: { input: 10, cacheRead: 0, cacheWrite: 0, output: 1, costUsd: 0, calls: 1 },
+    });
+    const chat = await plugin.store.newChat(parent, "Kernels", "tutor");
+    const explained = await engine.turn(parent, chat, "Why does the kernel include every value of y?");
+    const turn = await engine.turn(parent, chat, "I want to go further with the kernel.");
+    const linked = turn.expansion ? await engine.expansionSettled(turn.expansion.request.id) : null;
+    return {
+      source: explained.tools?.some(tool => tool.tool === "vault.source" && tool.output?.passages?.some(p => p.id.startsWith("p-"))),
+      lesson: explained.tools?.some(tool => tool.tool === "course.lesson" && tool.output?.from === "compiled"),
+      move: !!explained.move, linked: linked?.status, stillStudying: plugin.data.activeTopic === parent,
+    };
+  }, initial.dir);
+  assert.deepEqual(tutored, { source: true, lesson: true, move: true, linked: "complete", stillStudying: true });
+  output.push("A Master turn read the compiled lesson and source passages. Chat expansion finished without switching topics.");
   const executed = await page.evaluate(() => window.app.commands.executeCommandById("study-tutor:expand-topic"));
   assert.ok(executed);
   const { candidate: dialog, locator: gap } = await findControl(p => p.getByPlaceholder("For example: why projecting twice gives the same result"));
@@ -116,9 +136,9 @@ try {
   const { locator: cancel } = await findControl(p => p.locator("button").filter({ hasText: /^Cancel$/ }));
   await cancel.click();
   assert.equal(await page.evaluate(() => window.cancelledCourse), null);
-  assert.equal(await page.evaluate(async () => (await window.app.plugins.plugins["study-tutor"].store.listTopics()).length), 2);
+  assert.equal(await page.evaluate(async () => (await window.app.plugins.plugins["study-tutor"].store.listTopics()).length), 3);
   assert.deepEqual(errors, []);
-  output.push("The Obsidian notice cancelled compilation without creating a third topic. No page errors.");
+  output.push("The Obsidian notice cancelled compilation without creating a topic. No page errors.");
   console.log(output.join("\n"));
 } catch (error) {
   if (browser) console.error(await Promise.all(browser.contexts().flatMap(c => c.pages()).map(p => p.evaluate(() => ({ url: location.href, body: document.body.innerText.slice(-300), dialogs: [...document.querySelectorAll(".modal, .prompt")].map(x => x.innerText.slice(0, 300)) })).catch(() => null))));
