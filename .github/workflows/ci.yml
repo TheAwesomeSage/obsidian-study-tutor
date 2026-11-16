@@ -1,0 +1,42 @@
+# Runs on every push to main and on every pull request: the type check, the production build
+# (which also fetches the pinned SymPy wheels and checks their hashes), and the unit tests.
+# Nothing here calls a model: the live tests (npm run test:live and friends) spend usage and
+# stay manual.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The plugin is used on Windows; Linux catches path and case mistakes.
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # tsc --noEmit, then vendor/pyodide, then the three bundles and release/study-tutor/.
+      - run: npm run build
+      # With vendor/pyodide in place the real SymPy test runs instead of being skipped.
+      - run: npm test
+      # The activity player in a real browser. The Playwright config drives Edge, which the
+      # Windows runner already has.
+      - if: runner.os == 'Windows'
+        run: npm run test:visual-browser
