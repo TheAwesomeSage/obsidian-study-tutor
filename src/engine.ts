@@ -22,6 +22,9 @@ import { NoteSourceStore, PASSAGE_RULE, Retrieval, SourceStore, extractPassageAs
 import { activeDescriptions, applyObservation, courseMisconceptions, onConcept } from "./misconceptions";
 import { ATTEMPT_REASONING, parseReasoning } from "./reasoning";
 import { normaliseMark, withNote } from "./grading";
+import { reservedQuestions } from "./coursepkg";
+import { fadedFor, isBankId, taskOf } from "./bankvariants";
+import { baseQuestionId } from "./families";
 import { MoveDecision, REASON_TEXT, afterMark, chooseMove, moveBrief } from "./tutormove";
 import { CourseMaterial, lessonDepth } from "./lessondepth";
 import { CourseExpander, ExpansionRecord, GO_FURTHER, expansionNote, expansionRequest, inCourse } from "./expansion";
@@ -169,6 +172,7 @@ export class Engine {
     const today = this.today();
     const asked = fmList(p.chat.fm, "asked");
     const seenToday = new Set(state.attempts.filter((a) => a.timestamp.slice(0, 10) === today).map((a) => a.questionId));
+    const kept = reservedQuestions(p.questions);
     const dependents = dependentCounts(p.pre);
     const skills = Object.keys(state.names).map(Number).sort((a, b) => a - b).map((n) => {
       const m = mastery(state, n);
@@ -188,7 +192,8 @@ export class Engine {
         lapse: e.lapse,
         // Retention is measured from unaided work; helped answers do not renew it.
         daysSince: e.lastIndependent ? daysBetween(e.lastIndependent, today) : null,
-        bankLeft: s.bankQuiz === false ? 0 : p.questions.filter((q) => q.subskill === n && q.type !== "open" && !asked.includes(q.id) && !seenToday.has(q.id)).length,
+        bankLeft: s.bankQuiz === false ? 0 : p.questions.filter((q) => q.subskill === n && q.type !== "open" && !kept.has(q.id) && (q.generator ? asked.filter((id) => baseQuestionId(id) === q.id).length < 3 : !asked.includes(q.id) && !seenToday.has(q.id))).length,
+        faded: s.bankQuiz !== false && p.questions.some((q) => q.subskill === n && !kept.has(q.id) && !!fadedFor(q, state, asked)),
         checkDue: (m.level ?? 0) >= 3 && checkDue(e, today),
         nextCheck: e.nextCheck,
         ...(e.recheck ? { recheck: e.recheck.why } : {}),
@@ -678,7 +683,7 @@ export class Engine {
         if (reasoning) marked.reasoning = checkedBySympy ? { ...reasoning, checks: [{ evaluated: "the results the tutor's reply states", kind: report.numeric ? "numeric" : "symbolic", outcome: true, assumptions: "SymPy recomputed the reply's results; it does not check the learner's method" }] } : reasoning;
         // The tutor's mark is held to its own breakdown, as every other mark is (grading.ts).
         if (marked.reasoning) {
-          const bankQ = /^Q\d+$/.test(before.questionId) ? (await this.store.loadQuestions(dir)).find((q) => q.id === before.questionId) : undefined;
+          const bankQ = isBankId(before.questionId) ? taskOf(await this.store.loadQuestions(dir), before.questionId)?.question : undefined;
           const mark = normaliseMark({ proposed: marked.result, reasoning: marked.reasoning, rubric: bankQ?.rubric });
           marked.mark = mark.basis;
           marked.result = mark.result;

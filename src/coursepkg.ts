@@ -84,6 +84,35 @@ export function withStagedCoverage(pkg: CoursePackage, staged: StagedCourse): Co
   return { ...pkg, objectives, objectivesFrom: "card", staged, coverage: { ...pkg.coverage, objectives: objectives.length, covered: objectives.length - missing.length, missing, complete: staged.status === "complete" } };
 }
 
+/** A question's family: the compiler's, or one made from its subskill and task. */
+export const familyId = (q: Question): string => q.family || `s${q.subskill}-${q.task ?? q.type}`;
+
+/**
+ * Groups a bank into question families and marks the ones kept for assessment: the transfer
+ * families, or else the last family of a subskill that has at least three. Practice never takes
+ * a question from a kept family, so the family is still unseen when an unaided check needs one.
+ */
+export function questionFamilies(questions: Question[]): QuestionFamily[] {
+  const groups = new Map<string, QuestionFamily>();
+  for (const q of questions) {
+    const id = familyId(q);
+    const f = groups.get(id) ?? { id, subskill: q.subskill, task: q.task ?? "", questions: [], reserved: false, derived: !q.family };
+    f.questions.push(q.id);
+    groups.set(id, f);
+  }
+  const families = [...groups.values()];
+  for (const n of new Set(families.map((f) => f.subskill))) {
+    const mine = families.filter((f) => f.subskill === n);
+    const transfer = mine.filter((f) => f.task === "transfer");
+    if (transfer.length) transfer.forEach((f) => (f.reserved = true));
+    else if (mine.length >= 3 && !mine[mine.length - 1].derived) mine[mine.length - 1].reserved = true;
+  }
+  return families;
+}
+
+/** The ids of the bank questions in families kept for assessment. */
+export const reservedQuestions = (questions: Question[]): Set<string> => new Set(questionFamilies(questions).filter((f) => f.reserved).flatMap((f) => f.questions));
+
 /** The note a [[link]] names, without alias or heading. */
 export const linkName = (l: string): string => l.replace(/^\[\[|\]\]$/g, "").split(/[|#]/)[0].trim();
 
@@ -107,23 +136,7 @@ export function buildPackage(p: { topic: Topic; questions: Question[]; concepts:
       })
     : topic.subskills.map((s) => ({ id: `S${s.n}`, text: s.name, source: "subskill", subskills: [s.n], questions: bySkill(s.n).map((q) => q.id), covered: bySkill(s.n).length > 0 }));
 
-  const groups = new Map<string, QuestionFamily>();
-  for (const q of questions) {
-    const derived = !q.family;
-    const id = q.family || `s${q.subskill}-${q.task ?? q.type}`;
-    const f = groups.get(id) ?? { id, subskill: q.subskill, task: q.task ?? "", questions: [], reserved: false, derived };
-    f.questions.push(q.id);
-    groups.set(id, f);
-  }
-  const families = [...groups.values()];
-  for (const s of topic.subskills) {
-    const mine = families.filter((f) => f.subskill === s.n);
-    const transfer = mine.filter((f) => f.task === "transfer");
-    // Fresh families are kept for assessment: the transfer ones, or else the last family of a
-    // subskill that has at least three.
-    if (transfer.length) transfer.forEach((f) => (f.reserved = true));
-    else if (mine.length >= 3 && !mine[mine.length - 1].derived) mine[mine.length - 1].reserved = true;
-  }
+  const families = questionFamilies(questions);
 
   const missing = objectives.filter((o) => !o.covered).map((o) => o.id);
   const withoutQ = lessons.filter((l) => l.questions === 0).map((l) => l.n);

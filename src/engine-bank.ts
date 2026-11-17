@@ -12,6 +12,8 @@ import { ToolResult } from "./tools";
 import { ReasoningAssessment, finalExpression, withCheck } from "./reasoning";
 import { gradeOfOutcome, normaliseMark, outcomeOfGrade, withNote } from "./grading";
 import { TurnResult, TurnOpts, MAX_ANSWER_SECONDS, applyAttempt, pickQuizQuestion } from "./engine-common";
+import { fadedFor, followUp, freshVariant, markTask, metBefore, taskHelp, taskOf } from "./bankvariants";
+import { baseQuestionId } from "./families";
 import type { Engine } from "./engine";
 
 /**
@@ -127,11 +129,12 @@ export async function placementTurn(eng: Engine, dir: string, chatPath: string, 
 }
 
 /** The evidence record for a bank question marked by code or by the grading call. */
-export function bankAttempt(eng: Engine, p: { id: string; chat: Chat; state: LearnerState; q: Question; answer: string; result: Outcome; activity: string; mode: Mode; grading: Grading; assumptions: string; note: string; now: string }): Attempt {
+export function bankAttempt(eng: Engine, p: { id: string; chat: Chat; state: LearnerState; q: Question; answer: string; result: Outcome; activity: string; mode: Mode; grading: Grading; assumptions: string; note: string; now: string; errorType?: string; help?: string }): Attempt {
   const conf = p.chat.fm.pending_confidence;
   const asked = fmStr(p.chat.fm, "asked_at");
   const seconds = asked ? Math.round((Date.parse(p.now) - Date.parse(asked)) / 1000) : NaN;
-  const helped = fmStr(p.chat.fm, "card_help") === "yes";
+  const assistance = [...(fmStr(p.chat.fm, "card_help") === "yes" ? ["the learner asked the tutor about this question before answering"] : []), ...(p.help ? [p.help] : [])];
+  const helped = assistance.length > 0;
   return {
     id: p.id,
     v: 2,
@@ -144,11 +147,11 @@ export function bankAttempt(eng: Engine, p: { id: string; chat: Chat; state: Lea
     mode: p.mode,
     difficulty: null,
     result: p.result,
-    errorType: p.result === "skipped" ? "skipped" : "",
+    errorType: p.result === "skipped" ? "skipped" : p.errorType ?? "",
     note: p.note,
     confidence: typeof conf === "number" && conf >= 0 && conf <= 1 ? conf : null,
     assisted: helped,
-    assistance: helped ? ["the learner asked the tutor about this question before answering"] : [],
+    assistance,
     answerExposed: false,
     transfer: false,
     seconds: Number.isFinite(seconds) && seconds >= 0 && seconds <= MAX_ANSWER_SECONDS ? seconds : null,
@@ -206,7 +209,8 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
   const chat = await eng.store.loadChat(chatPath);
   const mode = (fmStr(chat.fm, "mode", "quiz") as Mode) || "quiz";
   const questions = await eng.store.loadQuestions(dir);
-  const pending = questions.find((q) => q.id === fmStr(chat.fm, "card"));
+  const task = taskOf(questions, fmStr(chat.fm, "card"));
+  const pending = task?.question;
   const text = message.trim();
   const last = chat.messages[chat.messages.length - 1];
   // A question, or a request for a diagram or simulation, goes to the tutor as help with the open question.
@@ -252,6 +256,7 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
       let grading: Grading = "deterministic";
       let assumptions = "";
       let reasoning: ReasoningAssessment | null = null;
+      let mistake = "";
       const skipped = givesUp(answer);
       if (skipped) [grade, assumptions] = ["again", "the learner skipped the question"];
       else if (pending.type === "mcq") {
@@ -264,6 +269,16 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
         }
         grade = letter === mcqLetter(pending.answer) ? "good" : "again";
         assumptions = "the chosen letter was compared with the answer key";
+      } else if (task?.inst) {
+        // New numbers or a repair task: code computed the answer, so code marks it.
+        const m = markTask(task, answer);
+        if (!m) {
+          const reply = task.kind !== "fix" ? "Reply with your answer as a number, for example **12.5**." : 'Reply as "step N, answer X", for example **step 2, answer 12.5**.';
+          chat.messages.push({ role: "tutor", text: reply });
+          await eng.store.saveChat(chatPath, chat);
+          return { reply, changes: [], state, usage, local: true };
+        }
+        [grade, note, assumptions, mistake] = [m.grade, m.note, m.assumptions, m.mistake];
       } else if (pending.type === "short" && sameShortAnswer(answer, pending.answer)) [grade, assumptions] = ["good", "matched the expected answer after ignoring case and spacing"];
       else if (pending.type === "short" && differentNumbers(answer, pending.answer)) [grade, assumptions] = ["again", "both answers are plain numbers, and they differ"];
       else {
@@ -314,14 +329,16 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
       // If the state was saved and the chat was not (an interrupted turn), this is the same
       // attempt arriving again: the record is replaced, and the counters are left alone.
       const repeat = state.attempts.some((a) => a.id === id);
-      attempt = eng.bankAttempt({ id, chat, state, q: pending, answer, result, activity: opts.adaptive ? (sessionFor(chat, state, mode).action === "retrieval" ? "retrieval" : "independent-practice") : "quiz", mode, grading, assumptions, note: result === "correct" ? "" : note, now });
+      attempt = eng.bankAttempt({ id, chat, state, q: pending, answer, result, activity: opts.adaptive ? (sessionFor(chat, state, mode).action === "retrieval" ? "retrieval" : "independent-practice") : "quiz", mode, grading, assumptions, note: result === "correct" ? "" : note, now, errorType: result === "correct" ? "" : mistake, help: taskHelp(task) });
       if (reasoning) {
         attempt.reasoning = reasoning;
         attempt.mark = mark.basis;
       }
       state.attempts = recordAttempt(state.attempts, attempt);
       if (!repeat && scheduled) {
-        if (!s.externalFlashcards) state.cards[pending.id] = schedule(state.cards[pending.id], scheduled, today);
+        // New numbers for a question are the same card: its schedule is the question's.
+        const card = baseQuestionId(pending.id);
+        if (!s.externalFlashcards) state.cards[card] = schedule(state.cards[card], scheduled, today);
         if (pending.subskill in state.names) {
           const b = state.bank[pending.subskill] ?? (state.bank[pending.subskill] = { right: 0, total: 0 });
           b.total += 1;
@@ -350,12 +367,24 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
   const asked = fmList(chat.fm, "asked");
   let decision = opts.decision;
   let next: Question | null = null;
-  if (opts.adaptive) {
+  // After a known mistake comes a repair task, and after a repair a fresh check (bankvariants.ts).
+  const follow = task && attempt && verdict ? followUp(task, attempt, state, asked) : null;
+  if (follow) next = follow.question;
+  else if (opts.adaptive) {
     if (!decision || verdict) decision = await eng.planFrom(dir, chat, state, mode, attempt && attempt.result === "correct" && attempt.skill ? attempt.skill : null);
-    // Transfer questions are kept fresh for assessment: practice does not use them up.
-    const assessing = decision.action === "transfer" || decision.action === "retrieval";
-    if (decision.local === "bank" && decision.focus !== null) next = pickQuizQuestion(questions.filter((q) => q.subskill === decision!.focus && q.type !== "open" && (assessing || q.task !== "transfer")), state, asked, today);
+    // Families kept for assessment stay fresh: practice does not use them up.
+    const purpose = decision.action === "transfer" || decision.action === "retrieval" ? decision.action : "practice";
+    const focus = decision.focus;
+    // Supported practice from the bank is a faded worked example on new numbers.
+    if (decision.local === "bank" && focus !== null && (decision.action === "worked-example" || decision.action === "guided-practice")) {
+      for (const q of questions.filter((x) => x.subskill === focus)) {
+        next = fadedFor(q, state, asked);
+        if (next) break;
+      }
+    } else if (decision.local === "bank" && focus !== null) next = pickQuizQuestion(questions, state, asked, today, { purpose, only: (q) => q.subskill === focus && q.type !== "open" });
   } else next = pickQuizQuestion(questions, state, asked, today);
+  // A question met before comes back with new numbers when code can make them.
+  if (next && !follow && next.generator && metBefore(next, state, asked)) next = freshVariant(next, state, asked) ?? (asked.includes(next.id) ? null : next);
   if (!next && !verdict) return eng.turn(dir, chatPath, message, opts);
 
   let reply: string;
@@ -372,7 +401,11 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
   }
   chat.fm.await_continue = !next && opts.adaptive ? "yes" : "";
   chat.messages.push({ role: "tutor", text: reply });
-  const why = opts.adaptive && decision ? { action: decision.action, reason: decision.reason } : { action: "quiz", reason: "Practise mode: questions from the bank, marked by the plugin where it can." };
+  const why = follow
+    ? { action: follow.action, reason: follow.reason }
+    : opts.adaptive && decision
+      ? { action: decision.action, reason: decision.reason }
+      : { action: "quiz", reason: "Practise mode: questions from the bank, marked by the plugin where it can." };
   eng.bankSession(chat, state, mode, next, why, now);
   await eng.store.saveChat(chatPath, chat);
 

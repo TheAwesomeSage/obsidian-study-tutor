@@ -122,8 +122,10 @@ export interface SkillInput {
   lapse: boolean;
   /** Days since the last unaided attempt. Helped work does not count as renewed retention. Null when there is none. */
   daysSince: number | null;
-  /** Bank questions on this subskill that code can mark and this chat has not asked. */
+  /** Bank questions on this subskill that practice may use, that code can mark and that this chat has not asked (one with a generator can come back twice with new numbers). */
   bankLeft: number;
+  /** A bank question on this subskill has worked steps code can fade, so supported practice needs no model. */
+  faded?: boolean;
   /** A delayed independent check on this concept falls due today or earlier. */
   checkDue?: boolean;
   /** When that check falls due (yyyy-mm-dd), for the reason shown. */
@@ -364,9 +366,10 @@ export function decide(p: PolicyInput): Decision {
     if (p.placementReady) return out("diagnose", s.n, "Nothing is placed yet, so a few quick questions set your starting levels.", "", "placement");
     return out("diagnose", s.n, `${why}There is no evidence on ${s.name} yet, so one question finds your starting point.`);
   }
-  if (level <= 1) return out(s.taught ? "worked-example" : "explain", s.n, `${why}${s.name} is new to you${s.taught ? ", so another worked example comes before practice" : ", so it is explained with a worked example first"}.`);
+  const faded = s.faded ? "bank" : null;
+  if (level <= 1) return out(s.taught ? "worked-example" : "explain", s.n, `${why}${s.name} is new to you${s.taught ? ", so another worked example comes before practice" : ", so it is explained with a worked example first"}.`, "", s.taught ? faded : null);
   if (s.lapse || s.recentFailures >= 2) return out("diagnose-error", s.n, `${why}Your recent unaided answers on ${s.name} were wrong, so the cause is found before more practice.`);
-  if (level === 2) return out("guided-practice", s.n, `${why}You can follow ${s.name}, so the next step is practice with help on hand.`);
+  if (level === 2) return out("guided-practice", s.n, `${why}You can follow ${s.name}, so the next step is practice with help on hand.`, "", faded);
   const backed = level <= s.supported;
   const bank = s.bankLeft > 0 ? "bank" : null;
   const delayed = () => s.recheck

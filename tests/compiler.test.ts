@@ -42,7 +42,7 @@ function fake(options: {
       structured = { overview: "The kernel identifies where information is lost.", subject: "none",
         units: input.objectives.map((o: any, i: number) => ({ objective: o.id, name: `Kernel example ${o.id}`, prerequisites: [], claims: ["T sends vectors in the kernel to zero."], example: "T(0, 3) = 0, so (0,3) is in the kernel.", misconceptions: [], details: "For T(x,y)=x, solve T(x,y)=0 by setting x=0. The coordinate y is arbitrary. That gives the kernel {(0,y)}.",
           passages: input.packet[i].passages.map((p: any) => p.id), visualKind: "", visualReason: "",
-          questions: [{ type: "short", question: "What is T(0,3)?", options: [], answer: "0", explanation: "T returns the first coordinate.", rubric: "", task: "application", family: "compute-kernel", difficulty: 2 }],
+          questions: [{ type: "short", question: "What is T(0,3)?", options: [], answer: "0", explanation: "T returns the first coordinate.", rubric: "", task: "application", family: "compute-kernel", difficulty: 2, generator: "" }],
         })),
       };
       if (options.synth) structured = options.synth(input, structured);
@@ -391,4 +391,22 @@ test("saved courses reopen, unchanged refresh costs nothing, and expansion leave
   assert.equal(partial.preservedCourse, complete.dir);
   assert.notEqual(partial.dir, complete.dir);
   assert.equal(await fs.read(`${complete.dir}/state.md`), saved);
+});
+
+test("a question's generator is kept only when trusted code checks it and it gives the question's own answer", async () => {
+  const { parseQuestions } = await import("../src/formats");
+  const gen = (answer: number) => JSON.stringify({ v: 1, params: { x: { min: 0, max: 9 }, y: { min: 1, max: 9 } }, template: "What is T({x},{y})?", answer: "x", tests: [{ params: { x: 0, y: 3 }, answer }] });
+  const r = await run({ call: fake({ synth: (_input, reply: any) => {
+    const q = reply.units[0].questions[0];
+    reply.units[0].questions = [
+      { ...q, generator: gen(0) },
+      { ...q, question: "What is T(0,3) again?", generator: gen(5) },
+      { ...q, question: "And T(0,4)?", generator: '{"v":1,"params":{"x":{"min":0,"max":9}},"template":"{x}","answer":"constructor(1)"}' },
+    ];
+    return reply;
+  } }) });
+  const kept = parseQuestions(r.questionsBody).filter((q) => q.generator);
+  assert.equal(kept.length, 1, "only the spec that reproduces the stated answer is kept");
+  assert.equal(kept[0].generator?.answer, "x");
+  assert.deepEqual([r.staged.metrics.generators, r.staged.metrics.generatorsRejected], [1, 2]);
 });

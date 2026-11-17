@@ -16,6 +16,7 @@ import { toolLine } from "./tools";
 import { moveLine } from "./tutormove";
 import { reasoningLines } from "./reasoning";
 import { conclusive, markLine } from "./grading";
+import { isBankId } from "./bankvariants";
 import { expansionLine } from "./expansion";
 import type { Screen, TutorView } from "./view";
 import { MODE_INFO, button, chip, confirmAction, iconButton, modeInfo } from "./ui";
@@ -547,7 +548,7 @@ export class StudyScreen implements Screen {
             const r = await v.plugin.engine.dispute(dir, a.id, v.chatPath ?? undefined);
             this.marked = r.attempt;
             this.changes = r.changes;
-            this.markedNote = "The mark no longer counts either way. " + (/^Q\d+$/.test(a.questionId) ? "You can ask for a second opinion, or carry on." : "The tutor will look at your answer again on your next message.");
+            this.markedNote = "The mark no longer counts either way. " + (isBankId(a.questionId) ? "You can ask for a second opinion, or carry on." : "The tutor will look at your answer again on your next message.");
             if (v.chatPath) v.chat = await v.plugin.store.loadChat(v.chatPath);
             await v.stateChanged(r.state);
           } catch (e) {
@@ -556,7 +557,7 @@ export class StudyScreen implements Screen {
           this.sync();
         },
       });
-    } else if (/^Q\d+$/.test(a.questionId)) {
+    } else if (isBankId(a.questionId)) {
       const b = button(row, { label: "Regrade with more thinking (uses tokens)", icon: "refresh-cw", tone: "ghost" });
       b.onclick = async () => {
         b.disabled = true;

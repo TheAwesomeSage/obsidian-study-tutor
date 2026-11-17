@@ -406,7 +406,7 @@ export default class StudyTutorPlugin extends Plugin {
       notice.hide();
       const how = res.refresh === "unchanged" ? `Nothing changed (${res.why}); no model was called.` : res.refresh === "partial" ? `Refreshed subskill ${(res.subskillsRefreshed ?? []).join(", ")} (${res.why}).` : res.refresh === "full" ? `Compiled in full: ${res.why}.` : "";
       const stats = res.metrics;
-      const activity = stats ? `\n${stats.searches} search attempts · ${stats.pages} pages requested · ${stats.cacheHits} cache hits · Ollama ${(stats.localMs / 1000).toFixed(1)}s (${stats.localCalls} calls)` : "";
+      const activity = stats ? `\n${stats.searches} search attempts · ${stats.pages} pages requested · ${stats.cacheHits} cache hits · Ollama ${(stats.localMs / 1000).toFixed(1)}s (${stats.localCalls} calls)${stats.generators || stats.generatorsRejected ? ` · question generators: ${stats.generators ?? 0} kept, ${stats.generatorsRejected ?? 0} dropped` : ""}` : "";
       new Notice(`${res.status === "partial" ? "Partial topic saved" : "Topic ready"}: ${res.subskills} subskills, ${res.questions} questions.${res.preservedCourse ? " The previous topic was kept." : ""}${how ? `\n${how}` : ""}${res.coverage ? `\n${res.coverage}` : ""}${activity}\nModel: ${usageLine(res.usage)} in ${res.usage.calls} call(s)`, 12000);
       this.data.activeTopic = res.preservedCourse ?? res.dir;
       await this.save();

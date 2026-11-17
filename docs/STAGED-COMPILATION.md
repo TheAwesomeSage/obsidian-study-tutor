@@ -33,3 +33,13 @@ Only replies that pass schema validation are saved, and a saved reply is validat
 Checkpoint reuse skips model calls on unchanged input; no token or latency saving is claimed for it without a paired measurement.
 
 No latency or token savings are claimed without a paired measurement on the same input, model settings and provider conditions. Verify provider-enabled research, live Ollama, the packaged Obsidian build and the merged tutoring workflow before a public release.
+
+## Question generators
+
+A short question whose answer is one number worked out from values in the question may carry a `generator`: a bounded family spec written once by the synthesis call, as data. The spec gives parameter ranges, conditions, a question template, an answer expression, worked steps and expected mistakes (`src/families.ts`). The model never supplies code. The plugin's own parser accepts a small expression grammar, with no `eval`.
+
+A spec is kept only when trusted code accepts it and one of its tests gives the answer the question states. Otherwise it is dropped and the question keeps its own numbers. `generators` and `generatorsRejected` in the compile metrics count both outcomes. The synthesis stage version is `synthesis-2`, so checkpoints saved before generators existed are recomputed once.
+
+In the bank (`src/bankvariants.ts`), a question you have met comes back with new numbers. Its id records where it came from: `Q3~17` is question Q3 with seed 17, `Q3~17#fix0` is the repair task for that instance's first expected mistake, and `Q3~17#fade2` is that instance as a worked example with two steps left to the learner. Every one of these is rebuilt from its id and marked by code. New numbers share the question's family and its review card, so they count as practice, never as transfer. Repairs and faded examples are recorded as helped work.
+
+Question families kept for assessment (`questionFamilies` in `src/coursepkg.ts`) are never used by practice or placement when there is another family. A delayed check uses one only as a last resort, and a transfer check takes a kept family you have not met first.

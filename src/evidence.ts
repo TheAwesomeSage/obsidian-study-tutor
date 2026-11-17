@@ -6,6 +6,7 @@
 import { ReasoningAssessment, normaliseReasoning } from "./reasoning";
 import { MarkBasis, conclusive, normaliseBasis } from "./grading";
 import { onCurrentVersion } from "./objective-version";
+import { baseQuestionId } from "./families";
 
 export type Outcome = "correct" | "partial" | "incorrect" | "skipped" | "ungraded";
 
@@ -316,9 +317,11 @@ export function skillEvidence(attempts: Attempt[], skill: number, revision?: { a
     e.last = a.timestamp;
     e.lastResult = a.result;
     if (a.assisted) e.assistedCount++;
+    // New numbers for a question are the same question for these counts (bankvariants.ts).
+    const question = baseQuestionId(a.questionId);
     if (a.grading === "self") e.selfCount++;
-    else if (a.result === "correct") correctQs.add(a.questionId);
-    else if (a.result === "partial") partialQs.add(a.questionId);
+    else if (a.result === "correct") correctQs.add(question);
+    else if (a.result === "partial") partialQs.add(question);
     // A mark the breakdown could not back is history, not evidence: it adds no error and no data point.
     const counts = conclusive(a);
     if (!counts) e.inconclusive++;
@@ -338,7 +341,7 @@ export function skillEvidence(attempts: Attempt[], skill: number, revision?: { a
       const transfer = !familiar && (a.transfer || a.taskType === "transfer" || freshFamily);
       points.push({ ok, day: d, transfer, confidence: a.confidence, at: a.timestamp, current: !revision || onCurrentVersion(a, revision) });
       if (ok) {
-        indCorrectQs.add(a.questionId);
+        indCorrectQs.add(question);
         indDays.add(d);
         if (a.taskType === "teach-back") e.teachBack = true;
         if (a.taskType === "edge-case") e.edgeCase = true;

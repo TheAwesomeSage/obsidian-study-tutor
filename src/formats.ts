@@ -1,6 +1,8 @@
 import { Attempt, LevelChange, normaliseAttempt, skillEvidence, supportedLevel } from "./evidence";
 import type { Relation } from "./course";
 import type { Misconception } from "./misconceptions";
+import { reservedQuestions } from "./coursepkg";
+import { FamilySpec, parseFamilySpec } from "./families";
 // Parsing and serialising of the plugin's markdown files. Pure functions, no Obsidian imports.
 
 export type Mode = "auto" | "tutor" | "teach" | "quiz" | "expert";
@@ -287,9 +289,11 @@ export interface Question {
   difficulty?: number;
   /** For open questions: what a full answer must contain, used when the answer is graded. */
   rubric?: string;
+  /** A bounded family spec (families.ts): code makes fresh numbers for this question and marks them. */
+  generator?: FamilySpec;
 }
 
-const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation", "family", "task", "difficulty", "rubric"] as const;
+const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation", "family", "task", "difficulty", "rubric", "generator"] as const;
 const Q_TASKS = ["recall", "application", "transfer", "prediction", "explanation", "error-finding", "teach-back", "edge-case"];
 
 const OPTION_LABEL = /^\(?[A-Za-z][.):]\s+/;
@@ -359,6 +363,9 @@ export function parseQuestions(md: string): Question[] {
     if (Q_TASKS.includes(task)) q.task = task;
     if (Number.isInteger(difficulty) && difficulty >= 1 && difficulty <= 5) q.difficulty = difficulty;
     if (get("rubric")) q.rubric = get("rubric").slice(0, 800);
+    // A spec that fails its checks is dropped: the question stays, with its own numbers only.
+    const generator = type === "short" && get("generator") ? parseFamilySpec(get("generator")) : null;
+    if (generator && "spec" in generator) q.generator = generator.spec;
     out.push(q);
   }
   return out;
@@ -732,9 +739,12 @@ export const looksLikeQuestion = (reply: string): boolean => /\?\s*$/.test(reply
 /** One code-markable question per subskill, for placing a new learner without a model. */
 export function placementQuestions(questions: Question[], s: LearnerState): Question[] {
   const out: Question[] = [];
+  // Placement leaves the families kept for assessment unseen when the subskill has another.
+  const kept = reservedQuestions(questions);
+  const pick = (qs: Question[]) => qs.find((x) => x.type === "mcq") ?? qs.find((x) => x.type === "short");
   for (const n of Object.keys(s.names).map(Number).sort((a, b) => a - b)) {
     const mine = questions.filter((q) => q.subskill === n);
-    const q = mine.find((x) => x.type === "mcq") ?? mine.find((x) => x.type === "short");
+    const q = pick(mine.filter((x) => !kept.has(x.id))) ?? pick(mine);
     if (q) out.push(q);
   }
   return out;

@@ -1124,3 +1124,112 @@ test("objective versions: a material change asks for one focused recheck; an edi
   assert.equal(legacy.nextCheck, "2026-11-11", "the earlier of the normal check and the change day");
 });
 
+
+test("question families: practice never uses a family kept for assessment, and a transfer check takes an unmet one first", async () => {
+  const { pickQuizQuestion } = await import("../src/engine-common");
+  const { questionFamilies } = await import("../src/coursepkg");
+  const q = (id: string, subskill: number, family: string, task = "application"): F.Question => ({ id, subskill, type: "short", question: id, options: [], answer: "1", explanation: "", family, task });
+  const bank = [q("Q1", 1, "a"), q("Q2", 1, "b"), q("Q3", 1, "c"), q("Q4", 1, "c"), q("Q5", 2, "d"), q("Q6", 2, "e", "transfer")];
+  assert.deepEqual(questionFamilies(bank).filter((f) => f.reserved).map((f) => f.id), ["c", "e"], "the last of three families, and every transfer family");
+
+  const s = F.newState(F.parseTopic(CARD(NAMES)), 4);
+  const today = "2026-11-17";
+  const pick = (asked: string[], purpose?: "practice" | "retrieval" | "transfer", only?: (x: F.Question) => boolean) => pickQuizQuestion(bank, s, asked, today, { purpose, only })?.id ?? null;
+  const one = (x: F.Question) => x.subskill === 1;
+  assert.equal(pick(["Q1", "Q2"], "practice", one), null, "practice has nothing left once only kept families remain");
+  assert.equal(pick([], undefined, (x) => x.subskill === 2), "Q5", "Practise mode skips the transfer family too");
+  assert.equal(pick([], "transfer", one), "Q3", "a transfer check takes the kept family first");
+  assert.equal(pick(["Q1"], "retrieval", one), "Q2", "a retrieval check spends a kept family only when nothing else is left");
+  assert.equal(pick(["Q1", "Q2"], "retrieval", one), "Q3");
+
+  // Once the learner has met family c, a transfer check prefers a family still unmet.
+  s.attempts.push(attempt({ id: "a1", skill: 1, questionId: "Q3", timestamp: "2026-11-16T10:00:00.000Z" }));
+  s.attempts.push(attempt({ id: "a2", skill: 1, questionId: "Q1", timestamp: "2026-11-16T10:05:00.000Z" }));
+  assert.equal(pick(["Q3"], "transfer", one), "Q2", "b is the only family not met yet");
+
+  // Placement leaves the kept family alone when the subskill has another.
+  const placed = F.placementQuestions([q("P1", 1, "x", "transfer"), q("P2", 1, "y")], F.newState(F.parseTopic(CARD(NAMES)), 4));
+  assert.deepEqual(placed.map((x) => x.id), ["P2"]);
+});
+
+/** A topic whose one bank question has a generator with worked steps and a known mistake. No model call is allowed. */
+async function motion() {
+  const gen = { v: 1, params: { u: { min: 1, max: 9 }, a: { min: 1, max: 5 }, t: { min: 2, max: 8 } },
+    template: "A cart starts at {u} m/s and speeds up at {a} m/s² for {t} s. What is its final speed in m/s?", answer: "u+a*t",
+    steps: ["Use v = u + a t.", "v = {u} + {a} × {t} = {=u+a*t}."],
+    mistakes: [{ label: "subtracted the change in speed", expr: "u-a*t", step: 1, says: "v = {u} − {a} × {t} = {=u-a*t}." }],
+    tests: [{ params: { u: 3, a: 2, t: 4 }, answer: 11 }] };
+  const bank = `### Q1\nsubskill: 1\ntype: short\ntask: application\nfamily: s1-velocity\nquestion: A cart starts at 3 m/s and speeds up at 2 m/s² for 4 s. What is its final speed in m/s?\nanswer: 11\nexplanation: v = u + at = 3 + 2·4 = 11.\ngenerator: ${JSON.stringify(gen)}\n`;
+  const fs = new MemFS();
+  const store = new Store(fs, "Tutor", () => "2026-11-17");
+  const settings: any = { claudePath: "", chatModel: "sonnet", compileModel: "sonnet", utilityModel: "haiku", effort: "low", targetLevel: 4, maxChatWords: 600, maxTopicWords: 2000, singlePassWords: 6000, smartRouting: false, hardEffort: "high", bankQuiz: true, codePlacement: true };
+  const engine = new Engine(store, () => settings, () => "2026-11-17");
+  let calls = 0;
+  (engine as any).call = async () => { calls++; throw new Error("no model call expected"); };
+  const dir = await store.saveCompiled({ title: "Motion", fm: { subject: "none" }, topicBody: CARD(NAMES), questionsBody: bank, target: 4 });
+  const questions = await store.loadQuestions(dir);
+  assert.ok(questions[0].generator, "the spec passed its checks and is kept with the question");
+  return { store, engine, dir, questions, calls: () => calls };
+}
+
+test("question families: code asks new numbers, sets a repair task after a known mistake, then checks the fix without help", async () => {
+  const { taskOf } = await import("../src/bankvariants");
+  const { store, engine, dir, questions, calls } = await motion();
+  const chat = await store.newChat(dir, "Motion", "quiz", new Date(2026, 10, 17, 9, 0));
+  const card = async () => F.fmStr((await store.loadChat(chat)).fm, "card");
+  const answerOf = async () => taskOf(questions, await card())!.inst!;
+
+  let r = await engine.quizTurn(dir, chat, "");
+  assert.equal(await card(), "Q1", "the question as compiled comes first");
+  r = await engine.quizTurn(dir, chat, "11");
+  assert.match(r.reply, /\*\*Correct\.\*\*/);
+  assert.equal(await card(), "Q1~1", "met once, it comes back with new numbers");
+
+  const first = await answerOf();
+  r = await engine.quizTurn(dir, chat, String(first.params.u - first.params.a * first.params.t));
+  assert.match(r.reply, /\*\*Incorrect\.\*\* Your answer is what this mistake gives: subtracted the change in speed\./);
+  assert.equal(r.attempt?.errorType, "subtracted the change in speed");
+  assert.equal(await card(), "Q1~1#fix0", "a worked solution with that mistake comes next");
+  assert.match(r.reply, /one mistake in it/);
+
+  r = await engine.quizTurn(dir, chat, `step 2, answer ${first.answerText}, it should be a plus`);
+  assert.match(r.reply, /\*\*Correct\.\*\*/);
+  assert.equal(r.attempt?.assisted, true, "the repair is helped work");
+  assert.equal(r.attempt?.taskType, "error-finding");
+  assert.equal(await card(), "Q1~2", "then new numbers check the fix");
+
+  const second = await answerOf();
+  r = await engine.quizTurn(dir, chat, second.answerText);
+  assert.match(r.reply, /\*\*Correct\.\*\*/);
+  assert.equal(r.attempt?.assisted, false);
+  assert.equal(r.attempt?.family, "s1-velocity", "same family: practice, not transfer");
+  assert.equal(calls(), 0, "no model call anywhere");
+
+  const st = await store.loadState(dir, 4);
+  assert.deepEqual(Object.keys(st.cards), ["Q1"], "new numbers share the question's card");
+  const e = skillEvidence(st.attempts, 1);
+  assert.equal(e.independentCorrect, 1, "new numbers for one question count as one question");
+  assert.equal(e.delayedTransfer, false);
+});
+
+test("question families: in Adaptive mode, guided practice is a faded worked example on new numbers, marked by code as helped work", async () => {
+  const { store, engine, dir, calls } = await motion();
+  const st = await store.loadState(dir, 4);
+  st.levels[1] = 2;
+  st.taught[1] = "2026-11-16";
+  st.focus = 1;
+  await store.saveState(dir, st);
+  const chat = await store.newChat(dir, "Motion", "auto", new Date(2026, 10, 17, 9, 0));
+  const r = await engine.study(dir, chat, "");
+  assert.deepEqual([r.decision!.action, r.decision!.local, r.local], ["guided-practice", "bank", true]);
+  assert.match(r.reply, /A worked solution with its last step left for you:\n\n1\. Use v = u \+ a t\.\n2\. Step 2: …/);
+  const card = F.fmStr((await store.loadChat(chat)).fm, "card");
+  assert.equal(card, "Q1~1#fade1");
+  const { taskOf } = await import("../src/bankvariants");
+  const inst = taskOf(await store.loadQuestions(dir), card)!.inst!;
+  const a = await engine.study(dir, chat, inst.answerText);
+  assert.match(a.reply, /\*\*Correct\.\*\*/);
+  assert.deepEqual([a.attempt!.assisted, a.attempt!.grading, a.attempt!.verification], [true, "deterministic", "verified"]);
+  assert.match(a.attempt!.assistance.join(" "), /faded worked example/);
+  assert.equal(calls(), 0);
+});

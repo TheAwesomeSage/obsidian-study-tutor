@@ -12,6 +12,7 @@ import { activeDescriptions, recompute } from "./misconceptions";
 import { REASONING_RULE, ReasoningAssessment, parseReasoning, rubricBrief } from "./reasoning";
 import { GRADE_REASONING_SCHEMA, applyAttempt } from "./engine-common";
 import { normaliseMark, outcomeOfGrade, withNote } from "./grading";
+import { taskOf } from "./bankvariants";
 import type { Engine } from "./engine";
 
 /**
@@ -75,7 +76,7 @@ export async function regrade(eng: Engine, dir: string, attemptId: string): Prom
   if (!found) throw new Error("That attempt is no longer on record.");
   const { state, attempt: a } = found;
   if (found.dir !== dir) throw new Error("This answer was marked in conversation, so there is no model answer to regrade it against. Ask the tutor to look again.");
-  const q = (await eng.store.loadQuestions(dir)).find((x) => x.id === a.questionId);
+  const q = taskOf(await eng.store.loadQuestions(dir), a.questionId)?.question;
   if (!q) throw new Error("This answer was marked in conversation, so there is no model answer to regrade it against. Ask the tutor to look again.");
   const g = await eng.grade(q, a.answer, true);
   // The second opinion is held to its own breakdown like any other mark (grading.ts).
