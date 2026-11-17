@@ -6,7 +6,7 @@ import { CallResult, ModelCliError, Usage, addUsage } from "./claude";
 import { callModel, modelFor, type ModelRequest } from "./model-provider";
 import { dependentCounts } from "./course";
 import { Attempt, EVIDENCE_RULES, Grading, Outcome, checkDue, recordAttempt } from "./evidence";
-import { Chat, LearnerState, Mode, NextStep, Prereqs, Question, applyStateUpdate, chatWords, extractStateTrailer, fmList, fmStr, mastery, placementQuestions, prereqGaps, setLevel, ymd } from "./formats";
+import { Chat, LearnerState, Mode, NextStep, Prereqs, Question, objectiveStamp, applyStateUpdate, chatWords, extractStateTrailer, fmList, fmStr, mastery, placementQuestions, prereqGaps, setLevel, ymd } from "./formats";
 import { ACTION_GUIDE, DEFAULT_WEIGHTS, Decision, POLICY_VERSION, PolicyInput, decide, homeStep } from "./policy";
 import type { ResearchProvider } from "./compile-research";
 import { LocalModel } from "./ollama";
@@ -21,6 +21,7 @@ import { ToolRegistry, ToolResult } from "./tools";
 import { NoteSourceStore, PASSAGE_RULE, Retrieval, SourceStore, extractPassageAsk, gapNote, renderRetrieval } from "./retrieval";
 import { activeDescriptions, applyObservation, courseMisconceptions, onConcept } from "./misconceptions";
 import { ATTEMPT_REASONING, parseReasoning } from "./reasoning";
+import { normaliseMark, withNote } from "./grading";
 import { MoveDecision, REASON_TEXT, afterMark, chooseMove, moveBrief } from "./tutormove";
 import { CourseMaterial, lessonDepth } from "./lessondepth";
 import { CourseExpander, ExpansionRecord, GO_FURTHER, expansionNote, expansionRequest, inCourse } from "./expansion";
@@ -190,6 +191,7 @@ export class Engine {
         bankLeft: s.bankQuiz === false ? 0 : p.questions.filter((q) => q.subskill === n && q.type !== "open" && !asked.includes(q.id) && !seenToday.has(q.id)).length,
         checkDue: (m.level ?? 0) >= 3 && checkDue(e, today),
         nextCheck: e.nextCheck,
+        ...(e.recheck ? { recheck: e.recheck.why } : {}),
         transferReady: !e.firstIndependentDay || e.firstIndependentDay < today,
         needsTeachBack: !e.teachBack,
         needsEdgeCase: !e.edgeCase,
@@ -663,15 +665,25 @@ export class Engine {
           seconds: Number.isFinite(seconds) && seconds >= 0 && seconds <= MAX_ANSWER_SECONDS ? seconds : null,
           timestamp: answeredAt,
           grading: result === "skipped" ? "deterministic" : "model",
-          verification: result === "skipped" || checkedBySympy ? "verified" : "unverified",
+          // SymPy recomputing the reply's own results does not confirm the mark of the learner's answer.
+          verification: result === "skipped" ? "verified" : "unverified",
           assumptions: result === "skipped" ? "the learner skipped the question" : checkedBySympy ? `SymPy recomputed the results the reply states${report.numeric ? " (some only numerically, at sample points)" : ""}${report.unresolved ? `; ${report.unresolved} could not be checked` : ""}; the judgement of the reasoning is the model's` : "one model judgement, not independently checked",
           taskType: taskTypeFor(askedUnder, mode, tag),
           family: "",
+          ...objectiveStamp(state, skill),
         };
         // The result, the method and the assumptions, judged apart. SymPy's check of the reply is kept
         // beside the judgement: it recomputed the results the reply states, not the learner's method.
         const reasoning = tag && result !== "skipped" ? parseReasoning(tag.reasoning) : null;
         if (reasoning) marked.reasoning = checkedBySympy ? { ...reasoning, checks: [{ evaluated: "the results the tutor's reply states", kind: report.numeric ? "numeric" : "symbolic", outcome: true, assumptions: "SymPy recomputed the reply's results; it does not check the learner's method" }] } : reasoning;
+        // The tutor's mark is held to its own breakdown, as every other mark is (grading.ts).
+        if (marked.reasoning) {
+          const bankQ = /^Q\d+$/.test(before.questionId) ? (await this.store.loadQuestions(dir)).find((q) => q.id === before.questionId) : undefined;
+          const mark = normaliseMark({ proposed: marked.result, reasoning: marked.reasoning, rubric: bankQ?.rubric });
+          marked.mark = mark.basis;
+          marked.result = mark.result;
+          marked.note = withNote(marked.note, mark).slice(0, 400);
+        }
         // A check on a prerequisite in another topic is evidence about that concept. It is kept
         // with that topic's evidence, and counts neither for nor against the concept in focus.
         // The app knows when it set the question as such a check; otherwise the tutor's mark may

@@ -456,6 +456,13 @@ export class Store {
     }
     s.topic = topic.title;
     s.concepts = concepts;
+    s.objectiveRefs = {};
+    s.revisions = {};
+    for (const c of graph.concepts) {
+      if (c.retired) continue;
+      if (c.objectives?.length) s.objectiveRefs[c.n] = [...c.objectives];
+      if (c.revisedAt) s.revisions[c.n] = { at: c.revisedAt, why: c.revisedWhy ?? "" };
+    }
     // Attempts made before concepts had ids take the id of the subskill they were recorded on.
     for (const a of s.attempts) if (!a.concept && a.skill in concepts) a.concept = concepts[a.skill];
     const moved = await this.migrateLinks(dir, s, graph);
@@ -515,6 +522,28 @@ export class Store {
     if (previous && p.keepCards) for (const id of p.keepCards) if (previous.cards[id]) next.cards[id] = previous.cards[id];
     await this.saveState(dir, next);
     return dir;
+  }
+
+  /**
+   * Records, on each concept of the course graph, the objective versions it teaches and its latest
+   * material change. Written after a compile or refresh, from the course package's versions.
+   */
+  async setConceptRevisions(dir: string, byN: Record<number, { refs: string[]; at?: string; why?: string }>): Promise<void> {
+    const topic = await this.loadTopic(dir);
+    const graph = await this.loadGraph(dir, topic);
+    for (const c of graph.concepts) {
+      delete c.objectives;
+      delete c.revisedAt;
+      delete c.revisedWhy;
+      const r = c.retired ? undefined : byN[c.n];
+      if (!r) continue;
+      if (r.refs.length) c.objectives = [...r.refs];
+      if (r.at) {
+        c.revisedAt = r.at;
+        c.revisedWhy = r.why ?? "";
+      }
+    }
+    await this.writeFile(this.graphPath(dir), serializeTopicGraph(topic.title, graph));
   }
 
   async readQuestionsRaw(dir: string): Promise<string> {
@@ -844,7 +873,7 @@ export class Store {
   }
 
   private compileCachePath(key: string): string {
-    if (!/^(source|page|search|select|plan)-[a-f\d]{64}$/.test(key)) throw new Error("Invalid compilation cache key.");
+    if (!/^(source|page|search|select|plan|synth|audit|objver)-[a-f\d]{64}$/.test(key)) throw new Error("Invalid compilation cache key.");
     return `${this.root}/_compile-cache/${key}.json`;
   }
 

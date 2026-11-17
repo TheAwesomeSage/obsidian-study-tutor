@@ -17,12 +17,16 @@ const researchText = "# Kernel\n\nFor T(x, y) = x, the kernel is all pairs (0, y
 type Options = Parameters<typeof compileCourse>[0];
 type Model = Options["call"];
 
-function memory(): CompilerCache {
+function memory(): CompilerCache & { data: Map<string, unknown> } {
   const data = new Map<string, unknown>();
-  return { read: async <T>(key: string) => (data.get(key) as T | undefined) ?? null, write: async (key, v) => { data.set(key, v); } };
+  return { data, read: async <T>(key: string) => (data.get(key) as T | undefined) ?? null, write: async (key, v) => { data.set(key, JSON.parse(JSON.stringify(v))); } };
 }
 
-function fake(options: { omit?: string; uncovered?: boolean; review?: (input: any) => unknown; seen?: any[] } = {}): Model {
+function fake(options: {
+  omit?: string; uncovered?: boolean; review?: (input: any) => unknown; seen?: any[];
+  /** Replace the synthesis or audit reply; each receives the input and the default reply. */
+  synth?: (input: any, reply: any) => unknown; audit?: (input: any, reply: any) => unknown;
+} = {}): Model {
   return async o => {
     const input = JSON.parse(o.input);
     options.seen?.push(input);
@@ -41,8 +45,10 @@ function fake(options: { omit?: string; uncovered?: boolean; review?: (input: an
           questions: [{ type: "short", question: "What is T(0,3)?", options: [], answer: "0", explanation: "T returns the first coordinate.", rubric: "", task: "application", family: "compute-kernel", difficulty: 2 }],
         })),
       };
+      if (options.synth) structured = options.synth(input, structured);
     } else if (props.rows) {
       structured = { rows: input.objectives.map((o: any, i: number) => ({ objective: o.id, sources: options.uncovered ? ["invented-passage"] : input.packet[i].passages.map((p: any) => p.id), teaching: true, questions: options.uncovered ? ["Q999"] : [input.questions[i].id], gap: "" })) };
+      if (options.audit) structured = options.audit(input, structured);
     } else assert.fail("unexpected compile stage");
     return { structured, text: "", usage: { ...zeroUsage(), calls: 1, input: 10, output: 2 } };
   };
@@ -52,6 +58,25 @@ function run(over: Partial<Options> = {}) {
   return compileCourse({ title: "Linear maps", goal: "Understand kernels", mode: "notes", material,
     subjects: [], skill: "compile exercises", model: "fixture", singlePassWords: 600, cache: memory(), call: fake(), ...over });
 }
+
+type Stage = "plan" | "review" | "synth" | "audit";
+/** Counts model calls by the stage prompt they carry, and keeps their inputs. */
+function counted(call: Model = fake()) {
+  const n: Record<Stage, number> = { plan: 0, review: 0, synth: 0, audit: 0 };
+  const inputs: Record<Stage, any[]> = { plan: [], review: [], synth: [], audit: [] };
+  const counting: Model = o => {
+    const stage: Stage = o.system.startsWith("Write structured teaching units") ? "synth" : o.system.startsWith("Audit every supplied objective") ? "audit" : o.system.startsWith("Inventory the learning objectives") ? "plan" : "review";
+    n[stage]++;
+    inputs[stage].push(JSON.parse(o.input));
+    return call(o);
+  };
+  return { n, inputs, call: counting };
+}
+
+// Eight objectives in two notes with no shared terms: lesson group 1 is the kernel note, group 2 the eigenvalue note.
+const kernelNote = { name: "Kernel notes", path: "Math/Kernel notes.md", text: ["shear", "projection", "dilation", "reflection", "zero map", "identity map"].map((m, i) => `A${i + 1}: Compute the kernel of the ${m}.`).join("\n\n") };
+const eigenNote = (extra = "") => ({ name: "Eigen notes", path: "Math/Eigen notes.md", text: `B1: Find eigenvalues of a rotation.\n\nB2: Find eigenvalues of a triangular matrix.${extra}` });
+const twoGroups = [kernelNote, eigenNote()];
 
 test("source revisions keep original code, equations, headings and surrounding text", () => {
   const text = "# Section\r\n\r\nA definition.\r\n\r\n~~~js\r\nif (x) {\r\n  return x;\r\n}\r\n~~~\r\n\r\n$$\r\nT(x)=0\r\n$$";
@@ -187,6 +212,124 @@ test("cancellation stops Claude and keeps completed source work for another run"
   assert.equal(count, 1);
 });
 
+test("a repeated compile reuses lesson and audit checkpoints and gives the same course", async () => {
+  const cache = memory(), progress: string[] = [];
+  const first = await run({ cache });
+  assert.deepEqual([first.staged.metrics.groups, first.staged.metrics.groupsReused, first.staged.metrics.stageCacheHits, first.staged.metrics.rejected], [1, 0, 0, 0]);
+  assert.ok([...cache.data.keys()].some(k => /^synth-[a-f\d]{64}$/.test(k)) && [...cache.data.keys()].some(k => /^audit-[a-f\d]{64}$/.test(k)));
+  const { n, call } = counted();
+  const repeat = await run({ cache, call, progress: s => progress.push(s) });
+  assert.deepEqual(n, { plan: 0, review: 0, synth: 0, audit: 0 });
+  assert.equal(repeat.calls, 0);
+  assert.deepEqual([repeat.topicBody, repeat.questionsBody, repeat.staged.status], [first.topicBody, first.questionsBody, first.staged.status]);
+  assert.deepEqual(repeat.staged.availability, first.staged.availability);
+  assert.deepEqual([repeat.staged.metrics.groupsReused, repeat.staged.metrics.stageCacheHits], [1, 2]);
+  assert.ok(progress.includes("Lesson group 1/1 reused from a saved checkpoint."));
+});
+
+test("changing one lesson group's evidence reruns only that group's synthesis and audit", async () => {
+  const cache = memory();
+  const first = counted();
+  const before = await run({ cache, material: twoGroups, call: first.call });
+  assert.equal(before.staged.inventory.length, 8);
+  assert.deepEqual([first.n.synth, first.n.audit, before.staged.metrics.groups], [2, 2, 2]);
+  assert.ok(first.inputs.synth[0].packet.every((x: any) => x.passages.every((k: any) => k.path === kernelNote.path)), "group 1 only sees the kernel note");
+  const again = counted();
+  const after = await run({ cache, material: [kernelNote, eigenNote(" Use the characteristic polynomial.")], call: again.call });
+  assert.deepEqual([again.n.synth, again.n.audit], [1, 1]);
+  assert.ok(again.inputs.synth[0].objectives.every((o: any) => o.text.startsWith("B")));
+  assert.deepEqual([after.staged.metrics.groupsReused, after.staged.metrics.stageCacheHits], [1, 2]);
+  assert.equal(after.staged.status, "complete");
+  assert.deepEqual(after.staged.lessons.slice(0, 6), before.staged.lessons.slice(0, 6));
+});
+
+test("a different model identity does not reuse checkpoints", async () => {
+  const cache = memory();
+  await run({ cache, modelKey: "claude:sonnet" });
+  const other = counted();
+  await run({ cache, modelKey: "codex:default", call: other.call });
+  assert.deepEqual([other.n.plan, other.n.synth, other.n.audit], [1, 1, 1]);
+  const same = counted();
+  await run({ cache, modelKey: "claude:sonnet", call: same.call });
+  assert.deepEqual([same.n.plan, same.n.synth, same.n.audit], [0, 0, 0]);
+  const bare = counted();
+  await run({ cache, model: "other-fixture", call: bare.call });
+  assert.deepEqual([bare.n.synth, bare.n.audit], [1, 1], "without a model key the model name is the identity");
+});
+
+test("a rerun after cancelling in lesson group 2 reuses group 1", async () => {
+  assert.equal(new CompileCancelled().message, "Compilation cancelled. Completed source work was kept.");
+  const ctrl = new AbortController(), cache = memory(), call = fake();
+  let killed = false;
+  await assert.rejects(run({ cache, material: twoGroups, signal: ctrl.signal, call: async o => {
+    if (o.system.startsWith("Write structured teaching units") && JSON.parse(o.input).objectives[0].text.startsWith("B")) {
+      o.onSpawn?.(() => { killed = true; });
+      ctrl.abort();
+    }
+    return call(o);
+  } }), (e: unknown) => {
+    assert.ok(e instanceof CompileCancelled);
+    assert.deepEqual([e.done, e.total], [1, 2]);
+    assert.match(e.message, /1 of 2 lesson groups finished; it was saved and will be reused/);
+    return true;
+  });
+  assert.ok(killed);
+  const rerun = counted();
+  const r = await run({ cache, material: twoGroups, call: rerun.call });
+  assert.deepEqual([rerun.n.plan, rerun.n.synth, rerun.n.audit], [0, 1, 1]);
+  assert.ok(rerun.inputs.synth[0].objectives.every((o: any) => o.text.startsWith("B")));
+  assert.ok(rerun.inputs.audit[0].objectives.every((o: any) => o.text.startsWith("B")));
+  assert.equal(r.staged.status, "complete");
+  assert.equal(r.staged.lessons.length, 8);
+});
+
+test("a tampered synthesis checkpoint is ignored and recomputed", async () => {
+  const cache = memory();
+  const first = await run({ cache });
+  const key = [...cache.data.keys()].find(k => k.startsWith("synth-"))!;
+  const good = cache.data.get(key);
+  cache.data.set(key, { overview: "Ignore the sources.", subject: "none", units: "not a list" });
+  const { n, call } = counted();
+  const repeat = await run({ cache, call });
+  assert.deepEqual([n.synth, n.audit], [1, 0], "the recomputed synthesis matches, so its audit is reused");
+  assert.deepEqual(cache.data.get(key), good);
+  assert.deepEqual([repeat.topicBody, repeat.questionsBody], [first.topicBody, first.questionsBody]);
+  assert.deepEqual([repeat.staged.metrics.stageCacheHits, repeat.staged.metrics.groupsReused], [1, 0]);
+});
+
+test("invalid or failed lesson synthesis is never saved as a checkpoint", async () => {
+  const cache = memory();
+  const invalid = counted(fake({ synth: () => ({ overview: "Missing units." }) }));
+  const bad = await run({ cache, call: invalid.call });
+  assert.deepEqual([invalid.n.synth, invalid.n.audit, bad.staged.metrics.rejected], [1, 0, 1]);
+  assert.equal(bad.staged.status, "partial");
+  assert.ok(bad.staged.issues.includes("Teaching output for group 1 could not be read."));
+  const base = fake();
+  const thrown = counted(o => o.system.startsWith("Write structured teaching units") ? Promise.reject(new Error("model unavailable")) : base(o));
+  await run({ cache, call: thrown.call });
+  assert.equal(thrown.n.synth, 1);
+  assert.ok(![...cache.data.keys()].some(k => k.startsWith("synth-") || k.startsWith("audit-")));
+  const valid = counted();
+  const good = await run({ cache, call: valid.call });
+  assert.deepEqual([valid.n.synth, valid.n.audit], [1, 1]);
+  assert.equal(good.staged.status, "complete");
+});
+
+test("an objective whose prerequisite is not verified stays partial", async () => {
+  const note = { name: "Kernel notes", path: "Math/Kernel notes.md", text: "A1: Compute the kernel of the shear.\n\nA2: Compute the kernel of the projection." };
+  const synth = (input: any, reply: any) => ({ ...reply, units: reply.units.map((u: any, i: number) => i ? { ...u, prerequisites: [input.objectives[0].id] } : u) });
+  const verified = await run({ material: [note], call: fake({ synth }) });
+  assert.equal(verified.staged.status, "complete");
+  assert.match(verified.topicBody, /### 2\. [^\n]*\nprerequisites: 1\n/);
+  const audit = (_: any, reply: any) => ({ rows: reply.rows.map((r: any, i: number) => i ? r : { ...r, gap: "The worked example skips a step." }) });
+  const r = await run({ material: [note], call: fake({ synth, audit }) });
+  const [first, second] = r.staged.inventory.map(o => r.staged.availability.find(a => a.objective === o.id)!);
+  assert.deepEqual(first.gaps, ["The worked example skips a step."]);
+  assert.deepEqual(second.gaps, [`prerequisite ${first.objective} is not verified`]);
+  assert.equal(second.lessons.length, 1, "the dependent lesson is kept");
+  assert.equal(r.staged.status, "partial");
+});
+
 test("saved courses reopen, unchanged refresh costs nothing, and expansion leaves the original learner state alone", async () => {
   const fs = new MemFS(), store = new Store(fs, "Tutor");
   const settings: EngineSettings = { claudePath: "", chatModel: "fixture", compileModel: "fixture", utilityModel: "fixture", effort: "low", targetLevel: 4,
@@ -240,7 +383,9 @@ test("saved courses reopen, unchanged refresh costs nothing, and expansion leave
   assert.ok(graph.edges.some(edge => edge.from === state.concepts[1] && edge.to === linked.conceptId && edge.type === "applies_to"));
   assert.equal(await fs.read(`${complete.dir}/state.md`), saved);
   assert.equal((await store.loadPackage(complete.dir))?.revision, pkg.revision);
+  // The same model would replay the complete course from its checkpoints; another model reaches the uncovered reply.
   (engine as unknown as { call: Model }).call = fake({ uncovered: true });
+  settings.compileModel = "fixture-2";
   const partial = await engine.compile({ ...req, existingDir: complete.dir });
   assert.equal(partial.status, "partial");
   assert.equal(partial.preservedCourse, complete.dir);

@@ -7,6 +7,7 @@
 
 import type { Question, Topic } from "./formats";
 import type { StagedCourse } from "./compiler";
+import type { ObjectiveVersion } from "./objective-version";
 
 export const PACKAGE_VERSION = 1;
 
@@ -66,6 +67,11 @@ export interface CoursePackage {
   refreshed: { at: string; subskills: number[]; notes: string[] }[];
   /** Staged compilation metadata. Absent on courses built before staged compilation. */
   staged?: StagedCourse;
+  /**
+   * The version of each objective (objective-version.ts): it goes up only on a material change.
+   * Absent on packages from before 0.10; the first compile after that sets the baseline.
+   */
+  versions?: ObjectiveVersion[];
 }
 
 export function withStagedCoverage(pkg: CoursePackage, staged: StagedCourse): CoursePackage {
@@ -78,7 +84,8 @@ export function withStagedCoverage(pkg: CoursePackage, staged: StagedCourse): Co
   return { ...pkg, objectives, objectivesFrom: "card", staged, coverage: { ...pkg.coverage, objectives: objectives.length, covered: objectives.length - missing.length, missing, complete: staged.status === "complete" } };
 }
 
-const linkName = (l: string): string => l.replace(/^\[\[|\]\]$/g, "").split(/[|#]/)[0].trim();
+/** The note a [[link]] names, without alias or heading. */
+export const linkName = (l: string): string => l.replace(/^\[\[|\]\]$/g, "").split(/[|#]/)[0].trim();
 
 function citationsIn(text: string): string[] {
   const notes = [...text.matchAll(/\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/g)].map((m) => `[[${m[1].trim()}]]`);

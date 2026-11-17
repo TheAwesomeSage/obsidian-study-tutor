@@ -15,6 +15,7 @@ import { SessionRecord, openQuestion, sessionFor } from "./session";
 import { toolLine } from "./tools";
 import { moveLine } from "./tutormove";
 import { reasoningLines } from "./reasoning";
+import { conclusive, markLine } from "./grading";
 import { expansionLine } from "./expansion";
 import type { Screen, TutorView } from "./view";
 import { MODE_INFO, button, chip, confirmAction, iconButton, modeInfo } from "./ui";
@@ -526,7 +527,9 @@ export class StudyScreen implements Screen {
     const more = box.createEl("details", { cls: "st-feedback-more" });
     more.createEl("summary", { text: "How this was checked" });
     if (a.assumptions) more.createDiv({ cls: "st-meta", text: `Basis: ${a.assumptions}.` });
-    more.createDiv({ cls: "st-meta", text: a.assisted || a.answerExposed ? "Because help was given or the answer had been seen, this does not count as unaided evidence." : a.grading === "self" ? "A self-rating does not count as evidence for a level." : a.result === "ungraded" ? "An unmarked answer changes nothing." : "This counts as unaided evidence." });
+    more.createDiv({ cls: "st-meta", text: a.assisted || a.answerExposed ? "Because help was given or the answer had been seen, this does not count as unaided evidence." : a.grading === "self" ? "A self-rating does not count as evidence for a level." : a.result === "ungraded" ? "An unmarked answer changes nothing." : !conclusive(a) ? "The breakdown could not back this mark, so it does not count as evidence either way." : "This counts as unaided evidence." });
+    const ml = markLine(a);
+    if (ml) more.createDiv({ cls: "st-meta st-reasoning", text: ml });
     if (a.note) more.createDiv({ cls: "st-meta", text: a.note });
     // The result, the method and the assumptions, each with who decided it.
     if (a.reasoning) for (const l of reasoningLines(a.reasoning)) more.createDiv({ cls: "st-meta st-reasoning", text: l });

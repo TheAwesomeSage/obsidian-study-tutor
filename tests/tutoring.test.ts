@@ -16,6 +16,8 @@ import { NoteSourceStore, RetrievalConcept, SourcePassage, SourceStore, extractP
 import { Misconception, activeDescriptions, applyObservation, fromLegacy, isActive, misconceptionLine, onConcept, parseMisconception, recompute, reconcile } from "../src/misconceptions";
 import { afterMark, chooseMove, moveBrief, moveLine } from "../src/tutormove";
 import { finalExpression, normaliseReasoning, parseReasoning, reasoningLines, resultConflict, rubricDimensions, withCheck } from "../src/reasoning";
+import { markLine, normaliseMark } from "../src/grading";
+import { skillEvidence } from "../src/evidence";
 import { fallbackMaterial, lessonDepth, missingEvidence } from "../src/lessondepth";
 import { CourseExpander, ExpansionRequest, ExpansionResult, expansionLine, expansionNote, expansionRequest, inCourse, readResult } from "../src/expansion";
 import { Claim, ClaimResult, MathBackend } from "../src/sympy";
@@ -567,6 +569,84 @@ test("reasoning in a quiz: an ambiguous answer stays uncertain, and a conflict w
   const after = await t.store.loadState(t.dir, 4);
   assert.deepEqual([after.levels, after.bank], [before.levels, before.bank], "an ungraded answer moves nothing");
   assert.equal(Number((await t.store.loadChat(chat)).fm.total), total);
+});
+
+test("grading: the overall mark never says more than its breakdown, and an uncheckable answer is no evidence", () => {
+  const rubric = "final answer 1/4; justifies each step by a valid rule; states that the divisor is nonzero";
+  const br = (o: Record<string, unknown>) => parseReasoning({ certainty: "complete", ...o }, rubric)!;
+  const sympyRight = (o: Record<string, unknown>) => withCheck(br(o), { evaluated: "the final result 1/4 against the expected 1/4", kind: "symbolic", outcome: true, assumptions: "compared as expressions" });
+  const cases: [string, Parameters<typeof normaliseMark>[0], string, boolean, string[]][] = [
+    ["uncheckable, marked right", { proposed: "correct", reasoning: br({ result: "correct", method: "sound", certainty: "uncheckable" }), rubric }, "ungraded", false, ["uncheckable"]],
+    ["uncheckable, marked wrong", { proposed: "incorrect", reasoning: br({ result: "incorrect", method: "flawed", certainty: "uncheckable" }), rubric }, "ungraded", false, ["uncheckable"]],
+    ["SymPy-checked result cannot establish an unassessed method", { proposed: "correct", reasoning: sympyRight({ result: "unclear", method: "not-assessed", assumptions: "sound" }), rubric }, "partial", false, ["method-unassessed"]],
+    ["marked right while its own result verdict says wrong", { proposed: "correct", reasoning: br({ result: "incorrect", method: "sound", assumptions: "sound" }), rubric }, "ungraded", false, ["overall-contradicts-result"]],
+    ["right result by a flawed method keeps partial credit", { proposed: "correct", reasoning: sympyRight({ result: "correct", method: "flawed", assumptions: "sound" }), rubric }, "partial", true, ["method-flawed"]],
+    ["sound method with a late slip keeps justified partial credit", { proposed: "partial", reasoning: br({ result: "incorrect", method: "sound", assumptions: "sound", earliest_error: { step: "2^3 = 6", kind: "arithmetic" } }), rubric }, "partial", true, []],
+    ["marked wrong with nothing assessed against it", { proposed: "incorrect", reasoning: sympyRight({ result: "correct", method: "sound", assumptions: "sound" }), rubric }, "ungraded", false, ["negative-without-basis"]],
+    ["required assumption not stated", { proposed: "correct", reasoning: br({ result: "correct", method: "sound", assumptions: "unstated" }), rubric }, "partial", true, ["assumptions-unstated"]],
+    ["every required dimension judged sound", { proposed: "correct", reasoning: sympyRight({ result: "correct", method: "sound", assumptions: "sound" }), rubric }, "correct", true, []],
+    ["no breakdown (exact answer or multiple choice) stands", { proposed: "correct", reasoning: null }, "correct", true, []],
+    ["no rubric: an unassessed method blocks nothing", { proposed: "correct", reasoning: parseReasoning({ result: "correct", certainty: "complete" }, "") }, "correct", true, []],
+  ];
+  for (const [name, input, result, counts, rules] of cases) {
+    const m = normaliseMark(input);
+    assert.deepEqual([m.result, m.basis.conclusive, m.basis.rules], [result, counts, rules], name);
+  }
+  // The proposed mark is kept beside the recorded one, and the panel explains the change.
+  const m = normaliseMark(cases[2][1]);
+  assert.equal(m.basis.proposed, "correct");
+  assert.deepEqual(m.basis.requires, ["result", "method", "assumptions"]);
+  assert.match(markLine({ result: m.result, mark: m.basis }), /^Proposed as correct, recorded as partly right \(method unassessed\)\. Kept for the record; not used as evidence/);
+});
+
+test("grading: an inconclusive mark is history, not a data point, and survives a reload", async () => {
+  const t = await setup({ maths: true });
+  const chat = await t.chatIn("quiz");
+  const set = async (card: string) => {
+    const c = await t.store.loadChat(chat);
+    c.fm.card = card;
+    await t.store.saveChat(chat, c);
+  };
+  // A right final answer, but the method the rubric asks for cannot be judged from a bare result.
+  await set("Q1");
+  t.replies.push(JSON.stringify({ grade: "good", feedback: "Correct.", reasoning: { result: "correct", method: "unclear", assumptions: "unclear", certainty: "incomplete" } }));
+  let r = await t.engine.quizTurn(t.dir, chat, "16/64 = 1/4");
+  let a = r.attempt!;
+  assert.deepEqual([a.result, a.reasoning?.result.by, a.mark?.proposed, a.mark?.conclusive], ["partial", "symbolic", "correct", false]);
+  assert.match(r.reply, /^\*\*Partly right\.\*\* Correct\. The final result is right, but the method the question asks for could not be judged/);
+  let st = await t.store.loadState(t.dir, 4);
+  assert.deepEqual(st.attempts.find((x) => x.id === a.id)?.mark, a.mark, "the basis is stored and read back");
+  let e = skillEvidence(st.attempts, 1);
+  assert.deepEqual([e.independent, e.inconclusive, e.recentFailures, e.partialAny, e.errors], [0, 1, 0, 1, {}], "it shows the result was right, and is neither a success nor a failure point");
+  assert.equal(st.misconceptionRecords?.filter((m) => !m.legacy).length ?? 0, 0);
+
+  // An answer the grader says it could not check moves nothing, whatever overall mark it proposed.
+  await set("Q3");
+  const before = await t.store.loadState(t.dir, 4);
+  t.replies.push(JSON.stringify({ grade: "again", feedback: "Too vague to judge.", reasoning: { result: "unclear", method: "unclear", certainty: "uncheckable" } }));
+  r = await t.engine.quizTurn(t.dir, chat, "kind of like speed, maybe");
+  a = r.attempt!;
+  assert.deepEqual([a.result, a.mark?.rules], ["ungraded", ["uncheckable"]]);
+  assert.match(r.reply, /^\*\*Left ungraded\.\*\* The grader could not judge this answer/);
+  st = await t.store.loadState(t.dir, 4);
+  assert.deepEqual([st.levels, st.bank, st.cards.Q3], [before.levels, before.bank, before.cards.Q3], "no level, counter or card schedule moved");
+  e = skillEvidence(st.attempts, 2);
+  assert.deepEqual([e.graded, e.errors], [skillEvidence(before.attempts, 2).graded, skillEvidence(before.attempts, 2).errors]);
+});
+
+test("grading: a tutor's mark is held to its breakdown, and SymPy checking the reply does not verify the mark", async () => {
+  const t = await setup({ maths: true });
+  const chat = await t.chatIn("tutor");
+  const c = await t.store.loadChat(chat);
+  c.messages.push({ role: "tutor", text: "What does the derivative measure?" });
+  c.fm.session = JSON.stringify({ version: 2, pendingQuestion: "What does the derivative measure?", questionId: "q-free", askedAt: new Date(Date.now() - 30000).toISOString(), action: "independent-practice", helpGiven: [] });
+  await t.store.saveChat(chat, c);
+  t.replies.push(`Hard to say from that.\n${tag({ result: "correct", task_type: "explanation", reasoning: { result: "unclear", method: "unclear", certainty: "uncheckable" } })}\n${session({ action: "probe" })}`);
+  const r = await t.engine.study(t.dir, chat, "it is the slope thing");
+  assert.deepEqual([r.attempt?.result, r.attempt?.verification, r.attempt?.mark?.rules], ["ungraded", "unverified", ["uncheckable"]]);
+  assert.match(r.attempt!.note, /could not judge this answer/);
+  const st = await t.store.loadState(t.dir, 4);
+  assert.equal(skillEvidence(st.attempts, 2).independent, 0);
 });
 
 test("reasoning: exact answers, multiple choice and legacy attempts keep working without a breakdown", async () => {

@@ -411,6 +411,10 @@ export interface LearnerState {
   taught: Record<number, string>;
   /** Stable concept id of each subskill, filled in by the store from the course graph. */
   concepts: Record<number, string>;
+  /** Per subskill, the objective versions it teaches now ("id@v"), from the course graph. Attempts are stamped with them. */
+  objectiveRefs?: Record<number, string[]>;
+  /** Per subskill, the latest material change to an objective it teaches. Earlier evidence then needs a focused recheck. */
+  revisions?: Record<number, { at: string; why: string }>;
   /** Cross-topic links as 0.5.0 stored them. The store moves them into the course graph on load. */
   links?: { skill: number; topic: string; prerequisite: number }[];
   topic: string;
@@ -481,8 +485,17 @@ export function setLevel(s: LearnerState, n: number, to: number | null, cause: s
 }
 
 /** The evidence for one subskill and the level it can hold. */
+/** What a subskill's evidence is measured against: its latest material objective change, if any. */
+export const revisionOf = (s: LearnerState, n: number): { at: string; why: string; refs?: string[] } | undefined => (s.revisions?.[n] ? { ...s.revisions[n], refs: s.objectiveRefs?.[n] } : undefined);
+
+/** The objective versions an attempt on this subskill assesses now, as a field to spread into it. Empty when the course has none recorded. */
+export const objectiveStamp = (s: LearnerState, n: number): { objectives?: string[] } => (s.objectiveRefs?.[n]?.length ? { objectives: [...s.objectiveRefs[n]] } : {});
+
+/** A subskill's evidence, measured against its latest material objective change. */
+export const evidenceOf = (s: LearnerState, n: number) => skillEvidence(s.attempts, n, revisionOf(s, n));
+
 export function mastery(s: LearnerState, n: number) {
-  const evidence = skillEvidence(s.attempts, n);
+  const evidence = evidenceOf(s, n);
   const supported = supportedLevel(evidence, n in s.taught);
   const level = s.levels[n] ?? null;
   return { level, evidence, supported, backed: level !== null && level <= supported };

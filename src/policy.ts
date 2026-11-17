@@ -128,6 +128,8 @@ export interface SkillInput {
   checkDue?: boolean;
   /** When that check falls due (yyyy-mm-dd), for the reason shown. */
   nextCheck?: string | null;
+  /** Set when the check is due because an objective changed materially since the last unaided success: what changed. */
+  recheck?: string;
   /**
    * A transfer question answered today could count: the first unaided success was on an earlier
    * day. False means a transfer today cannot satisfy the delayed requirement. Unset means true.
@@ -367,7 +369,9 @@ export function decide(p: PolicyInput): Decision {
   if (level === 2) return out("guided-practice", s.n, `${why}You can follow ${s.name}, so the next step is practice with help on hand.`);
   const backed = level <= s.supported;
   const bank = s.bankLeft > 0 ? "bank" : null;
-  const delayed = () => out("retrieval", s.n, `${why}A delayed check on ${s.name} is due${s.nextCheck ? ` (from ${s.nextCheck})` : ""}. One question without help shows whether it has held.`, "a delayed independent check is taken when it falls due", bank);
+  const delayed = () => s.recheck
+    ? out("retrieval", s.n, `${why}The course changed what ${s.name} asks for (${s.recheck}). One question without help checks that your understanding covers the new version; your earlier answers stay on record.`, "a material change to an objective is rechecked before the level is relied on", bank)
+    : out("retrieval", s.n, `${why}A delayed check on ${s.name} is due${s.nextCheck ? ` (from ${s.nextCheck})` : ""}. One question without help shows whether it has held.`, "a delayed independent check is taken when it falls due", bank);
   if (level >= p.target && backed) {
     if (s.checkDue) return delayed();
     return out("retrieval", s.n, `${why}${s.name} is at target. A recall question checks that it has held.`, "", bank);

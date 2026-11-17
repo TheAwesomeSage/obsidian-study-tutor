@@ -4,6 +4,8 @@
 // docs/policy.md describes the same rules in prose.
 
 import { ReasoningAssessment, normaliseReasoning } from "./reasoning";
+import { MarkBasis, conclusive, normaliseBasis } from "./grading";
+import { onCurrentVersion } from "./objective-version";
 
 export type Outcome = "correct" | "partial" | "incorrect" | "skipped" | "ungraded";
 
@@ -82,6 +84,17 @@ export interface Attempt {
    * exact answers, multiple choice and attempts from before 0.9 have none.
    */
   reasoning?: ReasoningAssessment;
+  /**
+   * How the proposed mark was normalised against the breakdown (grading.ts): the mark as
+   * proposed, the rules that changed it, and whether the attempt is conclusive evidence.
+   * Absent where no breakdown was given.
+   */
+  mark?: MarkBasis;
+  /**
+   * The objectives this attempt assessed, as "id@version", at the versions current when it was
+   * made. Attempts from before 0.10 have none and are dated by their timestamp instead.
+   */
+  objectives?: string[];
 }
 
 /** One change of level, with what caused it. Every change is logged so it can be explained later. */
@@ -112,6 +125,9 @@ export function questionKey(text: string): string {
 
 const day = (iso: string): string => iso.slice(0, 10);
 
+/** An objective at a version, as attempts record it: "O1a2b3c@2". */
+export const OBJECTIVE_REF = /^[A-Za-z0-9_.:\/-]{1,80}@\d{1,6}$/;
+
 /**
  * Reads a stored attempt of any version. Records from 0.5.0 had `source`, `assisted` and `error`
  * only; they are upgraded in memory and written back in the new shape on the next save.
@@ -132,6 +148,8 @@ export function normaliseAttempt(raw: unknown): Attempt | null {
   const verification: Verification = r.verification === "disputed" ? "disputed" : r.verification === "verified" || r.verification === "unverified" ? r.verification : grading === "model" || grading === "self" ? "unverified" : "verified";
   const assistance = Array.isArray(r.assistance) ? r.assistance.filter((x): x is string => typeof x === "string") : [];
   const confidence = typeof r.confidence === "number" && r.confidence >= 0 && r.confidence <= 1 ? r.confidence : null;
+  const reasoning = normaliseReasoning(r.reasoning);
+  const mark = normaliseBasis(r.mark);
   return {
     id: r.id,
     v: 2,
@@ -159,7 +177,9 @@ export function normaliseAttempt(raw: unknown): Attempt | null {
     assumptions: str("assumptions"),
     taskType: TASK_TYPES.includes(r.taskType as TaskType) ? (r.taskType as TaskType) : "",
     family: str("family").slice(0, 80),
-    ...(normaliseReasoning(r.reasoning) ? { reasoning: normaliseReasoning(r.reasoning) } : {}),
+    ...(reasoning ? { reasoning } : {}),
+    ...(mark ? { mark } : {}),
+    ...(Array.isArray(r.objectives) ? { objectives: r.objectives.filter((x): x is string => typeof x === "string" && OBJECTIVE_REF.test(x)).slice(0, 12) } : {}),
   };
 }
 
@@ -207,6 +227,8 @@ export interface SkillEvidence {
   selfCount: number;
   ungraded: number;
   disputed: number;
+  /** Marked attempts kept for the record that count neither for nor against (grading.ts). */
+  inconclusive: number;
   /** Timestamp of the last independent data point. Helped work never moves it. */
   lastIndependent: string | null;
   /** Timestamp of the last independent fully correct answer. */
@@ -225,6 +247,12 @@ export interface SkillEvidence {
   untyped: number;
   /** Question families with an independent success. */
   families: number;
+  /**
+   * An objective this concept teaches changed materially after the last independent success, and
+   * no independent answer has been given on the new version yet. History is kept; the delayed
+   * check falls due on the day of the change, so a focused recheck comes next.
+   */
+  recheck: { since: string; why: string } | null;
 }
 
 /**
@@ -260,9 +288,9 @@ export const PREDICTION_TARGET = "the next unassisted first answer on this conce
  * so asking it again that day shows memory of the feedback and nothing more. On a later day
  * the same question counts again, as delayed retrieval.
  */
-export function skillEvidence(attempts: Attempt[], skill: number): SkillEvidence {
+export function skillEvidence(attempts: Attempt[], skill: number, revision?: { at: string; why: string; refs?: string[] }): SkillEvidence {
   const mine = attempts.filter((a) => a.skill === skill).sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
-  const e: SkillEvidence = { graded: 0, correctAny: 0, partialAny: 0, independent: 0, independentCorrect: 0, independentDays: 0, delayedTransfer: false, recentFailures: 0, lapse: false, delayedLapse: false, estimate: null, brier: null, rated: 0, calibrationGap: null, last: null, lastResult: null, errors: {}, assistedCount: 0, exposedCount: 0, selfCount: 0, ungraded: 0, disputed: 0, lastIndependent: null, lastIndependentSuccess: null, firstIndependentDay: null, nextCheck: null, streakDays: 0, teachBack: false, edgeCase: false, untyped: 0, families: 0 };
+  const e: SkillEvidence = { graded: 0, correctAny: 0, partialAny: 0, independent: 0, independentCorrect: 0, independentDays: 0, delayedTransfer: false, recentFailures: 0, lapse: false, delayedLapse: false, estimate: null, brier: null, rated: 0, calibrationGap: null, last: null, lastResult: null, errors: {}, assistedCount: 0, exposedCount: 0, selfCount: 0, ungraded: 0, disputed: 0, inconclusive: 0, lastIndependent: null, lastIndependentSuccess: null, firstIndependentDay: null, nextCheck: null, streakDays: 0, teachBack: false, edgeCase: false, untyped: 0, families: 0, recheck: null };
   const exposedOn = new Map<string, string>();
   const correctQs = new Set<string>();
   const partialQs = new Set<string>();
@@ -271,7 +299,7 @@ export function skillEvidence(attempts: Attempt[], skill: number): SkillEvidence
   /** Families met in any graded attempt so far. A question from one of them is not a transfer. */
   const familiesSeen = new Set<string>();
   const familiesWon = new Set<string>();
-  const points: { ok: boolean; day: string; transfer: boolean; confidence: number | null; at: string }[] = [];
+  const points: { ok: boolean; day: string; transfer: boolean; confidence: number | null; at: string; current: boolean }[] = [];
   for (const a of mine) {
     const d = day(a.timestamp);
     if (a.verification === "disputed") {
@@ -291,12 +319,15 @@ export function skillEvidence(attempts: Attempt[], skill: number): SkillEvidence
     if (a.grading === "self") e.selfCount++;
     else if (a.result === "correct") correctQs.add(a.questionId);
     else if (a.result === "partial") partialQs.add(a.questionId);
-    if (a.result !== "correct") {
+    // A mark the breakdown could not back is history, not evidence: it adds no error and no data point.
+    const counts = conclusive(a);
+    if (!counts) e.inconclusive++;
+    if (a.result !== "correct" && counts) {
       const kind = a.errorType || (a.result === "skipped" ? "skipped" : "unclassified");
       e.errors[kind] = (e.errors[kind] ?? 0) + 1;
     }
     const seen = exposedOn.get(a.questionId);
-    const independent = a.grading !== "self" && !a.assisted && !a.answerExposed && (seen === undefined || d > seen);
+    const independent = counts && a.grading !== "self" && !a.assisted && !a.answerExposed && (seen === undefined || d > seen);
     const family = a.family ?? "";
     if (independent) {
       const ok = a.result === "correct";
@@ -305,7 +336,7 @@ export function skillEvidence(attempts: Attempt[], skill: number): SkillEvidence
       const familiar = !!family && familiesSeen.has(family);
       const freshFamily = !!family && !familiar && (a.taskType === "application" || a.taskType === "transfer" || a.taskType === "prediction" || a.taskType === "error-finding");
       const transfer = !familiar && (a.transfer || a.taskType === "transfer" || freshFamily);
-      points.push({ ok, day: d, transfer, confidence: a.confidence, at: a.timestamp });
+      points.push({ ok, day: d, transfer, confidence: a.confidence, at: a.timestamp, current: !revision || onCurrentVersion(a, revision) });
       if (ok) {
         indCorrectQs.add(a.questionId);
         indDays.add(d);
@@ -353,6 +384,12 @@ export function skillEvidence(attempts: Attempt[], skill: number): SkillEvidence
     e.streakDays = days.length;
     if (lastPoint && !lastPoint.ok) e.nextCheck = addDaysIso(lastPoint.day, CHECK_INTERVALS[0]);
     else e.nextCheck = addDaysIso(day(e.lastIndependentSuccess), CHECK_INTERVALS[Math.min(CHECK_INTERVALS.length - 1, Math.max(0, days.length - 1))]);
+    // A material change to an objective since then: the evidence is about the old version until
+    // one unaided answer on the new one. Nothing is reset; the check simply falls due now.
+    if (revision && !points.some((p) => p.current)) {
+      e.recheck = { since: revision.at, why: revision.why };
+      if (e.nextCheck > day(revision.at)) e.nextCheck = day(revision.at);
+    }
   }
   return e;
 }

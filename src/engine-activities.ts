@@ -3,8 +3,8 @@
 // engine has a method of the same name that calls it. No Obsidian imports.
 
 import { zeroUsage } from "./claude";
-import { Attempt, Outcome, recordAttempt, skillEvidence } from "./evidence";
-import { Chat, LearnerState, Mode, Topic, contentHash, fmStr, words } from "./formats";
+import { Attempt, Outcome, recordAttempt } from "./evidence";
+import { Chat, LearnerState, Mode, Topic, evidenceOf, objectiveStamp, contentHash, fmStr, words } from "./formats";
 import { Decision } from "./policy";
 import { ActivityRecord, CONFIG_PROMPT_VERSION, LESSON_SCHEMA_VERSION, configureActivity, toResult } from "./configure";
 import { DEFAULT_LOCAL_MODEL, LocalModel } from "./ollama";
@@ -68,7 +68,7 @@ export async function presentationFor(eng: Engine, p: { dir: string; topic: Topi
   // model are all unchanged. Anything else is a miss, and the old record stays on disk.
   const same = (a: SourceRef[]) => a.length === refs.length && a.every((x) => refs.some((y) => y.path === x.path && y.contentHash === x.contentHash));
   const saved = (await eng.store.loadActivities(p.dir)).filter((a) => a.conceptId === conceptId && a.schemaVersion === LESSON_SCHEMA_VERSION && a.promptVersion === CONFIG_PROMPT_VERSION && a.model === modelName && a.catalogVersion === catalog && same(a.sourceRefs) && (!a.moduleId || descriptors.some((d) => d.id === a.moduleId && d.version === a.moduleVersion)));
-  const e = skillEvidence(p.state.attempts, n);
+  const e = evidenceOf(p.state, n);
   const lastWrong = [...p.state.attempts].reverse().find((a) => a.skill === n && a.result !== "correct" && a.result !== "ungraded");
   // Modules are shortlisted against the card and the source passages the activity would rest on.
   const context = [sk.section, ...refs.map((r) => r.excerpt)].join("\n");
@@ -279,6 +279,7 @@ export async function recordActivityResult(eng: Engine, dir: string, activityId:
       assumptions: `assessed by ${rec.moduleId}'s own code; interactive work counts as helped, never as unaided evidence`,
       taskType: "interactive",
       family: `activity-${rec.moduleId}`,
+      ...objectiveStamp(state, n),
     };
     state.attempts = recordAttempt(state.attempts, attempt);
     changes = applyAttempt(state, attempt);

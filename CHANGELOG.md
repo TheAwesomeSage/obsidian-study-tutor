@@ -2,6 +2,18 @@
 
 What changed in each version of Study Tutor, newest first.
 
+## Unreleased
+
+- **A mark can no longer say more than the judgement behind it.** Every grading path (the question bank's grading call, the tutor's mark in conversation, a regrade after a dispute) now goes through one set of rules in `src/grading.ts`:
+  - An answer the grader says it could not check is left ungraded, whatever overall mark came with it.
+  - A right final answer, even one SymPy checked, is no longer counted fully correct when the rubric asks for a method or assumptions nobody could judge. It is recorded as partly right and kept out of the evidence either way.
+  - A flawed method or a wrong assumption still earns justified partial credit.
+  - A lower mark that the breakdown gives no reason for is not counted against you.
+  - The feedback panel shows the mark as proposed, the mark as recorded, and why.
+- A tutor's mark is no longer labelled "confirmed" when SymPy only recomputed the results in the tutor's own reply. That check is still shown, but it does not verify how your answer was marked.
+- **Objective versions.** Each compile records a version for every objective. The version goes up only when what the objective asks for changes materially, for example a corrected number, an added condition or a new requirement. Tidying a note (spacing, formatting, a typo) leaves versions and mastery alone. After a material change, your earlier answers stay on record and count as before, but the concept gets one focused recheck. The study plan says what changed, and so does the graph view's Current capability panel. Every new attempt records the objective versions it assessed. The first compile after updating sets the baseline and flags nothing.
+- **Compilation checkpoints.** Lesson synthesis and the coverage audit are saved per lesson group once they pass validation. A repeated compile, or a rerun after you cancel, reuses the finished groups instead of asking the model again. A different model, prompt, schema or source passage invalidates the saved group. The cancel notice says how many groups were saved. A lesson that builds on an unverified prerequisite is now reported as a gap, so partial coverage stays explicit.
+
 ## Version 0.9.1
 
 - Choose Claude Code or Codex CLI (ChatGPT) in Study Tutor settings. The selected provider handles tutoring, compilation and grading. Settings remember the path and models for each CLI.

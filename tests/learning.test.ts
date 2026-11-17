@@ -6,7 +6,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as F from "../src/formats";
-import { Attempt, missingFor, normaliseAttempt, recordAttempt, skillEvidence, supportedLevel } from "../src/evidence";
+import { Attempt, checkDue, missingFor, normaliseAttempt, recordAttempt, skillEvidence, supportedLevel } from "../src/evidence";
+import { classifyChange, conceptRevisions, materialText, traceAttempt, versionObjectives } from "../src/objective-version";
+import { digest } from "../src/compile-sources";
 import { effectivePrereqs, parseTopicGraph, syncTopicGraph, wouldCycle } from "../src/course";
 import { DEFAULT_WEIGHTS, LEARN_ACTIONS, PolicyInput, SkillInput, V1_WEIGHTS, decide, replay, scoreSkills } from "../src/policy";
 import { openQuestion, readIntent, readSessionReply, sessionFor } from "../src/session";
@@ -513,7 +515,7 @@ test("confidence, time, error type and how the mark was verified are recorded", 
   const a = r.attempt!;
   assert.deepEqual([a.result, a.errorType, a.note, a.confidence, a.difficulty, a.questionId], ["incorrect", "procedural", "dropped the second product-rule term", 0.9, 3, "q7"]);
   assert.ok(a.seconds !== null && a.seconds >= 89 && a.seconds <= 95, `time to answer was recorded (${a.seconds}s)`);
-  assert.deepEqual([a.grading, a.verification], ["model", "verified"], "the model marked it and SymPy confirmed the result the reply states");
+  assert.deepEqual([a.grading, a.verification], ["model", "unverified"], "the model marked it; SymPy confirmed the results the reply states, which does not verify the mark");
   assert.match(a.assumptions, /SymPy recomputed/);
   assert.equal(a.concept, "calculus/derivatives");
   assert.ok(r.tools!.some((x) => x.tool === "maths.check" && x.ok && x.kind === "step-validation"));
@@ -1015,3 +1017,110 @@ test("synoptic proposals validate target IDs, stay unreviewed and leave mastery 
   });
   await assert.rejects(t.engine.suggestSynoptic(a.id), /No valid/);
 });
+
+// ---------- objective versions: editorial edits keep mastery, material changes ask for a recheck ----------
+
+test("objective versions: editorial edits are told apart from material changes, conservatively", () => {
+  const cls = (a: string, b: string) => classifyChange(materialText([a]), materialText([b])).change;
+  // Editorial: formatting, case, spacing, punctuation, links, a typo, a filler word.
+  assert.equal(cls("The chain rule differentiates compositions.", "The **chain rule**  differentiates\ncompositions"), "same");
+  assert.equal(cls("See [[Calc notes|notes]] for $x^n$.", "See Calc notes for x^n"), "same");
+  assert.equal(cls("Differentiate a composition of functions", "Diferentiate a composition of functions"), "editorial");
+  assert.equal(cls("Find the derivative of a product", "Find derivative of a product"), "editorial");
+  // Material: numbers, negation, connectives, conditions, a different word, a different order.
+  const material: [string, string][] = [
+    ["valid for n > 1", "valid for n > 2"],
+    ["the series converges", "the series does not converge"],
+    ["compute the derivative", "compute and interpret the derivative"],
+    ["valid for continuous f", "valid for differentiable f"],
+    ["a stack is last in first out", "a queue is last in first out"],
+    ["a implies b", "b implies a"],
+    ["state the rule", "state the rule unless f is constant"],
+  ];
+  for (const [a, b] of material) assert.equal(cls(a, b), "material", `${a} → ${b}`);
+  assert.match(classifyChange(materialText(["valid for n > 1"]), materialText(["valid for n > 2"])).why, /"1" became "2"/);
+});
+
+test("objective versions: ids that move keep their version; new, changed or uncomparable objectives are dated", () => {
+  const cur = (id: string, text: string, subskills = [1]) => {
+    const material = materialText([text]);
+    return { id, subskills, sources: ["p1"], material, fingerprint: digest(material) };
+  };
+  const first = versionObjectives({ previous: null, current: [cur("O1a", "Derive the power rule"), cur("O1b", "Apply the chain rule", [2])], at: "2026-11-01T00:00:00.000Z", previousText: () => null });
+  assert.deepEqual(first.map((v) => [v.id, v.v, v.materialAt]), [["O1a", 1, undefined], ["O1b", 1, undefined]], "a first compile sets the baseline and dates nothing");
+  const texts = new Map([[first[0].fingerprint, materialText(["Derive the power rule"])], [first[1].fingerprint, materialText(["Apply the chain rule"])]]);
+  const next = versionObjectives({
+    previous: first,
+    // O1a's passage moved, so its id changed; its text gained a typo fix. O1b gained a condition. O1c is new.
+    current: [cur("O1z", "Derive the powr rule"), cur("O1b", "Apply the chain rule to differentiable functions", [2]), cur("O1c", "Use implicit differentiation", [3])],
+    at: "2026-11-05T00:00:00.000Z",
+    previousText: (fp) => texts.get(fp) ?? null,
+  });
+  assert.deepEqual(next.map((v) => [v.id, v.v, v.materialAt ?? null, v.aliases ?? []]), [
+    ["O1z", 1, null, ["O1a"]],
+    ["O1b", 2, "2026-11-05T00:00:00.000Z", []],
+    ["O1c", 1, "2026-11-05T00:00:00.000Z", []],
+  ]);
+  assert.match(next[1].why!, /added "to differentiable functions"/);
+  // Without the earlier text there is nothing to compare: the change counts as material.
+  const blind = versionObjectives({ previous: first, current: [cur("O1a", "Derive the power rule for integers")], at: "2026-11-06T00:00:00.000Z", previousText: () => null });
+  assert.deepEqual([blind[0].v, blind[0].why], [2, "the earlier text is not available to compare"]);
+  assert.deepEqual(conceptRevisions(next)[2], { refs: ["O1b@2"], at: "2026-11-05T00:00:00.000Z", why: 'O1b changed: added "to differentiable functions"' });
+});
+
+test("objective versions: a material change asks for one focused recheck; an editorial edit keeps everything", async () => {
+  const t = await setup();
+  const today = new Date().toISOString().slice(0, 10);
+  t.setDay(today);
+  const req = (text: string) => ({ mode: "notes" as const, material: [{ name: "Calc notes", text }], research: false });
+  let pkg = await t.engine.writePackage(t.dir, req("The derivitive of x^n is n x^(n-1) for every real n."), null);
+  assert.deepEqual(pkg.versions!.map((v) => [v.id, v.v, v.materialAt ?? null]), [["S1", 1, null], ["S2", 1, null], ["S3", 1, null]]);
+  let st = await t.store.loadState(t.dir, 4);
+  assert.deepEqual([st.objectiveRefs, st.revisions], [{ 1: ["S1@1"], 2: ["S2@1"], 3: ["S3@1"] }, {}]);
+  // Unaided successes on subskill 2 recorded against version 1, on two days, one a transfer.
+  st.attempts.push(
+    attempt({ id: "v1", skill: 2, concept: st.concepts[2], questionId: "Q2", objectives: ["S2@1"], timestamp: "2026-11-10T10:00:00.000Z" }),
+    attempt({ id: "v2", skill: 2, concept: st.concepts[2], questionId: "Q3", objectives: ["S2@1"], timestamp: "2026-11-11T10:00:00.000Z", transfer: true, taskType: "transfer" }),
+  );
+  st.levels[1] = 4; // the prerequisite is in place, so the check on subskill 2 is what remains
+  st.levels[2] = 4;
+  await t.store.saveState(t.dir, st);
+  const before = F.mastery(await t.store.loadState(t.dir, 4), 2);
+
+  // Editorial: a typo fixed, emphasis, maths delimiters and a line break.
+  pkg = await t.engine.writePackage(t.dir, req("The **derivative** of $x^n$ is n x^(n-1)\nfor every real n"), pkg);
+  assert.deepEqual(pkg.versions!.map((v) => [v.v, v.materialAt ?? null]), [[1, null], [1, null], [1, null]]);
+  st = await t.store.loadState(t.dir, 4);
+  let m = F.mastery(st, 2);
+  assert.deepEqual([m.level, m.supported, m.evidence.recheck, m.evidence.nextCheck], [4, before.supported, null, before.evidence.nextCheck], "nothing about the evidence moved");
+
+  // Material: the source is corrected with an exception.
+  pkg = await t.engine.writePackage(t.dir, req("The derivative of x^n is n x^(n-1) for every real n except n = 0."), pkg);
+  assert.deepEqual(pkg.versions!.map((v) => v.v), [2, 2, 2]);
+  st = await t.store.loadState(t.dir, 4);
+  assert.deepEqual(st.objectiveRefs?.[2], ["S2@2"]);
+  assert.match(st.revisions?.[2]?.why ?? "", /^S2 changed: .*"except n = 0"/);
+  m = F.mastery(st, 2);
+  assert.equal(m.level, 4, "the level is not reset");
+  assert.equal(m.supported, before.supported, "earlier evidence still counts");
+  assert.equal(m.evidence.recheck?.why, st.revisions?.[2]?.why);
+  assert.ok(checkDue(m.evidence, today), "the recheck is due now");
+  // The policy asks for it, and says why.
+  const input = (t.engine as any).policyInput({ mode: "auto", state: st, pre: await t.store.prereqs(t.dir, await t.store.loadTopic(t.dir)), chat: await t.store.loadChat(await t.chatIn("auto")), session: sessionFor(await t.store.loadChat(await t.chatIn("auto")), st, "auto"), intent: "none", questions: await t.store.loadQuestions(t.dir), external: [] });
+  const sk = input.skills.find((k: SkillInput) => k.n === 2);
+  assert.deepEqual([sk.checkDue, typeof sk.recheck], [true, "string"]);
+  const d = decide({ ...input, focus: 2 });
+  assert.equal(d.action, "retrieval");
+  assert.match(d.reason, /The course changed what Derivatives asks for/);
+  // Source → objective → question → attempt.
+  assert.deepEqual(traceAttempt(pkg, st.attempts.find((a) => a.id === "v1")!), [{ id: "S2", assessed: 1, current: 2, sources: ["[[Calc notes]]"], questions: pkg.objectives.find((o) => o.id === "S2")!.questions }]);
+
+  // One unaided answer on the new version settles it, whatever else is on record.
+  st.attempts.push(attempt({ id: "v3", skill: 2, concept: st.concepts[2], questionId: "Q2", ...F.objectiveStamp(st, 2), timestamp: new Date().toISOString() }));
+  assert.equal(F.mastery(st, 2).evidence.recheck, null);
+  // Attempts from before versions were recorded are dated instead: one before the change does not count as current.
+  const legacy = skillEvidence([attempt({ id: "old", skill: 2, timestamp: "2026-11-10T10:00:00.000Z" })], 2, { at: "2026-11-12T00:00:00.000Z", why: "S2 changed" });
+  assert.equal(legacy.recheck?.since, "2026-11-12T00:00:00.000Z");
+  assert.equal(legacy.nextCheck, "2026-11-11", "the earlier of the normal check and the change day");
+});
+

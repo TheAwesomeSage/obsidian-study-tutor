@@ -32,6 +32,14 @@ export interface CompileMetrics {
   localMs: number;
   elapsedMs: number;
   escalated: string;
+  // Saved in package.md, so packages compiled before these were added lack them.
+  /** Lesson-synthesis and coverage-audit replies reused from saved checkpoints. */
+  stageCacheHits?: number;
+  /** Model replies, from any stage, that did not decode to schema-valid JSON. */
+  rejected?: number;
+  /** Lesson groups (objective cohorts) compiled, and how many needed no model call. */
+  groups?: number;
+  groupsReused?: number;
 }
 export interface StagedCourse {
   status: "complete" | "partial";
@@ -64,6 +72,11 @@ type DraftUnit = {
 type Synthesis = { overview: string; subject: string; units: DraftUnit[] };
 const VERSION = "2026-11-staged-2";
 const LOCAL_VERSION = "passage-selector-1";
+// Checkpoint versions of the lesson stages. Bump one whenever that stage's prompt, schema or the
+// validation and use of its reply changes. The keys also digest the prompt and schema, so a missed
+// bump there still invalidates old entries; a change in validation is caught only by the bump.
+const SYNTHESIS_VERSION = "synthesis-1";
+const AUDIT_VERSION = "audit-1";
 const MAX_LOCAL = 8;
 const BATCH_CHARS = 16_000;
 const OBJECTIVES_PER_SYNTHESIS = 6;
@@ -81,9 +94,18 @@ const SYNTHESIS = obj({ overview: str, subject: str, units: arr(obj({
   visualKind: str, visualReason: str,
 }), 6) });
 const AUDIT = obj({ rows: arr(obj({ objective: str, sources: arr(str, 8), teaching: bool, questions: arr(str, 24), gap: str }), 12) });
+const AUDIT_PROMPT = `Audit every supplied objective by its exact ID. Sources must support its explanation; a title, mere mention or syllabus clause is not supporting evidence. An uncertain selector flag means inspect the original text yourself. Mark teaching true if a supplied lesson genuinely teaches the objective with a usable worked example or application and any needed assumptions. List the IDs of questions aligned to that objective and answerable from that lesson. If all three are sufficient leave gap empty. ${REFERENCE_RULE}`;
 
 export class CompileCancelled extends Error {
-  constructor() { super("Compilation cancelled. Completed source work was kept."); }
+  /** Lesson groups finished and saved before the cancellation, once compilation reached them. */
+  readonly done?: number;
+  readonly total?: number;
+  constructor(groups?: { done: number; total: number }) {
+    const kept = groups?.done ? ` ${groups.done} of ${groups.total} lesson groups finished; ${groups.done === 1 ? "it was" : "they were"} saved and will be reused by a rerun on the same sources.` : "";
+    super(`Compilation cancelled. Completed source work was kept.${kept}`);
+    this.done = groups?.done;
+    this.total = groups?.total;
+  }
 }
 export function checkCompilation(signal?: AbortSignal): void {
   if (signal?.aborted) throw new CompileCancelled();
@@ -120,18 +142,23 @@ export async function compileCourse(p: {
   title: string; goal: string; mode: SourceMode; material: SourceInput[]; research?: boolean;
   truncated?: boolean; expansion?: ExpansionRequest; savedSources?: SourceRevision[];
   subjects: string[]; skill: string; model: string; singlePassWords: number;
-  planModelKey?: string;
+  /** Identity of the answering model in checkpoint keys, naming the provider and any CLI default. Defaults to `model`. */
+  modelKey?: string;
   signal?: AbortSignal; progress?: (s: string) => void; cache: CompilerCache;
   limits?: Partial<ResearchLimits>; provider?: ResearchProvider | null; local?: LocalModel | null;
   call: (o: ModelCall) => Promise<CallResult>;
 }) {
   const start = Date.now(), signal = p.signal;
-  const stop = () => checkCompilation(signal);
+  const modelKey = p.modelKey ?? p.model;
+  const lessonGroups = { done: 0, total: 0 };
+  const stop = () => { if (signal?.aborted) throw new CompileCancelled(lessonGroups.total ? { ...lessonGroups } : undefined); };
   const notify = p.progress ?? (() => {});
   let usage = zeroUsage();
   let calls = 0;
   const issues: string[] = [];
-  const metrics: CompileMetrics = { searches: 0, pages: 0, fetchAttempts: 0, cacheHits: 0, localCalls: 0, localMs: 0, elapsedMs: 0, escalated: "" };
+  const metrics: CompileMetrics & Required<Pick<CompileMetrics, "stageCacheHits" | "rejected" | "groups" | "groupsReused">> = {
+    searches: 0, pages: 0, fetchAttempts: 0, cacheHits: 0, localCalls: 0, localMs: 0, elapsedMs: 0, escalated: "", stageCacheHits: 0, rejected: 0, groups: 0, groupsReused: 0,
+  };
   const get = async <T>(key: string) => { try { return await p.cache.read<T>(key); } catch { return null; } };
   const save = async <T>(key: string, value: T) => {
     try { await p.cache.write(key, value); return true; }
@@ -153,10 +180,25 @@ export async function compileCourse(p: {
       throw err;
     } finally { signal?.removeEventListener("abort", abort); }
   };
+  const askJson = async <T>(system: string, input: unknown, schema: Schema) => {
+    const value = decode<T>(await ask(system, input, schema), schema);
+    if (!value) metrics.rejected++;
+    return value;
+  };
   const tryAsk = async <T>(system: string, input: unknown, schema: Schema, failure: string) => {
-    try { return decode<T>(await ask(system, input, schema), schema); }
+    try { return await askJson<T>(system, input, schema); }
     catch { stop(); issues.push(failure); return null; }
   };
+  /** A saved stage reply that still passes its schema; a missing, invalid or tampered entry gives null. */
+  const reuse = async <T>(key: string, schema: Schema) => {
+    const saved = await get<unknown>(key);
+    if (validateJson(saved, schema).length) return null; // A missing entry (null) fails the object schema too.
+    metrics.stageCacheHits++;
+    return saved as T;
+  };
+  // The digest covers everything that shapes the reply: stage version, model, the exact prompt and schema, and the exact input.
+  const stageKey = (stage: "synth" | "audit", version: string, system: string, schema: Schema, input: unknown) =>
+    `${stage}-${digest(JSON.stringify([version, modelKey, digest(system), digest(JSON.stringify(schema)), input]))}`;
   stop();
   if (p.truncated) issues.push("Some input notes were outside the selection limit.");
   const sourceKeys = new Set<string>();
@@ -185,11 +227,12 @@ export async function compileCourse(p: {
   for (const [i, batch] of batches.entries()) {
     notify(`Reading scope and objectives (${i + 1}/${batches.length})…`);
     const input = { ...target, passages: batch, materialInFull: short && i === 0 ? full : undefined, research: !!p.research };
-    const key = `plan-${digest(JSON.stringify([VERSION, p.planModelKey ?? p.model, input]))}`;
+    const key = `plan-${digest(JSON.stringify([VERSION, modelKey, input]))}`;
     const cached = await get<unknown>(key);
-    const plan = cached && !validateJson(cached, PLAN).length ? cached as { objectives: Omit<CompileObjective, "id">[] } : decode<{ objectives: Omit<CompileObjective, "id">[] }>(
-      await ask(`Inventory the learning objectives before any lesson is written. Respect the stated scope and objective count. Map each testable clause to original passage IDs; use several objectives when a clause asks for distinct abilities. Treat steps of one worked example as one objective. Titles and explanatory context without learning requirements can be left unmapped. For research, propose a concise topical web query per objective, with no personal details, paths, or verbatim private note excerpts. For expansion choose at most four objectives within the gap. ${REFERENCE_RULE}`, input, PLAN), PLAN);
-    if (plan && !cached) await save(key, plan);
+    const reused = !!cached && !validateJson(cached, PLAN).length;
+    const plan = reused ? cached as { objectives: Omit<CompileObjective, "id">[] } : await askJson<{ objectives: Omit<CompileObjective, "id">[] }>(
+      `Inventory the learning objectives before any lesson is written. Respect the stated scope and objective count. Map each testable clause to original passage IDs; use several objectives when a clause asks for distinct abilities. Treat steps of one worked example as one objective. Titles and explanatory context without learning requirements can be left unmapped. For research, propose a concise topical web query per objective, with no personal details, paths, or verbatim private note excerpts. For expansion choose at most four objectives within the gap. ${REFERENCE_RULE}`, input, PLAN);
+    if (plan && !reused) await save(key, plan);
     if (!plan) issues.push(`Objective inventory batch ${i + 1} could not be read.`);
     const allowed = new Set(batch.map(k => k.id));
     const mappedHere = new Set<string>();
@@ -243,9 +286,9 @@ export async function compileCourse(p: {
             const reply = await p.local.chatJson({ system: `Select passages that help teach the objectives. Return only IDs and uncertainty. ${REFERENCE_RULE}`, user: JSON.stringify({ objectives: batch.map(o => ({ id: o.id, text: inline(o.text, 220) })), passages: candidates.map(c => excerpt(c, 360)) }), schema, maxTokens: 260, temperature: 0, timeoutMs, signal });
             stop();
             if (reply.doneReason === "length") throw new Error("Local evidence reply reached the output limit.");
-            result = JSON.parse(reply.text);
+            try { result = JSON.parse(reply.text); } catch { result = null; }
           } finally { metrics.localMs += Date.now() - before; }
-          if (!result || validateJson(result, schema).length) throw new Error("Invalid local passage or objective ID.");
+          if (!result || validateJson(result, schema).length) { metrics.rejected++; throw new Error("Invalid local passage or objective ID."); }
           await save(key, result);
         }
         for (const x of result.matches) add(x.objective, candidates.find(c => c.id === x.passage)!, x.uncertain);
@@ -377,15 +420,27 @@ export async function compileCourse(p: {
   let subject = "none", overview = "";
   const teachable = inventory.filter(o => !o.unmapped);
   const cohorts = groups(teachable, OBJECTIVES_PER_SYNTHESIS);
+  const prerequisites = new Map<number, number[]>();
+  const synthPrompt = `Write structured teaching units, one per supplied objective that you can teach. Use the exact supplied objective ID in each unit. Keep claims and the compact worked example concise; use details for the full lesson, including definitions, assumptions, and a worked example with reasoning. Reference only verified passage IDs from that objective's packet. If a source is insufficient, leave it uncited. Write 2–3 aligned questions with an answer and explanation; use a rubric for open questions, an empty options array for other than multiple choice, and one fresh application when useful. Task is a short label such as "application" or "transfer"; difficulty is 1–5. Choose visualKind only if an existing diagram, simulation or game helps; otherwise use the empty string. List prerequisites by objective ID from this group or earlier topics only when required. Omit outside material. ${REFERENCE_RULE}\n\nUse pedagogical guidance from the saved compilation skill where compatible. Its legacy output formatting does not apply:\n${p.skill.split(/^FORMAT[ \t]*$/m)[0].slice(0, 1800)}`;
+  metrics.groups = lessonGroups.total = cohorts.length;
+  // Each group's validated synthesis and audit are checkpoints: a repeated or cancelled compile reuses finished groups.
   for (const [i, cohort] of cohorts.entries()) {
-    notify(`Building lessons and assessing coverage (${i + 1}/${cohorts.length})…`);
+    stop();
+    const label = `${i + 1}/${cohorts.length}`;
     const packet = cohort.map(o => ({ objective: o.id, passages: [...(matches.get(o.id)?.values() ?? [])].sort((a, b) => Number(!!b.passage.url) - Number(!!a.passage.url)).slice(0, 6).map(x => ({ ...excerpt(x.passage, 1150), uncertain: x.uncertain })) }));
     const packetIds = new Set(packet.flatMap(x => x.passages.map(k => k.id)));
     const scopes = new Set(cohort.map(o => o.id));
     const inspectedHere = [...inspected.values()].filter(r => packetIds.has(r.passage)).slice(-3).flatMap(inspect);
-    const proposed = await tryAsk<Synthesis>(
-      `Write structured teaching units, one per supplied objective that you can teach. Use the exact supplied objective ID in each unit. Keep claims and the compact worked example concise; use details for the full lesson, including definitions, assumptions, and a worked example with reasoning. Reference only verified passage IDs from that objective's packet. If a source is insufficient, leave it uncited. Write 2–3 aligned questions with an answer and explanation; use a rubric for open questions, an empty options array for other than multiple choice, and one fresh application when useful. Task is a short label such as "application" or "transfer"; difficulty is 1–5. Choose visualKind only if an existing diagram, simulation or game helps; otherwise use the empty string. List prerequisites by objective ID from this group or earlier topics only when required. Omit outside material. ${REFERENCE_RULE}\n\nUse pedagogical guidance from the saved compilation skill where compatible. Its legacy output formatting does not apply:\n${p.skill.split(/^FORMAT[ \t]*$/m)[0].slice(0, 1800)}`,
-      { ...target, subjects: p.subjects, objectives: cohort, earlier: teachable.slice(Math.max(0, (i - 2) * OBJECTIVES_PER_SYNTHESIS), i * OBJECTIVES_PER_SYNTHESIS).map(o => ({ id: o.id, text: o.text })), packet, inspected: inspectedHere }, SYNTHESIS, `Lesson synthesis for group ${i + 1} did not finish.`);
+    const synthInput = { ...target, subjects: p.subjects, objectives: cohort, earlier: teachable.slice(Math.max(0, (i - 2) * OBJECTIVES_PER_SYNTHESIS), i * OBJECTIVES_PER_SYNTHESIS).map(o => ({ id: o.id, text: o.text })), packet, inspected: inspectedHere };
+    const synthKey = stageKey("synth", SYNTHESIS_VERSION, synthPrompt, SYNTHESIS, synthInput);
+    let proposed = await reuse<Synthesis>(synthKey, SYNTHESIS);
+    const synthReused = !!proposed;
+    let saved = synthReused;
+    if (!proposed) {
+      notify(`Building lessons and assessing coverage (${label})…`);
+      proposed = await tryAsk<Synthesis>(synthPrompt, synthInput, SYNTHESIS, `Lesson synthesis for group ${i + 1} did not finish.`);
+      if (proposed) saved = await save(synthKey, proposed);
+    }
     if (!proposed) { issues.push(`Teaching output for group ${i + 1} could not be read.`); continue; }
     if (subject === "none" && p.subjects.includes(proposed.subject.trim())) subject = proposed.subject.trim();
     overview ||= inline(proposed.overview, 600);
@@ -402,6 +457,7 @@ export async function compileCourse(p: {
         const k = skillNumbers.get(id);
         return k && k < n ? [k] : [];
       }));
+      prerequisites.set(n, prereqs);
       const own = packet.find(x => x.objective === u.objective)?.passages ?? [];
       const cited = own.filter(x => u.passages.includes(x.id));
       const citations = unique(cited.map(x => x.url ? `[${x.title.replace(/[\[\]]/g, "")}](${x.url})` : `[[${(x.path?.replace(/\.md$/, "") || x.title).replace(/[\[\]|]/g, "")}]]`));
@@ -426,9 +482,19 @@ export async function compileCourse(p: {
       groupLessons.push({ objective: u.objective, subskill: n, text: u.details.trim().slice(0, 7200), passages: unique(cited.map(x => x.id)), questions: ids });
     }
     lessons.push(...groupLessons);
-    const audit = await tryAsk<{ rows: AuditRow[] }>(
-      `Audit every supplied objective by its exact ID. Sources must support its explanation; a title, mere mention or syllabus clause is not supporting evidence. An uncertain selector flag means inspect the original text yourself. Mark teaching true if a supplied lesson genuinely teaches the objective with a usable worked example or application and any needed assumptions. List the IDs of questions aligned to that objective and answerable from that lesson. If all three are sufficient leave gap empty. ${REFERENCE_RULE}`,
-      { objectives: cohort, packet, inspected: inspectedHere, lessons: groupLessons, questions: validQuestions }, AUDIT, `Coverage audit for group ${i + 1} did not finish.`);
+    // Lessons and questions derive deterministically from the synthesis, so a reused synthesis gives a stable audit key.
+    const auditInput = { objectives: cohort, packet, inspected: inspectedHere, lessons: groupLessons, questions: validQuestions };
+    const auditKey = stageKey("audit", AUDIT_VERSION, AUDIT_PROMPT, AUDIT, auditInput);
+    let audit = await reuse<{ rows: AuditRow[] }>(auditKey, AUDIT);
+    if (audit && synthReused) {
+      metrics.groupsReused++;
+      notify(`Lesson group ${label} reused from a saved checkpoint.`);
+    } else if (!audit) {
+      if (synthReused) notify(`Lesson group ${label}: lessons reused from a saved checkpoint; assessing coverage…`);
+      audit = await tryAsk<{ rows: AuditRow[] }>(AUDIT_PROMPT, auditInput, AUDIT, `Coverage audit for group ${i + 1} did not finish.`);
+      if (audit) saved = await save(auditKey, audit) && saved;
+    }
+    if (audit && saved) lessonGroups.done++;
     if (!audit) issues.push(`Coverage audit for group ${i + 1} could not be read.`);
     for (const o of cohort) {
       const r = audit?.rows.find(x => x.objective === o.id);
@@ -443,6 +509,17 @@ export async function compileCourse(p: {
   }
   for (const o of inventory.filter(o => !availability.some(a => a.objective === o.id))) {
     availability.push({ objective: o.id, sources: [], lessons: [], questions: [], gaps: [o.unmapped ? "Specification text was not mapped to a learning objective." : "Teaching or audit output was unavailable."] });
+  }
+  // A lesson built on an unverified prerequisite is not verified either. Lessons are in subskill order and
+  // prerequisites are earlier subskills, so one pass carries a gap down a chain.
+  const byObjective = new Map(availability.map(a => [a.objective, a]));
+  const objectiveOf = new Map(lessons.map(l => [l.subskill, l.objective]));
+  for (const l of lessons) {
+    const own = byObjective.get(l.objective);
+    for (const k of prerequisites.get(l.subskill) ?? []) {
+      const id = objectiveOf.get(k), gap = `prerequisite ${id} is not verified`;
+      if (own && id && byObjective.get(id)?.gaps.length && !own.gaps.includes(gap)) own.gaps.push(gap);
+    }
   }
   stop();
   const status = !inventory.length || p.truncated || availability.some(a => a.gaps.length) ? "partial" : "complete";

@@ -5,9 +5,11 @@
 import { ClaudeError, zeroUsage } from "./claude";
 import { modelFor, providerFor } from "./model-provider";
 import { Frontmatter, contentHash, fmList, fmStr, parseCompileOutput, parseQuestions, parseTopic, splitFrontmatter } from "./formats";
-import { CoursePackage, buildPackage, coverageLine, mergeRefresh, sourceChanges, subskillSections, withStagedCoverage } from "./coursepkg";
+import { CoursePackage, linkName, buildPackage, coverageLine, mergeRefresh, sourceChanges, subskillSections, withStagedCoverage } from "./coursepkg";
 import { checkCompilation, compileCourse, CompileCancelled, type ExpansionRequest as CompileExpansionRequest, type StagedCourse } from "./compiler";
 import { buildRefreshInput } from "./prompts";
+import { digest, type SourceRevision } from "./compile-sources";
+import { MAX_MATERIAL, conceptRevisions, materialText, versionObjectives, type CurrentObjective } from "./objective-version";
 import { Material, CompileRequest, CompileResult } from "./engine-common";
 import type { Engine } from "./engine";
 
@@ -18,7 +20,9 @@ export async function compile(eng: Engine, req: CompileRequest, onProgress: (msg
   checkCompilation(req.signal);
   const subjects = await eng.store.subjectNames();
   const candidate = await compileCourse({
-    ...req, model, planModelKey: providerFor(s) === "codex" ? `codex:${model || "default"}` : undefined,
+    // Checkpoint identity of the answering model. Claude keeps the bare model name that earlier plan
+    // checkpoints were keyed by, so they stay valid; an empty model is the CLI default, named as such.
+    ...req, model, modelKey: providerFor(s) === "codex" ? `codex:${model || "default"}` : model || "claude:default",
     subjects, skill: await eng.store.skill("compile.md"), singlePassWords: s.singlePassWords,
     limits: s.researchLimits, progress: onProgress, provider: eng.researchProvider, local: eng.compilationLocal,
     cache: { read: key => eng.store.readCompileCache(key), write: (key, value) => eng.store.writeCompileCache(key, value) },
@@ -91,8 +95,43 @@ export async function writePackage(eng: Engine, dir: string, req: Pick<CompileRe
   const sources = req.mode === "subject" ? {} : Object.fromEntries(req.material.map((m) => [m.name, contentHash(m.text)]));
   let pkg = buildPackage({ topic, questions: await eng.store.loadQuestions(dir), concepts: state.concepts, sources: refreshed && previous ? { ...previous.sources, ...sources } : sources, previous, at: new Date().toISOString(), mode: req.mode, research: !!req.research, refreshed });
   if (staged) pkg = withStagedCoverage(pkg, staged);
+  pkg = await withVersions(eng, dir, pkg, req, previous, staged);
   await eng.store.savePackage(dir, pkg);
+  await eng.store.setConceptRevisions(dir, conceptRevisions(pkg.versions ?? []));
   return pkg;
+}
+
+/**
+ * Versions the package's objectives against the previous package (objective-version.ts). The
+ * material of an objective is its text and the evidence it was compiled from: the source passages
+ * it maps to (staged courses) or the notes its subskills cite. Material text is kept in the
+ * compile cache by digest, so the next compile can tell an editorial edit from a material one.
+ * A cache failure costs only that comparison: the next compile then counts the change as material.
+ */
+async function withVersions(eng: Engine, dir: string, pkg: CoursePackage, req: Pick<CompileRequest, "material">, previous: CoursePackage | null, staged?: StagedCourse): Promise<CoursePackage> {
+  const passages = new Map<string, string>();
+  const revisions = await Promise.all((staged?.sourceRevisions ?? []).map((id) => eng.store.readCompileCache<SourceRevision>(`source-${id}`).catch(() => null)));
+  for (const s of revisions) for (const p of s?.passages ?? []) passages.set(p.id, p.text);
+  const notes = new Map(req.material.map((m) => [m.name.toLowerCase(), m.text]));
+  const current: CurrentObjective[] = pkg.objectives.map((o) => {
+    const inv = staged?.inventory.find((x) => x.id === o.id);
+    const refs = inv ? inv.references : [];
+    const cited = inv ? [] : [...new Set(pkg.lessons.filter((l) => o.subskills.includes(l.n)).flatMap((l) => l.citations))];
+    const evidence = inv ? refs.map((r) => passages.get(r) ?? `missing passage ${r}`) : cited.map((c) => notes.get(linkName(c).toLowerCase()) ?? "");
+    const material = materialText([o.text, ...evidence]);
+    return { id: o.id, subskills: o.subskills, sources: inv ? refs : cited, material, fingerprint: digest(material) };
+  });
+  const texts = new Map<string, string>();
+  const prevTexts = await Promise.all((previous?.versions ?? []).map((v) => eng.store.readCompileCache<{ text?: unknown }>(`objver-${v.fingerprint}`).catch(() => null)));
+  (previous?.versions ?? []).forEach((v, i) => {
+    const t = prevTexts[i];
+    if (t && typeof t.text === "string") texts.set(v.fingerprint, t.text);
+  });
+  // A package from before versions has no baseline: this compile sets it, and flags nothing.
+  const versions = versionObjectives({ previous: previous?.versions ?? null, current, at: new Date().toISOString(), previousText: (fp) => texts.get(fp) ?? null });
+  // Written one at a time: the store creates the cache folder on first write. Texts already saved are skipped.
+  for (const c of current) if (c.material.length <= MAX_MATERIAL && !texts.has(c.fingerprint)) await eng.store.writeCompileCache(`objver-${c.fingerprint}`, { text: c.material }).catch(() => undefined);
+  return { ...pkg, versions };
 }
 
 /**

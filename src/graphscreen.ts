@@ -556,7 +556,8 @@ export class GraphScreen implements Screen {
       capability.createDiv({ text: e.independent === 0 ? "Independent application has not been demonstrated yet." : `${e.independentCorrect} of ${e.independent} unaided answers were correct. ${m.backed ? "The recorded level is backed by your evidence." : "More independent evidence is needed before relying on the recorded level."}` });
       if (e.last) capability.createDiv({ cls: "st-meta", text: `Last marked practice: ${ago(e.last, v.today)}. Helped work is counted separately.` });
       // The concept's delayed check comes from unaided work only (evidence.ts, CHECK_INTERVALS).
-      if (e.nextCheck) capability.createDiv({ cls: "st-meta", text: e.nextCheck <= v.today ? `An unaided check is due now (since ${e.nextCheck}).` : `Next unaided check: ${e.nextCheck}.` });
+      if (e.recheck) capability.createDiv({ cls: "st-meta st-warn-text", text: `Recheck due: an objective changed materially on ${e.recheck.since.slice(0, 10)} (${e.recheck.why}). Earlier answers are kept; one unaided answer on the new version is needed.` });
+      else if (e.nextCheck) capability.createDiv({ cls: "st-meta", text: e.nextCheck <= v.today ? `An unaided check is due now (since ${e.nextCheck}).` : `Next unaided check: ${e.nextCheck}.` });
 
       // The suggested activity, with its reason. Asked of the same policy the study screen uses.
       const next = p.createDiv({ cls: "st-graph-next" });

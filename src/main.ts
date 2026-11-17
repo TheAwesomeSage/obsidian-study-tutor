@@ -417,7 +417,7 @@ export default class StudyTutorPlugin extends Plugin {
       return res;
     } catch (e) {
       notice.hide();
-      new Notice(`Study Tutor: ${controller.signal.aborted ? new CompileCancelled().message : (e as Error).message}`, 12000);
+      new Notice(`Study Tutor: ${e instanceof CompileCancelled ? e.message : controller.signal.aborted ? new CompileCancelled().message : (e as Error).message}`, 12000);
       return null;
     } finally {
       this.activeCompile = null;

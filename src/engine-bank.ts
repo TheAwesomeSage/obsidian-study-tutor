@@ -4,12 +4,13 @@
 
 import { zeroUsage } from "./claude";
 import { Attempt, Grading, Outcome, TASK_TYPES, TaskType, recordAttempt } from "./evidence";
-import { Chat, Grade, LearnerState, Mode, Question, answerText, chatWords, codeMark, differentNumbers, fmList, fmNum, fmStr, formatQuizQuestion, givesUp, looksLikeQuestion, mcqLetter, parseMcqReply, placementQuestions, sameShortAnswer, schedule, setLevel } from "./formats";
+import { Chat, Grade, LearnerState, Mode, Question, objectiveStamp, answerText, chatWords, codeMark, differentNumbers, fmList, fmNum, fmStr, formatQuizQuestion, givesUp, looksLikeQuestion, mcqLetter, parseMcqReply, placementQuestions, sameShortAnswer, schedule, setLevel } from "./formats";
 import { Decision } from "./policy";
 import { readPresentationRequest } from "./presentation";
 import { sessionFor } from "./session";
 import { ToolResult } from "./tools";
-import { ReasoningAssessment, finalExpression, resultConflict, withCheck } from "./reasoning";
+import { ReasoningAssessment, finalExpression, withCheck } from "./reasoning";
+import { gradeOfOutcome, normaliseMark, outcomeOfGrade, withNote } from "./grading";
 import { TurnResult, TurnOpts, MAX_ANSWER_SECONDS, applyAttempt, pickQuizQuestion } from "./engine-common";
 import type { Engine } from "./engine";
 
@@ -157,6 +158,7 @@ export function bankAttempt(eng: Engine, p: { id: string; chat: Chat; state: Lea
     assumptions: p.assumptions,
     taskType: (TASK_TYPES.includes(p.q.task as TaskType) ? p.q.task : p.activity === "retrieval" ? "recall" : "application") as TaskType,
     family: p.q.family ?? "",
+    ...objectiveStamp(p.state, p.q.subskill),
   };
 }
 
@@ -299,38 +301,46 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
           }
         }
       }
-      // SymPy and the grader disagree about the final result: the answer is left ungraded, never guessed.
-      const conflict = resultConflict(reasoning ?? undefined);
-      if (conflict) note = "SymPy and the grader disagree about the final result, so this answer was left ungraded. Dispute it for a second look.";
-      const result: Outcome = skipped ? "skipped" : conflict ? "ungraded" : grade === "again" ? "incorrect" : grade === "hard" ? "partial" : "correct";
+      // The proposed mark is held to its breakdown (grading.ts). An uncheckable answer, SymPy
+      // disagreeing with the grader, or a mark its own breakdown contradicts is left ungraded,
+      // never guessed; a right result whose required method could not be judged is partly right
+      // and counts neither way.
+      const mark = normaliseMark({ proposed: skipped ? "skipped" : outcomeOfGrade(grade), reasoning, rubric: pending.rubric });
+      const result: Outcome = mark.result;
+      const conflict = result === "ungraded";
+      note = withNote(note, mark);
+      const scheduled = gradeOfOutcome(result, grade);
       const id = `${chatPath}:${chat.messages.length}:${pending.id}`;
       // If the state was saved and the chat was not (an interrupted turn), this is the same
       // attempt arriving again: the record is replaced, and the counters are left alone.
       const repeat = state.attempts.some((a) => a.id === id);
       attempt = eng.bankAttempt({ id, chat, state, q: pending, answer, result, activity: opts.adaptive ? (sessionFor(chat, state, mode).action === "retrieval" ? "retrieval" : "independent-practice") : "quiz", mode, grading, assumptions, note: result === "correct" ? "" : note, now });
-      if (reasoning) attempt.reasoning = reasoning;
+      if (reasoning) {
+        attempt.reasoning = reasoning;
+        attempt.mark = mark.basis;
+      }
       state.attempts = recordAttempt(state.attempts, attempt);
-      if (!repeat && result !== "ungraded") {
-        if (!s.externalFlashcards) state.cards[pending.id] = schedule(state.cards[pending.id], grade, today);
+      if (!repeat && scheduled) {
+        if (!s.externalFlashcards) state.cards[pending.id] = schedule(state.cards[pending.id], scheduled, today);
         if (pending.subskill in state.names) {
           const b = state.bank[pending.subskill] ?? (state.bank[pending.subskill] = { right: 0, total: 0 });
           b.total += 1;
-          if (grade === "good" || grade === "easy") b.right += 1;
+          if (result === "correct") b.right += 1;
         }
         for (const line of applyAttempt(state, attempt)) changes.push(line);
       }
       // The chat's own score is saved with the verdict message, so it moves with that write.
       if (result !== "ungraded") {
-        chat.fm.right = fmNum(chat.fm, "right", 0) + (grade === "good" || grade === "easy" ? 1 : 0);
+        chat.fm.right = fmNum(chat.fm, "right", 0) + (result === "correct" ? 1 : 0);
         chat.fm.total = fmNum(chat.fm, "total", 0) + 1;
       }
       await eng.store.saveState(dir, state);
       chat.fm.card = "";
       chat.fm.pending_confidence = "";
-      const head = skipped ? "**Skipped.**" : conflict ? "**Left ungraded.**" : grade === "again" ? "**Incorrect.**" : grade === "hard" ? "**Partly right.**" : "**Correct.**";
+      const head = skipped ? "**Skipped.**" : conflict ? "**Left ungraded.**" : result === "incorrect" ? "**Incorrect.**" : result === "partial" ? "**Partly right.**" : "**Correct.**";
       const parts = [note ? `${head} ${note}` : head];
       // The solution is shown only now, after an attempt or an explicit skip.
-      if (grade === "again" || grade === "hard" || conflict) parts.push(`Answer: ${answerText(pending)}${pending.explanation ? `\n\n${pending.explanation}` : ""}`);
+      if (result !== "correct") parts.push(`Answer: ${answerText(pending)}${pending.explanation ? `\n\n${pending.explanation}` : ""}`);
       if (!opts.adaptive && fmNum(chat.fm, "total", 0) % 5 === 0) parts.push(`*Score so far: ${fmNum(chat.fm, "right", 0)}/${fmNum(chat.fm, "total", 0)}.*`);
       verdict = parts.join("\n\n");
     }

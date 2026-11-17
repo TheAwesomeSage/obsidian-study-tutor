@@ -2,11 +2,12 @@
 // Each card is recorded with how it was marked: by code, by SymPy, by the model, or self-rated
 // after seeing the answer. Only the first three can count as evidence for a level.
 
+import { outcomeOfGrade } from "./grading";
 import { Notice } from "obsidian";
 import { addUsage, usageLine } from "./claude";
 import { applyAttempt } from "./engine";
 import { Attempt, Grading, recordAttempt } from "./evidence";
-import { Grade, Question, answerText, differentNumbers, mcqLetter, reviewQueue, sameShortAnswer, schedule } from "./formats";
+import { Grade, Question, objectiveStamp, answerText, differentNumbers, mcqLetter, reviewQueue, sameShortAnswer, schedule } from "./formats";
 import type { Screen, TutorView } from "./view";
 import { button, chip, emptyState, progressBar } from "./ui";
 
@@ -72,7 +73,7 @@ export class ReviewScreen implements Screen {
       activity: "review",
       mode: "review",
       difficulty: null,
-      result: grade === "again" ? "incorrect" : grade === "hard" ? "partial" : "correct",
+      result: outcomeOfGrade(grade),
       errorType: "",
       note: "",
       confidence: null,
@@ -85,6 +86,7 @@ export class ReviewScreen implements Screen {
       grading: how.grading,
       verification: how.grading === "model" || how.grading === "self" ? "unverified" : "verified",
       assumptions: how.assumptions,
+      ...objectiveStamp(s, q.subskill),
     };
     s.attempts = recordAttempt(s.attempts, attempt);
     s.cards[q.id] = schedule(s.cards[q.id], grade, v.today);
