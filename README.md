@@ -1,6 +1,6 @@
 # Study Tutor
 
-An Obsidian plugin that teaches you from your own notes. It has a Socratic tutor, a strict quizzer and a subject expert in a main-workspace study view, plus flashcard review that uses no tokens. The current source supports both Claude Code and the Codex CLI.
+An Obsidian plugin that teaches you from your own notes. It has a Socratic tutor, a strict quizzer and a subject expert in a main-workspace study view, plus flashcard review that uses no tokens. It runs on Claude Code or the Codex CLI, whichever you pick.
 
 Desktop only. The plugin launches the model provider's CLI on your computer.
 
@@ -13,7 +13,7 @@ Desktop only. The plugin launches the model provider's CLI on your computer.
 1. Install [Claude Code](https://claude.com/claude-code) and sign in by running `claude`, or install a current [Codex CLI](https://developers.openai.com/codex/cli/) and sign in with `codex login`.
 2. Download `study-tutor-<version>.zip` from the [latest release](https://github.com/TheAwesomeSage/obsidian-study-tutor/releases/latest) and unzip it into `<your vault>/.obsidian/plugins/`, so that you get `<your vault>/.obsidian/plugins/study-tutor/` with `main.js`, `manifest.json`, `styles.css`, `player.js`, `plot.js`, and the `assets` and `pyodide` folders. To build it yourself instead, run `npm install` and then `npm run build`; the whole folder is written to `release/study-tutor/`, so copy all of it. `player.js` and `plot.js` hold the activity player and the function plotter (JSXGraph), and `pyodide` holds Python and SymPy for the maths checks (about 30 MB). Each is loaded only when it is needed, and without them everything else still works. Obsidian's own plugin updater fetches only the first three files, so update by copying the folder.
 3. In Obsidian: Settings → Community plugins → enable **Study Tutor**.
-4. Under **Settings → Study Tutor → Model provider**, pick Claude Code or **Codex CLI (ChatGPT)**, then click **Test**. The provider picker is available in builds from the current source. Each provider remembers its own executable path and optional model settings. Blank Codex model fields use the CLI default.
+4. Under **Settings → Study Tutor → Model provider**, pick Claude Code or **Codex CLI (ChatGPT)**, then click **Test**. Each provider remembers its own executable path and optional model settings. Blank Codex model fields use the CLI default.
 
 The plugin works in any vault. On first load it creates one folder (default `Tutor/`) and keeps everything there.
 

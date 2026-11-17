@@ -2,7 +2,7 @@
 
 What changed in each version of Study Tutor, newest first.
 
-## Unreleased
+## Version 0.9.1
 
 - Choose Claude Code or Codex CLI (ChatGPT) in Study Tutor settings. The selected provider handles tutoring, compilation and grading. Settings remember the path and models for each CLI.
 - Replies and researched web pages can no longer load anything from outside the vault. A remote picture becomes a plain link, a tag that would fetch something is shown as text, and a block that Dataview or JS Engine would run as JavaScript is shown as ordinary code. Fenced code is left exactly as written. The same check runs again on whatever the study view renders, so chats saved by earlier versions are covered when they are reopened.
