@@ -1,12 +1,12 @@
 import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf } from "obsidian";
 import { usageLine } from "./claude";
-import { callModel, modelCliPath, modelFor, MODEL_PROVIDERS, providerFor } from "./model-provider";
+import { callModel, compileStrategyFor, COMPILE_STRATEGIES, modelCliPath, modelFor, MODEL_PROVIDERS, providerFor, type CompileStrategy } from "./model-provider";
 import { braveResearch, DEFAULT_RESEARCH_LIMITS, researchLimits, type ResearchLimits } from "./compile-research";
-import { CompileCancelled, type ExpansionRequest } from "./compiler";
+import { CompileCancelled, type CompileMetrics, type ExpansionRequest } from "./compiler";
 import { CompileResult, Engine, EngineSettings, Material } from "./engine";
 import { Frontmatter, SourceMode, fmList, fmStr, splitFrontmatter, words } from "./formats";
 import { DEFAULT_WEIGHTS, PolicyWeights, WEIGHT_LABELS } from "./policy";
-import { DEFAULT_LOCAL_MODEL, DEFAULT_OLLAMA_URL, OllamaClient } from "./ollama";
+import { DEFAULT_LOCAL_MODEL, DEFAULT_OLLAMA_URL, OllamaClient, locateLocal } from "./ollama";
 import { FS, Store } from "./store";
 import { BundleFiles, SympyWorker } from "./sympy";
 import { TutorView, VIEW_TYPE } from "./view";
@@ -35,7 +35,8 @@ export interface TutorSettings extends EngineSettings {
   minutes: number;
   /** Configure existing visual modules with a local Ollama model when no saved configuration fits. */
   localActivities: boolean;
-  localCompilation: boolean;
+  /** Which models compile a course (model-provider.ts). Settings from before it was added are migrated from `localCompilation`. */
+  compileStrategy: CompileStrategy;
   /** The local model, an Ollama tag. */
   localModel: string;
   /** The local Ollama server. Only loopback addresses are used. */
@@ -82,7 +83,7 @@ const DEFAULTS: TutorSettings = {
   weights: { ...DEFAULT_WEIGHTS },
   minutes: 25,
   localActivities: true,
-  localCompilation: true,
+  compileStrategy: "hybrid",
   researchLimits: DEFAULT_RESEARCH_LIMITS,
   localModel: DEFAULT_LOCAL_MODEL,
   ollamaUrl: DEFAULT_OLLAMA_URL,
@@ -116,6 +117,16 @@ export async function readSympyBundle(dir: string): Promise<BundleFiles | null> 
   return out;
 }
 
+/** Which models compiled the topic and where the local one ran, for the compile notice. */
+function strategyLine(m: CompileMetrics, provider: string): string {
+  if (!m.strategy) return "";
+  const parts = [`Strategy: ${COMPILE_STRATEGIES[m.strategy]}`];
+  if (m.mainModel) parts.push(`${provider} answered as ${m.mainModel}`);
+  if (m.localModel) parts.push(`Ollama ${m.localModel} ${m.localRuns === "cloud" ? "ran in the cloud (cloud inference)" : m.localRuns === "local" ? "ran on this computer" : "was not proven to run on this computer"}`);
+  if (m.localEscalations) parts.push(`${m.localEscalations} passage selection${m.localEscalations === 1 ? "" : "s"} escalated to ${provider} after Ollama's reply failed its checks`);
+  return parts.join(" · ");
+}
+
 export type SourceKind = "links" | "active" | "folder" | "spec" | "subject";
 
 const MAX_NOTES = 80;
@@ -144,6 +155,11 @@ export default class StudyTutorPlugin extends Plugin {
     this.data = { settings: { ...DEFAULTS, ...(saved.settings ?? {}) }, activeTopic: saved.activeTopic ?? "", activeChat: saved.activeChat ?? {}, skills: saved.skills ?? {}, settingsVersion: saved.settingsVersion ?? 1, drafts: saved.drafts ?? {}, graphLayout: saved.graphLayout ?? {} };
     // Settings saved by an older version have no weights; a partly filled set is completed from the defaults.
     this.data.settings.weights = { ...DEFAULT_WEIGHTS, ...(saved.settings?.weights ?? {}) };
+    // Up to 0.9 a toggle chose whether Ollama selected passages; off is the main strategy now.
+    const legacy = this.data.settings as TutorSettings & { localCompilation?: boolean };
+    if (!saved.settings?.compileStrategy && legacy.localCompilation === false) legacy.compileStrategy = "main";
+    legacy.compileStrategy = compileStrategyFor(legacy);
+    delete legacy.localCompilation;
     const before = this.data.settingsVersion;
     if (this.data.settingsVersion < 2) {
       // 0.1 shipped with 1,200-word chat parts. Move anyone still on that default to 600.
@@ -233,9 +249,10 @@ export default class StudyTutorPlugin extends Plugin {
 
   /** Share one generation queue between compilation and visual activities. */
   buildLocal(): void {
-    const client = this.opts.localActivities || this.opts.localCompilation ? new OllamaClient({ model: this.opts.localModel || DEFAULT_LOCAL_MODEL, baseUrl: this.opts.ollamaUrl || DEFAULT_OLLAMA_URL }) : null;
+    const compiles = compileStrategyFor(this.opts) !== "main";
+    const client = this.opts.localActivities || compiles ? new OllamaClient({ model: this.opts.localModel || DEFAULT_LOCAL_MODEL, baseUrl: this.opts.ollamaUrl || DEFAULT_OLLAMA_URL }) : null;
     this.engine.local = this.opts.localActivities ? client : null;
-    this.engine.compilationLocal = this.opts.localCompilation ? client : null;
+    this.engine.compilationLocal = compiles ? client : null;
   }
 
   /** Opens Obsidian's settings on this plugin's tab. The settings API is not typed, so every step is guarded. */
@@ -407,7 +424,8 @@ export default class StudyTutorPlugin extends Plugin {
       const how = res.refresh === "unchanged" ? `Nothing changed (${res.why}); no model was called.` : res.refresh === "partial" ? `Refreshed subskill ${(res.subskillsRefreshed ?? []).join(", ")} (${res.why}).` : res.refresh === "full" ? `Compiled in full: ${res.why}.` : "";
       const stats = res.metrics;
       const activity = stats ? `\n${stats.searches} search attempts · ${stats.pages} pages requested · ${stats.cacheHits} cache hits · Ollama ${(stats.localMs / 1000).toFixed(1)}s (${stats.localCalls} calls)${stats.generators || stats.generatorsRejected ? ` · question generators: ${stats.generators ?? 0} kept, ${stats.generatorsRejected ?? 0} dropped` : ""}` : "";
-      new Notice(`${res.status === "partial" ? "Partial topic saved" : "Topic ready"}: ${res.subskills} subskills, ${res.questions} questions.${res.preservedCourse ? " The previous topic was kept." : ""}${how ? `\n${how}` : ""}${res.coverage ? `\n${res.coverage}` : ""}${activity}\nModel: ${usageLine(res.usage)} in ${res.usage.calls} call(s)`, 12000);
+      const where = stats ? strategyLine(stats, MODEL_PROVIDERS[providerFor(this.opts)]) : "";
+      new Notice(`${res.status === "partial" ? "Partial topic saved" : "Topic ready"}: ${res.subskills} subskills, ${res.questions} questions.${res.preservedCourse ? " The previous topic was kept." : ""}${how ? `\n${how}` : ""}${res.coverage ? `\n${res.coverage}` : ""}${activity}${where ? `\n${where}` : ""}\nModel: ${usageLine(res.usage)} in ${res.usage.calls} call(s)`, 12000);
       this.data.activeTopic = res.preservedCourse ?? res.dir;
       await this.save();
       // Keep the flashcard note in step with the new question bank; existing schedules are kept.
@@ -696,7 +714,7 @@ class TutorSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("Interactive activities").setHeading();
     new Setting(containerEl)
       .setName("Configure activities with a local model")
-      .setDesc("When you ask for a diagram, simulation or game, or the tutor offers one and you open it, an existing module is configured from a short excerpt of your notes by a small model on this computer, through Ollama. Saved activities reopen with no model at all, and moving their controls never calls a model. Nothing here ever calls Claude. Off: only saved activities open.")
+      .setDesc("When you ask for a diagram, simulation or game, or the tutor offers one and you open it, an existing module is configured from a short excerpt of your notes by a small model on this computer, through Ollama. Saved activities reopen with no model at all, and moving their controls never calls a model. Nothing here ever calls Claude, and a model that Ollama runs in the cloud is refused. Off: only saved activities open.")
       .addToggle((t) =>
         t.setValue(s.localActivities).onChange(async (v) => {
           s.localActivities = v;
@@ -717,11 +735,15 @@ class TutorSettingTab extends PluginSettingTab {
       .addButton((b) =>
         b.setButtonText("Test").onClick(async () => {
           b.setDisabled(true);
-          const st = await new OllamaClient({ model: s.localModel, baseUrl: s.ollamaUrl }).status();
+          const client = new OllamaClient({ model: s.localModel, baseUrl: s.ollamaUrl });
+          const st = await client.status();
+          const where = st.ok && st.hasModel ? await locateLocal(client) : null;
           b.setDisabled(false);
           if (!st.ok) new Notice(`Ollama is not reachable: ${st.error || "no answer"}. Start Ollama, or switch local activities off.`, 12000);
           else if (!st.hasModel) new Notice(`Ollama ${st.version} is running, but ${s.localModel} is not installed. Run: ollama pull ${s.localModel}`, 12000);
-          else new Notice(`Ollama ${st.version} is running with ${s.localModel}.`, 8000);
+          else if (where?.runs === "cloud") new Notice(`Ollama ${st.version} has ${s.localModel}, but ${where.detail}. Local activities and the local compile strategy refuse it; hybrid compilation labels it as cloud inference.`, 15000);
+          else if (where?.runs === "unknown") new Notice(`Ollama ${st.version} has ${s.localModel}, but where it runs could not be confirmed: ${where.detail}.`, 12000);
+          else new Notice(`Ollama ${st.version} is running with ${s.localModel}, on this computer.`, 8000);
         }),
       );
 
@@ -751,9 +773,14 @@ class TutorSettingTab extends PluginSettingTab {
     num("Chat part size (words)", "When a chat passes this size it is summarised, and the chat continues in a new file that starts from the summary. Smaller means cheaper turns.", "maxChatWords", 200);
     num("Topic card size (words)", "Cards above this size are sent as an outline plus the current subskill only.", "maxTopicWords", 300);
     num("Short input size (words)", "Above this size, compilation reads the specification or notes in batches.", "singlePassWords", 100);
-    new Setting(containerEl).setName("Use Ollama for compilation").setDesc("Selects relevant passages from long notes and research pages. Compilation falls back to text matching if Ollama is unavailable.").addToggle(t =>
-      t.setValue(s.localCompilation).onChange(async v => {
-        s.localCompilation = v;
+    const main = MODEL_PROVIDERS[providerFor(s)];
+    new Setting(containerEl).setName("Compile strategy").setDesc(
+      `Main provider only: ${main} does every stage, passage selection included, and Ollama is not used. ` +
+      `Hybrid (default): Ollama selects relevant passages from long notes and research pages, and ${main} plans, writes and audits the course. If Ollama is not running, text matching is used; if its reply fails the checks, that selection goes to ${main}, and the compile notice says so. ` +
+      `Local only: Ollama does every stage and ${main} is never called for compilation. A stage the local model cannot do is left as a gap in the course's coverage, and a model that Ollama runs in the cloud is refused.`,
+    ).addDropdown(d =>
+      d.addOptions(COMPILE_STRATEGIES).setValue(compileStrategyFor(s)).onChange(async v => {
+        s.compileStrategy = compileStrategyFor({ ...s, compileStrategy: v as CompileStrategy });
         this.plugin.buildLocal();
         await this.plugin.save();
       }));

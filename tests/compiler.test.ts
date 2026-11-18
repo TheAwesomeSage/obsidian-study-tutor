@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CompileCancelled, compileCourse, type CompilerCache } from "../src/compiler";
+import { CompileCancelled, STAGE_VERSIONS, checkpointKey, compileCourse, type CompilerCache } from "../src/compiler";
 import { canonicalPage, publicIPv4, readablePage, type ResearchProvider } from "../src/compile-research";
 import { indexSource, passageWindow } from "../src/compile-sources";
 import { Engine, type EngineSettings } from "../src/engine";
-import { zeroUsage } from "../src/claude";
-import type { LocalModel } from "../src/ollama";
+import { answeringModel, zeroUsage } from "../src/claude";
+import { CodexTurn } from "../src/codex-cli";
+import { modelIdentity } from "../src/model-provider";
+import { LocalModelError, OllamaClient, type ChatJsonOptions, type LocalModel, type LocalModelInfo, type LocalReply } from "../src/ollama";
+import { neutraliseRemote } from "../src/safemd";
 import { Store } from "../src/store";
 import { expansionRequest } from "../src/expansion";
 import { courseExpansions, courseLessons, courseSources } from "../src/tutoring-adapters";
@@ -49,6 +52,8 @@ function fake(options: {
     } else if (props.rows) {
       structured = { rows: input.objectives.map((o: any, i: number) => ({ objective: o.id, sources: options.uncovered ? ["invented-passage"] : input.packet[i].passages.map((p: any) => p.id), teaching: true, questions: options.uncovered ? ["Q999"] : [input.questions[i].id], gap: "" })) };
       if (options.audit) structured = options.audit(input, structured);
+    } else if (props.matches) {
+      structured = { matches: input.objectives.map((o: any) => ({ objective: o.id, passage: input.passages[0].id, uncertain: false })) };
     } else assert.fail("unexpected compile stage");
     return { structured, text: "", usage: { ...zeroUsage(), calls: 1, input: 10, output: 2 } };
   };
@@ -59,19 +64,42 @@ function run(over: Partial<Options> = {}) {
     subjects: [], skill: "compile exercises", model: "fixture", singlePassWords: 600, cache: memory(), call: fake(), ...over });
 }
 
-type Stage = "plan" | "review" | "synth" | "audit";
+type Stage = "plan" | "select" | "review" | "synth" | "audit";
+const stageOf = (system: string): Stage => system.startsWith("Write structured teaching units") ? "synth" : system.startsWith("Audit every supplied objective") ? "audit"
+  : system.startsWith("Inventory the learning objectives") ? "plan" : system.startsWith("Select passages") ? "select" : "review";
 /** Counts model calls by the stage prompt they carry, and keeps their inputs. */
 function counted(call: Model = fake()) {
-  const n: Record<Stage, number> = { plan: 0, review: 0, synth: 0, audit: 0 };
-  const inputs: Record<Stage, any[]> = { plan: [], review: [], synth: [], audit: [] };
+  const n: Record<Stage, number> = { plan: 0, select: 0, review: 0, synth: 0, audit: 0 };
+  const inputs: Record<Stage, any[]> = { plan: [], select: [], review: [], synth: [], audit: [] };
   const counting: Model = o => {
-    const stage: Stage = o.system.startsWith("Write structured teaching units") ? "synth" : o.system.startsWith("Audit every supplied objective") ? "audit" : o.system.startsWith("Inventory the learning objectives") ? "plan" : "review";
+    const stage = stageOf(o.system);
     n[stage]++;
     inputs[stage].push(JSON.parse(o.input));
     return call(o);
   };
   return { n, inputs, call: counting };
 }
+
+/**
+ * A scripted Ollama model that answers every stage the way `call` would, and reports where it
+ * runs. It counts its requests by stage, and how often it was asked where it runs.
+ */
+function localFrom(call: Model = fake(), name = "qwen2.5:7b", where: Partial<LocalModelInfo> = {}) {
+  const n: Record<Stage, number> = { plan: 0, select: 0, review: 0, synth: 0, audit: 0 };
+  const model = {
+    model: name, n, described: 0, requests: [] as ChatJsonOptions[],
+    describe: async (): Promise<LocalModelInfo> => { model.described++; return { model: name, runs: "local", digest: "sha256:aaa111bbb222ccc333", detail: "scripted", ...where }; },
+    chatJson: async (o: ChatJsonOptions): Promise<LocalReply> => {
+      model.requests.push(o);
+      n[stageOf(o.system)]++;
+      const r = await call({ model: name, system: o.system, input: o.user, jsonSchema: o.schema });
+      return { text: JSON.stringify(r.structured), model: name, doneReason: "stop", timing: { wallMs: 1, loadMs: 0, promptTokens: 1, promptMs: 0, evalTokens: 1, evalMs: 0, totalMs: 1 } };
+    },
+  };
+  return model;
+}
+const noMainProvider: Model = async o => assert.fail(`the main provider was called for ${stageOf(o.system)}`);
+const entry = (cache: { data: Map<string, unknown> }, prefix: string) => [...cache.data].find(([k]) => k.startsWith(prefix))![1] as { model: string; value: unknown };
 
 // Eight objectives in two notes with no shared terms: lesson group 1 is the kernel note, group 2 the eigenvalue note.
 const kernelNote = { name: "Kernel notes", path: "Math/Kernel notes.md", text: ["shear", "projection", "dilation", "reflection", "zero map", "identity map"].map((m, i) => `A${i + 1}: Compute the kernel of the ${m}.`).join("\n\n") };
@@ -121,22 +149,135 @@ test("specs are read in full when short; long specs preserve omitted clauses and
   assert.equal(before.questionsBody, "");
 });
 
-test("invalid or missing Ollama falls back to original source passages", async () => {
-  for (const missing of [false, true]) {
+test("hybrid: an Ollama that is not running falls back to original source passages, with no escalation", async () => {
+  for (const failure of [new LocalModelError("unreachable", "Ollama is not reachable"), new LocalModelError("model-missing", "not installed"), new Error("offline")]) {
     let localCalls = 0;
-    const local: LocalModel = { model: "fixture:model", chatJson: async () => {
-      localCalls++;
-      if (missing) throw new Error("offline");
-      return { model: "fixture:model", doneReason: "stop", text: '{"matches":[{"passage":"made-up","objective":"made-up","uncertain":false}]}', timing: {} } as any;
-    } };
+    const local: LocalModel = { model: "fixture:model", chatJson: async () => { localCalls++; throw failure; } };
     const seen: any[] = [];
-    const r = await run({ singlePassWords: 2, local, call: fake({ seen }) });
+    const c = counted(fake({ seen }));
+    const r = await run({ singlePassWords: 2, local, call: c.call });
     const packet = seen.find(x => x.packet).packet[0].passages;
-    assert.equal(localCalls, 1);
+    assert.deepEqual([localCalls, c.n.select, r.staged.metrics.localEscalations], [1, 0, 0], failure.message);
+    assert.equal(r.staged.metrics.strategy, "hybrid", "hybrid is the default: the split used before strategies existed");
     assert.ok(r.staged.issues.some(x => /deterministic passages/.test(x)));
     assert.ok(packet.some((x: any) => x.text.includes("T(x) = 0") && x.uncertain));
-    assert.ok(packet.every((x: any) => x.id !== "made-up"));
   }
+});
+
+test("hybrid: a local selection that fails its checks escalates to the main provider, recorded in metrics and issues", async () => {
+  const local: LocalModel = { model: "fixture:model", chatJson: async () => ({ model: "fixture:model", doneReason: "stop", text: '{"matches":[{"passage":"made-up","objective":"made-up","uncertain":false}]}', timing: {} } as any) };
+  const seen: any[] = [];
+  const c = counted(fake({ seen }));
+  const progress: string[] = [];
+  // Two notes, so selection runs in several batches: only the first asks Ollama.
+  const r = await run({ singlePassWords: 2, local, material: twoGroups, call: c.call, progress: s => progress.push(s) });
+  assert.equal(c.n.select, 3, "the failed batch and both later ones went to the main provider");
+  assert.equal(r.staged.metrics.localEscalations, 3);
+  assert.equal(r.staged.metrics.rejected, 1);
+  assert.ok(r.staged.issues.some(x => /Ollama's passage selection failed its checks \(the local reply named an invalid passage or objective ID\)/.test(x)));
+  assert.ok(progress.some(s => /asking the main provider instead/.test(s)));
+  const packet = seen.find(x => x.packet).packet[0].passages;
+  assert.ok(packet.every((x: any) => x.id !== "made-up" && !x.uncertain), "the main provider's selection is used");
+  assert.equal(r.staged.status, "complete");
+});
+
+test("hybrid: a model Ollama runs in the cloud is used but labelled as cloud inference", async () => {
+  const local = localFrom(fake(), "glm-4.6:cloud");
+  const r = await run({ singlePassWords: 2, local });
+  assert.equal(local.n.select, 1);
+  assert.equal(local.described, 0, "the name settles it");
+  assert.deepEqual([r.staged.metrics.localRuns, r.staged.metrics.localModel], ["cloud", "glm-4.6:cloud"]);
+  assert.ok(r.staged.issues.some(x => /^Cloud inference: glm-4\.6:cloud is an Ollama cloud model/.test(x)));
+  const proven = await run({ singlePassWords: 2, local: localFrom() });
+  assert.deepEqual([proven.staged.metrics.localRuns, proven.staged.metrics.localModel], ["local", "qwen2.5:7b@aaa111bbb222"]);
+});
+
+test("main: the configured provider does every stage, passage selection included, and Ollama is never asked", async () => {
+  const local = localFrom();
+  const c = counted();
+  const r = await run({ strategy: "main", singlePassWords: 2, local, call: c.call });
+  assert.deepEqual([local.requests.length, local.described], [0, 0]);
+  assert.deepEqual([c.n.plan, c.n.select, c.n.synth, c.n.audit], [1, 1, 1, 1]);
+  assert.deepEqual([r.staged.metrics.strategy, r.staged.metrics.localModel, r.staged.metrics.localCalls], ["main", undefined, 0]);
+  assert.equal(r.staged.status, "complete");
+});
+
+test("local: Ollama does every stage and the main provider is never called; checkpoints carry the model's digest", async () => {
+  const cache = memory();
+  const unsafe = " See ![diagram](https://example.org/pixel.png).";
+  const local = localFrom(fake({ synth: (_input, reply: any) => ({ ...reply, units: reply.units.map((u: any) => ({ ...u, details: u.details + unsafe })) }) }));
+  const r = await run({ strategy: "local", singlePassWords: 2, local, cache, call: noMainProvider });
+  assert.deepEqual([r.calls, r.usage.calls, r.staged.status], [0, 0, "complete"]);
+  assert.deepEqual([local.n.plan, local.n.select, local.n.synth, local.n.audit], [1, 1, 1, 1]);
+  assert.deepEqual([r.staged.metrics.strategy, r.staged.metrics.localRuns, r.staged.metrics.localCalls, r.staged.metrics.mainModel], ["local", "local", 4, undefined]);
+  assert.ok(local.requests.filter(o => !o.system.startsWith("Select passages")).every(o => o.numCtx! >= 16_384), "the lesson stages get a context window for a group's packet");
+  // Local lesson prose is saved into notes, so it is made safe like a main provider's reply.
+  assert.notEqual(neutraliseRemote(unsafe), unsafe);
+  assert.ok(r.staged.lessons[0].text.endsWith(neutraliseRemote(unsafe).trim()));
+  assert.equal(entry(cache, "synth-").model, "ollama:qwen2.5:7b@sha256:aaa111bbb222ccc333");
+  const again = localFrom();
+  await run({ strategy: "local", singlePassWords: 2, local: again, cache, call: noMainProvider });
+  assert.equal(again.requests.length, 0, "the same build reuses every checkpoint");
+  const repulled = localFrom(fake(), "qwen2.5:7b", { digest: "sha256:ddd444" });
+  await run({ strategy: "local", singlePassWords: 2, local: repulled, cache, call: noMainProvider });
+  assert.deepEqual([repulled.n.plan, repulled.n.select, repulled.n.synth, repulled.n.audit], [1, 1, 1, 1], "a re-pulled model with another digest misses");
+});
+
+test("local: a stage the local model cannot do is an explicit coverage gap, never sent to the main provider", async () => {
+  const base = fake();
+  const local = localFrom(o => o.system.startsWith("Write structured teaching units") ? Promise.reject(new LocalModelError("timeout", "The local model took longer than 240s and was stopped.")) : base(o));
+  const r = await run({ strategy: "local", singlePassWords: 2, local, call: noMainProvider });
+  assert.equal(r.staged.status, "partial");
+  assert.equal(r.calls, 0);
+  assert.ok(r.staged.issues.some(x => /^Lesson synthesis for group 1 was not done: The local model took longer than 240s.*does not send it to the main provider\.$/.test(x)));
+  assert.deepEqual(r.staged.availability[0].gaps, ["lesson synthesis: the local model could not do this stage, and the local compile strategy does not send it to the main provider"]);
+  const audit = localFrom(fake({ audit: () => ({ rows: "not rows" }) }));
+  const r2 = await run({ strategy: "local", singlePassWords: 2, local: audit, call: noMainProvider });
+  assert.equal(r2.staged.status, "partial");
+  assert.ok(r2.staged.availability[0].gaps.some(g => g.startsWith("coverage audit: the local model could not do this stage")));
+});
+
+test("local: a cloud model is refused, by its name or by Ollama's own description, and so is one not proven local", async () => {
+  const byName = localFrom(fake(), "gpt-oss:20b-cloud");
+  const r = await run({ strategy: "local", singlePassWords: 2, local: byName, call: noMainProvider });
+  assert.deepEqual([byName.requests.length, r.calls, r.staged.status, r.staged.metrics.localRuns], [0, 0, "partial", "cloud"]);
+  assert.ok(r.staged.issues.some(x => /^The local compile strategy did not compile this topic: gpt-oss:20b-cloud is not proven to run on this computer \(gpt-oss:20b-cloud is an Ollama cloud model/.test(x)));
+  // A name that does not say so, on a loopback server that forwards it to ollama.com.
+  const sent: string[] = [];
+  const forwarding = new OllamaClient({ model: "big-model", transport: async (_method, url) => {
+    sent.push(url);
+    if (url.endsWith("/api/show")) return { status: 200, body: JSON.stringify({ remote_model: "gpt-oss:120b", remote_host: "https://ollama.com:443", details: { family: "gptoss" } }) };
+    if (url.endsWith("/api/tags")) return { status: 200, body: JSON.stringify({ models: [{ name: "big-model:latest", digest: "sha256:eee555", remote_host: "https://ollama.com:443" }] }) };
+    return assert.fail(`unexpected request to ${url}`);
+  } });
+  const shown = await run({ strategy: "local", singlePassWords: 2, local: forwarding, call: noMainProvider });
+  assert.ok(!sent.some(u => u.endsWith("/api/chat")), "no prompt reaches the cloud model");
+  assert.equal(shown.staged.metrics.localRuns, "cloud");
+  assert.ok(shown.staged.issues.some(x => /Ollama reports that big-model runs on https:\/\/ollama\.com:443/.test(x)));
+  const unknown = await run({ strategy: "local", singlePassWords: 2, call: noMainProvider,
+    local: new OllamaClient({ transport: async () => { throw new LocalModelError("unreachable", "Ollama is not reachable at http://127.0.0.1:11434 (ECONNREFUSED)."); } }) });
+  assert.equal(unknown.staged.metrics.localRuns, "unknown");
+  assert.ok(unknown.staged.issues.some(x => /not proven to run on this computer \(could not ask Ollama where qwen2\.5:3b runs: Ollama is not reachable/.test(x)));
+  const none = await run({ strategy: "local", call: noMainProvider });
+  assert.ok(none.staged.issues.some(x => /did not compile this topic: no Ollama model is set up for compilation/.test(x)));
+  assert.equal(none.staged.status, "partial");
+});
+
+test("the engine passes the strategy through, and the local strategy compiles a topic with no main-provider call", async () => {
+  const fs = new MemFS(), store = new Store(fs, "Tutor");
+  const settings: EngineSettings = { claudePath: "", chatModel: "fixture", compileModel: "fixture", utilityModel: "fixture", effort: "low", targetLevel: 4,
+    maxChatWords: 600, maxTopicWords: 2000, singlePassWords: 2, smartRouting: false, hardEffort: "high", compileStrategy: "local" };
+  const engine = new Engine(store, () => settings);
+  (engine as unknown as { call: Model }).call = noMainProvider;
+  engine.compilationLocal = localFrom();
+  const r = await engine.compile({ title: "Linear maps", goal: "", material, mode: "notes", fm: {} });
+  assert.deepEqual([r.status, r.agents, r.metrics?.strategy, r.metrics?.localRuns], ["complete", 0, "local", "local"]);
+  settings.compileStrategy = "main";
+  const local = localFrom();
+  engine.compilationLocal = local;
+  (engine as unknown as { call: Model }).call = fake();
+  const main = await engine.compile({ title: "Linear maps 2", goal: "", material, mode: "notes", fm: {} });
+  assert.deepEqual([main.metrics?.strategy, local.requests.length, local.described], ["main", 0, 0]);
 });
 
 test("research is metered across follow-ups, reviews fetched evidence, and reuses completed pages", async () => {
@@ -219,7 +360,7 @@ test("a repeated compile reuses lesson and audit checkpoints and gives the same 
   assert.ok([...cache.data.keys()].some(k => /^synth-[a-f\d]{64}$/.test(k)) && [...cache.data.keys()].some(k => /^audit-[a-f\d]{64}$/.test(k)));
   const { n, call } = counted();
   const repeat = await run({ cache, call, progress: s => progress.push(s) });
-  assert.deepEqual(n, { plan: 0, review: 0, synth: 0, audit: 0 });
+  assert.deepEqual(n, { plan: 0, select: 0, review: 0, synth: 0, audit: 0 });
   assert.equal(repeat.calls, 0);
   assert.deepEqual([repeat.topicBody, repeat.questionsBody, repeat.staged.status], [first.topicBody, first.questionsBody, first.staged.status]);
   assert.deepEqual(repeat.staged.availability, first.staged.availability);
@@ -255,6 +396,86 @@ test("a different model identity does not reuse checkpoints", async () => {
   const bare = counted();
   await run({ cache, model: "other-fixture", call: bare.call });
   assert.deepEqual([bare.n.synth, bare.n.audit], [1, 1], "without a model key the model name is the identity");
+});
+
+test("Claude Code reports the concrete model in modelUsage; Codex reports none, so its configured identity is kept", () => {
+  // The shape of Claude Code 2.1.311's JSON result: per-model totals keyed by the model id the API was called with.
+  const result = { type: "result", is_error: false, result: "OK", total_cost_usd: 0.004, usage: { input_tokens: 3, output_tokens: 520 },
+    modelUsage: {
+      "claude-haiku-4-5-20251001": { inputTokens: 40, outputTokens: 8, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, webSearchRequests: 0, costUSD: 0.0001, contextWindow: 200000, maxOutputTokens: 64000 },
+      "claude-sonnet-4-5-20250929": { inputTokens: 3, outputTokens: 520, cacheReadInputTokens: 1000, cacheCreationInputTokens: 0, webSearchRequests: 0, costUSD: 0.004, contextWindow: 200000, maxOutputTokens: 64000 },
+    } };
+  assert.equal(answeringModel(result.modelUsage), "claude-sonnet-4-5-20250929", "the main reply writes most of the output");
+  assert.equal(answeringModel({ "us.anthropic.claude-sonnet-4-5-20250929-v1:0": { outputTokens: 4 } }), "us.anthropic.claude-sonnet-4-5-20250929-v1:0");
+  for (const none of [undefined, {}, [], "claude-sonnet", { "bad id\n": { outputTokens: 9 } }]) assert.equal(answeringModel(none), undefined);
+  const turn = new CodexTurn();
+  turn.read(JSON.stringify({ type: "thread.started", thread_id: "t1" }));
+  turn.read(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "OK" } }));
+  turn.read(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, cached_input_tokens: 0, output_tokens: 2 } }));
+  assert.equal(turn.result(0, "").model, undefined);
+  const base = { claudePath: "", chatModel: "sonnet", compileModel: "", utilityModel: "haiku" };
+  assert.deepEqual([modelIdentity(base, "chatModel"), modelIdentity(base, "compileModel"), modelIdentity({ ...base, modelProvider: "codex", codexCompileModel: " gpt-5 " }, "compileModel"), modelIdentity({ ...base, modelProvider: "codex" }, "chatModel")],
+    ["sonnet", "claude:default", "codex:gpt-5", "codex:default"]);
+});
+
+test("checkpoints record the concrete model that answered, and one from another concrete model is a miss", async () => {
+  const reporting = (model: string, call: Model = fake()): Model => async o => ({ ...(await call(o)), model });
+  const cache = memory();
+  const first = await run({ cache, modelKey: "sonnet", call: reporting("claude-sonnet-4-5-20250929") });
+  assert.deepEqual([entry(cache, "plan-").model, entry(cache, "synth-").model, entry(cache, "audit-").model], Array(3).fill("claude-sonnet-4-5-20250929"));
+  assert.equal(first.staged.metrics.mainModel, "claude-sonnet-4-5-20250929");
+  // A new session: nothing has reported a model yet, so the checkpoints' own identity is trusted.
+  const same = counted(reporting("claude-sonnet-4-5-20250929"));
+  await run({ cache, modelKey: "sonnet", call: same.call });
+  assert.deepEqual([same.n.plan, same.n.synth, same.n.audit], [0, 0, 0]);
+  // A chat turn this session reported that "sonnet" now means another model.
+  const moved = counted(reporting("claude-sonnet-5-20261101"));
+  const r = await run({ cache, modelKey: "sonnet", reportedModel: "claude-sonnet-5-20261101", call: moved.call });
+  assert.deepEqual([moved.n.plan, moved.n.synth, moved.n.audit], [1, 1, 1]);
+  assert.deepEqual([entry(cache, "synth-").model, r.staged.metrics.mainModel], ["claude-sonnet-5-20261101", "claude-sonnet-5-20261101"]);
+  assert.deepEqual([r.topicBody, r.staged.status], [first.topicBody, "complete"]);
+  // Within one compile: the first call that reports a new model makes the later checkpoints miss.
+  const groupsCache = memory();
+  await run({ cache: groupsCache, material: twoGroups, call: reporting("model-a") });
+  groupsCache.data.delete([...groupsCache.data.keys()].find(k => k.startsWith("audit-"))!);
+  const later = counted(reporting("model-b"));
+  const r2 = await run({ cache: groupsCache, material: twoGroups, call: later.call });
+  assert.deepEqual([later.n.plan, later.n.synth, later.n.audit], [0, 1, 2], "group 1's audit reports model-b, so group 2's model-a checkpoints are recomputed");
+  assert.ok(r2.staged.issues.includes("The main provider now answers fixture with model-b, not model-a; checkpoints saved from model-a are recomputed."));
+});
+
+test("checkpoints saved before model identities were recorded stay readable and miss once", async () => {
+  const cache = memory();
+  const first = await run({ cache, singlePassWords: 2, local: localFrom() });
+  // Entries as earlier versions wrote them: the bare reply, with no model identity.
+  for (const [k, v] of cache.data) if (/^(plan|select|synth|audit)-/.test(k)) cache.data.set(k, (v as { value: unknown }).value);
+  const local = localFrom(), once = counted();
+  const r = await run({ cache, singlePassWords: 2, local, call: once.call });
+  assert.deepEqual([once.n.plan, local.n.select, once.n.synth, once.n.audit], [1, 1, 1, 1]);
+  assert.deepEqual([r.topicBody, r.questionsBody], [first.topicBody, first.questionsBody]);
+  const local2 = localFrom(), twice = counted();
+  await run({ cache, singlePassWords: 2, local: local2, call: twice.call });
+  assert.deepEqual([twice.n.plan, local2.n.select, twice.n.synth, twice.n.audit], [0, 0, 0, 0]);
+});
+
+test("a stage version bump invalidates that stage's checkpoints", async () => {
+  const cache = memory();
+  const sent: Partial<Record<Stage, { system: string; schema: any; input: unknown }>> = {};
+  const base = fake();
+  await run({ cache, call: o => { sent[stageOf(o.system)] = { system: o.system, schema: o.jsonSchema, input: JSON.parse(o.input) }; return base(o); } });
+  for (const stage of ["synth", "audit"] as const) {
+    const { system, schema, input } = sent[stage]!;
+    const key = checkpointKey(stage, STAGE_VERSIONS[stage], "fixture", system, schema, input);
+    assert.ok(cache.data.has(key), `the ${stage} checkpoint is keyed by its stage version`);
+    assert.notEqual(checkpointKey(stage, `${STAGE_VERSIONS[stage]}-next`, "fixture", system, schema, input), key);
+    // The cache as the previous version of this stage left it: the same reply under that version's key.
+    cache.data.set(checkpointKey(stage, `${STAGE_VERSIONS[stage]}-previous`, "fixture", system, schema, input), cache.data.get(key));
+    cache.data.delete(key);
+    const rerun = counted();
+    await run({ cache, call: rerun.call });
+    assert.deepEqual([rerun.n.plan, rerun.n.synth, rerun.n.audit], stage === "synth" ? [0, 1, 0] : [0, 0, 1], `only the ${stage} stage reruns`);
+    assert.ok(cache.data.has(key));
+  }
 });
 
 test("a rerun after cancelling in lesson group 2 reuses group 1", async () => {

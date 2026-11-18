@@ -10,11 +10,12 @@
 //   4. the module's own validation passes (its maths, physics, reachability);
 //   5. the objective and question correspond to the source, and the hint does not give the answer.
 // A failure gets one repair attempt with the problems listed. A second failure is an invalid
-// record, saved so the same input is not tried again. Nothing here ever calls Claude.
+// record, saved so the same input is not tried again. Nothing here ever calls Claude, and a model
+// that Ollama runs in the cloud, or that is not proven to run here, is refused before any call.
 // Pure apart from the injected model and registry; no Obsidian imports.
 
 import { Schema, stringsIn, validateJson } from "./jsonschema";
-import { LocalModel, LocalModelError, LocalTiming } from "./ollama";
+import { LocalModel, LocalModelError, LocalTiming, locateLocal } from "./ollama";
 import { terms } from "./presentation";
 import { AssetDescriptor, GenerationResult, JsonObject, MissingCapability, ModuleDescriptor, ModuleRegistry, PresentationKind, PresentationRequest, SourceRef, VisualLesson, toValidationErrors } from "./visualcontract";
 import { contentHash } from "./formats";
@@ -310,6 +311,13 @@ export async function configureActivity(p: ConfigureInput): Promise<ActivityReco
   if (!d) return base({ status: "unsupported", reason: `No module can show this as a ${p.request.kind} yet.`, missingCapability: missing("") });
   if (!d.assessmentIds.length) return base({ status: "invalid", reason: `${d.id} declares no assessment, so it cannot be used for a lesson.`, validationErrors: ["descriptor has no assessmentIds"] });
   if (!p.model) return base({ status: "invalid", reason: "Local configuration is switched off, and there is no saved activity for this.", validationErrors: ["no local model"], transient: true });
+  // Configuration is offered as running on this computer, so a model that is not proven local is
+  // refused: an Ollama cloud model would send the note excerpt to ollama.com.
+  const where = await locateLocal(p.model);
+  if (where.runs !== "local") {
+    const reason = where.runs === "cloud" ? `${where.detail}, so local configuration does not use it. Choose a model that runs on this computer.` : `Local configuration did not run: ${where.detail}.`;
+    return base({ status: "invalid", reason, validationErrors: [`local model: ${where.runs === "cloud" ? "cloud inference" : "not proven local"}`], transient: true });
+  }
 
   const assets = assetsFor(d, p.assets);
   const schema = generationSchema(d, assets);

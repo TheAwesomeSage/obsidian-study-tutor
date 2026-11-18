@@ -3,7 +3,7 @@
 // engine has a method of the same name that calls it. No Obsidian imports.
 
 import { ClaudeError, zeroUsage } from "./claude";
-import { modelFor, providerFor } from "./model-provider";
+import { compileStrategyFor, modelFor, modelIdentity, reportedModel } from "./model-provider";
 import { Frontmatter, contentHash, fmList, fmStr, parseCompileOutput, parseQuestions, parseTopic, splitFrontmatter } from "./formats";
 import { CoursePackage, linkName, buildPackage, coverageLine, mergeRefresh, sourceChanges, subskillSections, withStagedCoverage } from "./coursepkg";
 import { checkCompilation, compileCourse, CompileCancelled, type ExpansionRequest as CompileExpansionRequest, type StagedCourse } from "./compiler";
@@ -19,12 +19,13 @@ export async function compile(eng: Engine, req: CompileRequest, onProgress: (msg
   const model = modelFor(s, "compileModel");
   checkCompilation(req.signal);
   const subjects = await eng.store.subjectNames();
+  const modelKey = modelIdentity(s, "compileModel"), strategy = compileStrategyFor(s);
   const candidate = await compileCourse({
-    // Checkpoint identity of the answering model. Claude keeps the bare model name that earlier plan
-    // checkpoints were keyed by, so they stay valid; an empty model is the CLI default, named as such.
-    ...req, model, modelKey: providerFor(s) === "codex" ? `codex:${model || "default"}` : model || "claude:default",
+    // Checkpoints are keyed by the configured identity and checked against the concrete model the
+    // provider last reported for it, by any call this session (a chat turn included).
+    ...req, model, modelKey, reportedModel: reportedModel(modelKey), strategy,
     subjects, skill: await eng.store.skill("compile.md"), singlePassWords: s.singlePassWords,
-    limits: s.researchLimits, progress: onProgress, provider: eng.researchProvider, local: eng.compilationLocal,
+    limits: s.researchLimits, progress: onProgress, provider: eng.researchProvider, local: strategy === "main" ? null : eng.compilationLocal,
     cache: { read: key => eng.store.readCompileCache(key), write: (key, value) => eng.store.writeCompileCache(key, value) },
     call: o => eng.call(o, s),
   });
@@ -155,6 +156,8 @@ export async function refresh(eng: Engine, req: CompileRequest & { existingDir: 
   const sameScope = pkg.mode === req.mode && pkg.research === !!req.research && fmStr(topic.fm, "goal") === req.goal.trim();
   if (sameScope && !ch.changed.length && !ch.removed.length && !ch.added.length && (!pkg.staged || pkg.staged.status === "complete")) return { dir, subskills: topic.subskills.length, questions: questions.length, usage: zeroUsage(), agents: 0, coverage: coverageLine(pkg), complete: pkg.coverage.complete, status: pkg.staged?.status, refresh: "unchanged", subskillsRefreshed: [], why: "no source note has changed since the last compile" };
   if (!sameScope) return full("the compilation scope changed");
+  // The partial refresh is one main-provider call, which the local strategy never makes.
+  if (compileStrategyFor(s) === "local") return full("the local compile strategy rebuilds the topic on the local model");
   if (pkg.staged || req.research || req.mode === "spec") return full("the objective inventory and source references need to be checked together");
   if (ch.added.length) return full(`new notes (${ch.added.slice(0, 3).join(", ")}) need a full compile to place them`);
   if (!ch.subskills.length) return full("the changed notes are not cited by any subskill");
