@@ -3,7 +3,7 @@
 // else is one click further away.
 
 import { Notice, setIcon } from "obsidian";
-import { ago, recommend } from "./overview";
+import { ago, recommend, workloadForecast, workloadLine } from "./overview";
 import { ACTION_LABEL, Action } from "./policy";
 import type { Screen, TutorView } from "./view";
 import { button, chip, confirmAction, emptyState, iconButton, modeInfo, panel, progressBar, stampLabel } from "./ui";
@@ -108,6 +108,8 @@ export class HomeScreen implements Screen {
     tile("layers", "Review", due ? "Flashcards are due" : "Flashcards, no tokens", () => v.go("review"), due ? String(due) : "");
     tile("message-circle", "Ask", "Direct answers from your notes", () => void v.startStudy({ mode: "expert" }));
     tile("git-fork", "Knowledge graph", "Concepts and how they connect", () => v.go("graph"));
+    const work = workloadForecast(v.overview.map((t) => t.state), v.today, { countCards: !v.plugin.usesSr() });
+    ways.createDiv({ cls: "st-meta st-forecast", text: workloadLine(work), attr: { title: work.days.map((d) => `${d.day}: ${d.cards + d.checks} (${d.minutes} min)`).join("\n") } });
 
     // ----- topics and recent sessions -----
     const cols = page.createDiv({ cls: "st-cols" });

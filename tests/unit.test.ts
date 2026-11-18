@@ -12,6 +12,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { MemFS } from "./memfs";
+import * as Sch from "../src/scheduler";
+import { workloadForecast, workloadLine } from "../src/overview";
+import type { Attempt } from "../src/evidence";
 
 const COMPILED = `# Linear maps
 subject: linear-algebra
@@ -642,4 +645,262 @@ test("Codex final events produce sanitized structured output and account for cac
   assert.deepEqual(result.usage, { input: 65, cacheRead: 25, cacheWrite: 10, output: 20, costUsd: 0, calls: 1 });
   assert.throws(() => turn.read(JSON.stringify({ type: "item.started", item: { type: "command_execution" } })), /tool outside the tutor/);
   assert.throws(() => new CodexTurn().result(1, "Sign in"), /Sign in/);
+});
+
+// ---------- card scheduling (scheduler.ts) ----------
+
+/** Study Tutor's schedule() as it was up to 0.9, kept here as the reference SM-2 must match. */
+function sm2Before(prev: F.CardSched | undefined, grade: F.Grade, today: string): F.CardSched {
+  const c: F.CardSched = prev ? { ...prev } : { due: today, interval: 0, ease: 2.5, reps: 0, lapses: 0 };
+  if (grade === "again") {
+    c.reps = 0;
+    c.lapses += 1;
+    c.interval = 0;
+    c.ease = Math.max(1.3, c.ease - 0.2);
+  } else {
+    if (grade === "hard") {
+      c.interval = Math.max(1, Math.round(c.interval * 1.2));
+      c.ease = Math.max(1.3, c.ease - 0.15);
+    } else if (grade === "good") {
+      c.interval = c.reps === 0 ? 1 : c.reps === 1 ? 3 : Math.max(c.interval + 1, Math.round(c.interval * c.ease));
+    } else {
+      c.interval = c.reps === 0 ? 3 : Math.max(c.interval + 2, Math.round(c.interval * c.ease * 1.3));
+      c.ease = c.ease + 0.15;
+    }
+    c.reps += 1;
+  }
+  c.ease = Math.round(c.ease * 100) / 100;
+  c.due = F.addDays(today, c.interval);
+  return c;
+}
+const sm2Fields = (c: F.CardSched): F.CardSched => ({ due: c.due, interval: c.interval, ease: c.ease, reps: c.reps, lapses: c.lapses });
+const FSRS_09: Sch.SchedulerRecord = { id: "fsrs", version: 6, retention: 0.9, switches: [] };
+const GRADES: F.Grade[] = ["again", "hard", "good", "easy"];
+
+test("SM-2 behind the scheduler boundary schedules exactly as before", () => {
+  const cases: [F.CardSched | undefined, F.Grade, string][] = [
+    [undefined, "again", "2026-11-12"],
+    [undefined, "hard", "2026-11-12"],
+    [undefined, "good", "2026-11-12"],
+    [undefined, "easy", "2026-12-31"],
+    [{ due: "2026-11-10", interval: 1, ease: 2.5, reps: 1, lapses: 0 }, "good", "2026-11-12"],
+    [{ due: "2026-11-10", interval: 3, ease: 2.5, reps: 2, lapses: 0 }, "easy", "2026-11-12"],
+    [{ due: "2026-11-10", interval: 8, ease: 1.3, reps: 3, lapses: 1 }, "hard", "2026-11-12"],
+    [{ due: "2026-11-10", interval: 20, ease: 2.15, reps: 5, lapses: 2 }, "again", "2026-11-12"],
+    [{ due: "2026-11-12", interval: 0, ease: 1.5, reps: 0, lapses: 3 }, "good", "2026-11-12"],
+    [{ due: "2027-02-27", interval: 400, ease: 2.9, reps: 9, lapses: 0 }, "good", "2027-03-01"],
+  ];
+  for (const [prev, g, day] of cases) assert.deepEqual(sm2Fields(F.schedule(prev, g, day)), sm2Before(prev, g, day), `${JSON.stringify(prev)} ${g}`);
+  // Long random histories, reviewed early, on time and late, step for step.
+  let seed = 7;
+  const rand = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  for (let card = 0; card < 40; card++) {
+    let a: F.CardSched | undefined;
+    let b: F.CardSched | undefined;
+    let day = "2026-01-01";
+    for (let i = 0; i < 40; i++) {
+      const g = GRADES[Math.floor(rand() * 4)];
+      a = F.schedule(a, g, day);
+      b = sm2Before(b, g, day);
+      assert.deepEqual(sm2Fields(a), b);
+      const late = Math.floor(rand() * 4);
+      day = F.addDays(a.due, a.interval > 2 && rand() < 0.2 ? -1 : late);
+    }
+    assert.equal(a!.log!.length, Sch.REVIEW_LOG_MAX, "the log is bounded");
+    assert.ok(a!.logFrom, "older reviews are folded into the SM-2 state before the log");
+    assert.deepEqual(sm2Fields(Sch.SM2.rebuild(a!)), sm2Fields(a!), "replaying the log reproduces the SM-2 fields");
+  }
+});
+
+test("FSRS-6 matches the published default parameters and hand-checked values", () => {
+  const W = Sch.FSRS6_DEFAULT_W;
+  assert.equal(W.length, 21);
+  assert.deepEqual([W[0], W[1], W[2], W[3], W[20]], [0.212, 1.2931, 2.3065, 8.2956, 0.1542]);
+  // A first review starts at stability w0..w3 and difficulty w4 - e^(w5 (G-1)) + 1.
+  GRADES.forEach((g, i) => assert.equal(Sch.fsrsStep(undefined, g, "2026-01-01").s, W[i]));
+  const good = Sch.fsrsStep(undefined, "good", "2026-01-01");
+  assert.ok(Math.abs(good.d - (6.4133 - Math.exp(0.8334 * 2) + 1)) < 1e-4 && Math.abs(good.d - 2.1181) < 1e-4);
+  assert.equal(Sch.fsrsStep(undefined, "again", "2026-01-01").d, 6.4133);
+  assert.equal(Sch.fsrsStep(undefined, "easy", "2026-01-01").d, 1, "an easy first review clamps difficulty at 1");
+  // The forgetting curve is 90% after S days, so at retention 0.9 the interval is the stability.
+  assert.ok(Math.abs(Sch.retrievability(10, 10) - 0.9) < 1e-12);
+  assert.equal(Sch.fsrsInterval(10, 0.9), 10);
+  // At 0.8: 10 / f * (0.8^(1/-0.1542) - 1) with f = 0.9^(1/-0.1542) - 1, which is 33.16 days.
+  assert.equal(Sch.fsrsInterval(10, 0.8), 33);
+  assert.equal(Sch.fsrsInterval(10, 0.95), 4);
+  const first = F.schedule(undefined, "good", "2026-01-01", FSRS_09);
+  assert.deepEqual([first.due, first.fsrs], ["2026-01-03", { s: 2.3065, d: 2.1181, last: "2026-01-01" }], "first good: 2 days at retention 0.9");
+  assert.equal(F.schedule(undefined, "again", "2026-01-01", FSRS_09).due, "2026-01-01", "a lapse is relearned the same day");
+  assert.deepEqual(Sch.sm2State(first), sm2Before(undefined, "good", "2026-01-01"), "SM-2 is kept up to date alongside, its own due day included");
+  // Second review two days later, by hand: R = (1 + f*2/2.3065)^-0.1542 = 0.9095, and
+  // S' = S (1 + e^w8 (11 - D) S^-w9 (e^(w10 (1 - R)) - 1)) = 10.964.
+  const second = F.schedule(first, "good", "2026-01-03", FSRS_09);
+  assert.ok(Math.abs(second.fsrs!.s - 10.964) < 0.002, String(second.fsrs!.s));
+  assert.equal(second.due, "2026-01-14");
+  // A lapse after two days: the smaller of the long-term and short-term forgetting stabilities.
+  assert.ok(Math.abs(F.schedule(first, "again", "2026-01-03", FSRS_09).fsrs!.s - 0.6076) < 0.001);
+  // The same day again: FSRS-6 short-term stability, which a pass cannot lower.
+  const sameDay = F.schedule(first, "good", "2026-01-01", FSRS_09);
+  assert.equal(sameDay.fsrs!.s, 2.3065);
+  assert.ok(F.schedule(F.schedule(undefined, "again", "2026-01-01", FSRS_09), "good", "2026-01-01", FSRS_09).fsrs!.s > 0.212, "relearning on the day raises stability");
+});
+
+test("switching to FSRS replays the log; a card without one starts from its SM-2 interval and ease", () => {
+  const plan: [string, F.Grade][] = [["2026-01-01", "good"], ["2026-01-02", "good"], ["2026-01-05", "hard"], ["2026-01-13", "again"], ["2026-01-13", "good"], ["2026-02-10", "easy"]];
+  let sm2: F.CardSched | undefined;
+  let live: F.CardSched | undefined;
+  for (const [day, g] of plan) {
+    sm2 = F.schedule(sm2, g, day);
+    live = F.schedule(live, g, day, FSRS_09);
+  }
+  assert.equal(sm2!.fsrs, undefined);
+  assert.deepEqual(sm2!.log!.map((e) => e.grade), plan.map((p) => p[1]));
+  const st: { cards: Record<string, F.CardSched>; scheduler?: Sch.SchedulerRecord } = { cards: { Q1: sm2! } };
+  assert.equal(Sch.syncScheduler(st, { id: "fsrs", retention: 0.9 }, "2026-02-11"), true);
+  assert.deepEqual(st.cards.Q1, live, "a replayed card is the card FSRS would have scheduled from the start");
+  assert.deepEqual(st.scheduler, { id: "fsrs", version: 6, retention: 0.9, switches: [{ at: "2026-02-11", from: "sm2@1", to: "fsrs@6:0.9", cards: 1 }] });
+  assert.deepEqual(Sch.fsrsScheduler(0.9).rebuild(live!), live, "stepping and replaying agree");
+  assert.equal(Sch.syncScheduler(st, { id: "fsrs", retention: 0.9 }, "2026-02-12"), false, "nothing to do when already on the choice");
+
+  // Cards from before review logs: S is the SM-2 interval and D is solved from the ease.
+  const legacy: { cards: Record<string, F.CardSched>; scheduler?: Sch.SchedulerRecord } = { cards: { A: { due: "2026-11-20", interval: 10, ease: 2.5, reps: 3, lapses: 0 }, B: { due: "2026-11-15", interval: 0, ease: 2.3, reps: 0, lapses: 1 } } };
+  Sch.syncScheduler(legacy, { id: "fsrs", retention: 0.9 }, "2026-11-15");
+  const W = Sch.FSRS6_DEFAULT_W;
+  const d = 11 - 1.5 / (Math.exp(W[8]) * 10 ** -W[9] * (Math.exp(0.1 * W[10]) - 1));
+  assert.equal(legacy.cards.A.fsrs!.s, 10);
+  assert.ok(Math.abs(legacy.cards.A.fsrs!.d - d) < 1e-4 && Math.abs(d - 6.914) < 0.001);
+  assert.equal(legacy.cards.A.fsrs!.last, "2026-11-10", "the last review is the SM-2 due day less its interval");
+  assert.equal(legacy.cards.A.due, "2026-11-20", "at retention 0.9 a log-less card keeps its date");
+  assert.deepEqual([legacy.cards.B.fsrs!.s, legacy.cards.B.due], [W[0], "2026-11-15"], "a lapsed card takes the stability of a failed first review");
+  // A change of retention re-dates from the stored memory and is recorded.
+  Sch.syncScheduler(legacy, { id: "fsrs", retention: 0.8 }, "2026-11-16");
+  assert.equal(legacy.cards.A.due, F.addDays("2026-11-10", 33));
+  assert.equal(legacy.cards.A.fsrs!.s, 10);
+  assert.deepEqual(legacy.scheduler!.switches.map((x) => x.to), ["fsrs@6:0.9", "fsrs@6:0.8"]);
+  // Its first logged review starts the log from the SM-2 state it had.
+  const next = F.schedule(legacy.cards.A, "good", "2026-11-20", legacy.scheduler);
+  assert.deepEqual(next.logFrom, { due: "2026-11-20", interval: 10, ease: 2.5, reps: 3, lapses: 0 });
+  assert.deepEqual(next.log, [{ day: "2026-11-20", grade: "good" }]);
+  assert.equal(next.interval, 25, "SM-2 carries on in parallel");
+});
+
+test("switching back to SM-2 restores its schedule exactly, and the state file keeps all of it", () => {
+  const plan: [string, F.Grade][] = [["2026-03-01", "good"], ["2026-03-02", "good"], ["2026-03-05", "again"], ["2026-03-05", "hard"], ["2026-03-07", "good"], ["2026-03-20", "good"], ["2026-03-20", "easy"], ["2026-04-30", "again"], ["2026-05-01", "good"], ["2026-05-04", "good"]];
+  let only: F.CardSched | undefined;
+  for (const [day, g] of plan) only = F.schedule(only, g, day);
+  const topic = F.parseTopic(F.parseCompileOutput(COMPILED).topicBody);
+  const s = F.newState(topic, 4);
+  plan.forEach(([day, g], i) => {
+    if (i === 3) Sch.syncScheduler(s, { id: "fsrs", retention: 0.85 }, day);
+    if (i === 8) {
+      // Mid-way on FSRS the state file round-trips the memory, the log and the record.
+      const back = F.parseState(F.serializeState(s, day));
+      assert.deepEqual(back.cards, s.cards);
+      assert.deepEqual(back.scheduler, s.scheduler);
+      assert.ok(s.cards.Q1.fsrs, "FSRS dates the card meanwhile");
+      Sch.syncScheduler(s, { id: "sm2", retention: 0.85 }, day);
+    }
+    s.cards.Q1 = F.schedule(s.cards.Q1, g, day, s.scheduler);
+  });
+  assert.deepEqual(s.cards.Q1, only, "same SM-2 fields, dates and log as if SM-2 had never been switched off");
+  assert.deepEqual(s.scheduler!.switches.map((x) => [x.from, x.to]), [["sm2@1", "fsrs@6:0.85"], ["fsrs@6:0.85", "sm2@1"]]);
+  assert.equal(Sch.schedulerRef(s.scheduler), "sm2@1");
+});
+
+test("an old state file loads unchanged; a change of scheduler is applied, saved and recorded as it loads", async () => {
+  const fs = new MemFS();
+  const store = new Store(fs, "Tutor", () => "2026-11-12");
+  const out = F.parseCompileOutput(COMPILED);
+  const dir = await store.saveCompiled({ title: "Linear maps", fm: {}, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
+  const old = F.withFrontmatter({ tutor: "state", topic: "Linear maps", target: 4, focus: 0, new_date: "2026-11-12", new_count: 0 }, ["## Skill map", "", "| # | Subskill | Level | Bank |", "| --- | --- | --- | --- |", "| 1 | Definition of a linear map | 3 | 2/2 |", "| 2 | Kernel and image | - | 0/0 |", "", "## Review schedule", "", "| Card | Due | Interval | Ease | Reps | Lapses |", "| --- | --- | --- | --- | --- | --- |", "| Q1 | 2026-11-20 | 10 | 2.5 | 3 | 0 |", "| Q2 | 2026-11-12 | 0 | 2.3 | 0 | 1 |", ""].join("\n"));
+  fs.files.set(`${dir}/state.md`, old);
+  store.scheduler = () => ({ id: "sm2", retention: 0.9 });
+  const s = await store.loadState(dir, 4);
+  assert.equal(fs.files.get(`${dir}/state.md`), old, "nothing is rewritten");
+  assert.deepEqual(s.cards, { Q1: { due: "2026-11-20", interval: 10, ease: 2.5, reps: 3, lapses: 0 }, Q2: { due: "2026-11-12", interval: 0, ease: 2.3, reps: 0, lapses: 1 } });
+  assert.equal(s.scheduler, undefined);
+  store.scheduler = () => ({ id: "fsrs", retention: 0.9 });
+  const f = await store.loadState(dir, 4);
+  assert.equal(Sch.schedulerRef(f.scheduler), "fsrs@6:0.9");
+  assert.ok(f.cards.Q1.fsrs && f.cards.Q2.fsrs);
+  const saved = F.parseState(fs.files.get(`${dir}/state.md`)!);
+  assert.deepEqual([saved.cards, saved.scheduler], [f.cards, f.scheduler], "the switch was saved");
+  assert.equal(await store.schedulerRecord(dir).then((r) => r?.switches.length), 1);
+  store.scheduler = () => ({ id: "sm2", retention: 0.9 });
+  const back = await store.loadState(dir, 4);
+  assert.deepEqual(back.cards, s.cards, "rollback restores the SM-2 schedule exactly");
+  // A recompile that keeps cards keeps the record of the scheduler their dates came from.
+  await store.saveCompiled({ title: "Linear maps", fm: {}, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4, existingDir: dir, keepCards: ["Q1"] });
+  const rec = await store.schedulerRecord(dir);
+  assert.deepEqual([rec?.id, rec?.switches.length], ["sm2", 2]);
+});
+
+test("one owner schedules flashcards", () => {
+  const table: [boolean, boolean, Sch.ScheduleOwner][] = [
+    [true, true, "spaced-repetition"],
+    [true, false, "study-tutor"],
+    [false, true, "study-tutor"],
+    [false, false, "study-tutor"],
+  ];
+  for (const [handOff, enabled, owner] of table) {
+    assert.equal(Sch.scheduleOwner(handOff, enabled), owner, `setting ${handOff}, plugin ${enabled}`);
+    assert.equal(Sch.tutorSchedules(Sch.scheduleOwner(handOff, enabled)), owner === "study-tutor");
+    assert.equal(Sch.tutorSchedules({ externalFlashcards: owner === "spaced-repetition" }), owner === "study-tutor", "engine settings carry the same decision");
+  }
+  assert.equal(Sch.tutorSchedules({}), true);
+});
+
+test("the workload forecast counts cards and delayed checks per day, with minutes from answer times", () => {
+  const topic = F.parseTopic(F.parseCompileOutput(COMPILED).topicBody);
+  const s = F.newState(topic, 4);
+  const card = (due: string): F.CardSched => ({ due, interval: 3, ease: 2.5, reps: 2, lapses: 0 });
+  s.cards = { A: card("2026-11-01"), B: card("2026-11-12"), C: card("2026-11-15"), D: card("2026-12-30") };
+  const attempt = (id: string, skill: number, result: "correct" | "incorrect", timestamp: string, seconds: number | null): Attempt => ({ id, v: 2, skill, concept: "", questionId: id, question: "q", answer: "a", activity: "independent-practice", mode: "auto", difficulty: null, result, errorType: "", note: "", confidence: null, assisted: false, assistance: [], answerExposed: false, transfer: false, seconds, timestamp, grading: "deterministic", verification: "verified", assumptions: "" });
+  // An unaided success today puts the first delayed check on subskill 1 tomorrow.
+  s.attempts = [attempt("a1", 1, "correct", "2026-11-12T10:00:00.000Z", null)];
+  let w = workloadForecast([s], "2026-11-12");
+  assert.equal(w.days.length, 14);
+  assert.deepEqual([w.days[0].day, w.days[13].day], ["2026-11-12", "2026-11-25"]);
+  assert.deepEqual(w.days.map((d) => d.cards), [2, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "overdue cards count today; later than 14 days is left out");
+  assert.deepEqual(w.days.map((d) => d.checks), [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  assert.deepEqual([w.fallback, w.secondsPerItem, w.days[0].minutes, w.days[1].minutes], [true, Sch.DEFAULT_SECONDS_PER_ITEM, 2, 1]);
+  assert.match(workloadLine(w), /^Today: 2 cards, 0 checks, about 2 min\. Next 14 days: 3 cards, 1 check, about 4 min \(60 s an item until 5 answers are timed\)\.$/);
+  // With enough timed answers the median is used.
+  for (const [i, sec] of [20, 30, 40, 50, 300].entries()) s.attempts.push(attempt(`b${i}`, 2, "incorrect", `2026-11-0${i + 1}T10:00:00.000Z`, sec));
+  w = workloadForecast([s], "2026-11-12");
+  assert.deepEqual([w.fallback, w.secondsPerItem, w.timed], [false, 40, 5]);
+  assert.match(workloadLine(w), /40 s an item, the median of 5 timed answers/);
+  // When Spaced Repetition keeps the schedule, its cards are not counted here.
+  w = workloadForecast([s], "2026-11-12", { countCards: false });
+  assert.equal(w.days.reduce((a, d) => a + d.cards, 0), 0);
+  assert.match(workloadLine(w), /^Today: 0 checks[\s\S]*Cards are scheduled by Spaced Repetition\.$/);
+  assert.deepEqual(Sch.secondsPerItem([10, 20, 30, 40, 50, 60].map((seconds, i) => ({ seconds, timestamp: String(i) }))), { seconds: 35, timed: 6, fallback: false });
+});
+
+test("a timed mixed session takes the most overdue cards that fit and keeps subskills apart", () => {
+  const today = "2026-11-12";
+  const item = (id: string, group: string, due: string, last: string, seconds = 60): Sch.MixItem => ({ id, group, due, last, seconds });
+  const pool = [
+    item("A3", "A", "2026-11-12", "2026-11-02"),
+    item("B2", "B", "2026-11-11", "2026-11-01"),
+    item("A1", "A", "2026-11-02", "2026-11-01"),
+    item("C1", "C", "2026-11-12", "2026-11-11"),
+    item("N1", "C", "2026-11-20", "2026-11-10"),
+    item("B1", "B", "2026-11-08", "2026-11-04"),
+    item("A2", "A", "2026-11-10", "2026-11-05"),
+  ];
+  assert.equal(Sch.overdueRatio(pool[2], today), 11);
+  const ids = (xs: Sch.MixItem[]) => xs.map((x) => x.id);
+  assert.deepEqual(ids(Sch.timedMix(pool, 10, today)), ["A1", "B1", "A2", "B2", "A3", "C1"], "due only, most overdue first, no subskill twice in a row");
+  assert.deepEqual(ids(Sch.timedMix(pool, 3, today)), ["A1", "B1", "A2"], "three one-minute items fit three minutes");
+  assert.deepEqual(ids(Sch.timedMix([item("L", "A", "2026-11-01", "2026-10-01", 400), item("S", "B", "2026-11-12", "2026-11-11", 120)], 5, today)), ["S"], "an item longer than the time left is skipped");
+  // Rank alone would put B2 and B3 together; an order with no repeat exists, so it is used.
+  const forced = [item("A1", "A", "2026-11-01", "2026-10-31"), item("A2", "A", "2026-11-02", "2026-11-01"), item("B1", "B", "2026-11-10", "2026-11-05"), item("B2", "B", "2026-11-11", "2026-11-05"), item("B3", "B", "2026-11-12", "2026-11-05")];
+  const mixed = Sch.timedMix(forced, 30, today);
+  assert.equal(mixed.length, 5);
+  assert.ok(mixed.every((x, i) => i === 0 || x.group !== mixed[i - 1].group), ids(mixed).join(" "));
+  // When a repeat cannot be avoided, there are as few as possible.
+  const stuck = Sch.timedMix([item("A1", "A", "2026-11-01", "2026-10-31"), item("A2", "A", "2026-11-02", "2026-11-01"), item("A3", "A", "2026-11-03", "2026-11-02"), item("B1", "B", "2026-11-04", "2026-11-03")], 30, today);
+  assert.equal(stuck.filter((x, i) => i > 0 && x.group === stuck[i - 1].group).length, 1);
+  assert.deepEqual(Sch.timedMix(pool, 0, today), []);
 });

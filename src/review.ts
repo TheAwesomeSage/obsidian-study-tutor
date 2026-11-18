@@ -7,7 +7,8 @@ import { Notice } from "obsidian";
 import { addUsage, usageLine } from "./claude";
 import { applyAttempt } from "./engine";
 import { Attempt, Grading, recordAttempt } from "./evidence";
-import { Grade, Question, objectiveStamp, answerText, differentNumbers, mcqLetter, reviewQueue, sameShortAnswer, schedule } from "./formats";
+import { Grade, LearnerState, Question, objectiveStamp, answerText, differentNumbers, mcqLetter, reviewQueue, sameShortAnswer, schedule } from "./formats";
+import { MixItem, lastReview, secondsPerItem, timedMix, tutorSchedules } from "./scheduler";
 import type { Screen, TutorView } from "./view";
 import { button, chip, emptyState, progressBar } from "./ui";
 
@@ -20,9 +21,17 @@ interface Marking {
   exposed: boolean;
 }
 
+/** A card to review, and the topic folder its state lives in. */
+interface Item {
+  q: Question;
+  dir: string;
+}
+
 export class ReviewScreen implements Screen {
   private el: HTMLElement | null = null;
-  private queue: Question[] = [];
+  private queue: Item[] = [];
+  /** Set during a timed mixed session: due cards from every topic, interleaved to fit the minutes. */
+  private mixed: { minutes: number; seconds: number } | null = null;
   private requeued = new Set<string>();
   private reviewed = 0;
   private forDir: string | null = null;
@@ -46,19 +55,50 @@ export class ReviewScreen implements Screen {
   private async start(): Promise<void> {
     const v = this.view;
     this.queue = [];
+    this.mixed = null;
     this.requeued.clear();
     this.reviewed = 0;
     this.forDir = v.dir;
     if (!v.dir) return;
     await v.loadState();
-    const qs = await v.plugin.store.loadQuestions(v.dir);
-    if (v.state) this.queue = reviewQueue(qs, v.state, v.today, v.plugin.opts.newCardsPerDay);
+    const dir = v.dir;
+    const qs = await v.plugin.store.loadQuestions(dir);
+    if (v.state) this.queue = reviewQueue(qs, v.state, v.today, v.plugin.opts.newCardsPerDay).map((q) => ({ q, dir }));
   }
 
-  private async record(q: Question, grade: Grade, how: Marking): Promise<void> {
+  /** Due cards across every topic and subskill, most overdue first, interleaved and cut to the minutes chosen on Home. */
+  private async startMixed(): Promise<void> {
     const v = this.view;
-    if (!v.dir || !v.state) return;
-    const s = v.state;
+    const minutes = v.plugin.opts.minutes;
+    const per = secondsPerItem(v.overview.flatMap((t) => t.state.attempts));
+    const pool: (Item & MixItem)[] = [];
+    for (const t of v.overview) {
+      const s = this.stateFor(t.dir);
+      if (!s) continue;
+      const qs = await v.plugin.store.loadQuestions(t.dir).catch(() => [] as Question[]);
+      for (const q of qs) {
+        const c = s.cards[q.id];
+        if (c && c.due <= v.today) pool.push({ q, dir: t.dir, id: `${t.dir}::${q.id}`, group: `${t.dir}#${q.subskill}`, due: c.due, last: lastReview(c), seconds: per.seconds });
+      }
+    }
+    this.queue = timedMix(pool, minutes, v.today);
+    this.requeued.clear();
+    this.reviewed = 0;
+    this.mixed = { minutes, seconds: per.seconds };
+    this.render();
+  }
+
+  private stateFor(dir: string): LearnerState | null {
+    const v = this.view;
+    return dir === v.dir ? v.state : v.overview.find((t) => t.dir === dir)?.state ?? null;
+  }
+
+  private async record(item: Item, grade: Grade, how: Marking): Promise<void> {
+    const v = this.view;
+    const { q, dir } = item;
+    const s = this.stateFor(dir);
+    if (!s) return;
+    const key = `${dir}::${q.id}`;
     const now = new Date();
     const isNew = !s.cards[q.id];
     const seconds = this.shownAt ? Math.round((now.getTime() - this.shownAt) / 1000) : null;
@@ -89,7 +129,7 @@ export class ReviewScreen implements Screen {
       ...objectiveStamp(s, q.subskill),
     };
     s.attempts = recordAttempt(s.attempts, attempt);
-    s.cards[q.id] = schedule(s.cards[q.id], grade, v.today);
+    if (tutorSchedules(v.plugin.scheduleOwner())) s.cards[q.id] = schedule(s.cards[q.id], grade, v.today, s.scheduler);
     if (isNew) {
       if (s.newDate !== v.today) {
         s.newDate = v.today;
@@ -97,7 +137,7 @@ export class ReviewScreen implements Screen {
       }
       s.newCount += 1;
     }
-    if (!this.requeued.has(q.id)) {
+    if (!this.requeued.has(key)) {
       const b = s.bank[q.subskill] ?? (s.bank[q.subskill] = { right: 0, total: 0 });
       if (q.subskill in s.names) {
         b.total += 1;
@@ -106,15 +146,15 @@ export class ReviewScreen implements Screen {
     }
     // A self-rating schedules the card and nothing more. A marked answer is evidence.
     const changes = applyAttempt(s, attempt);
-    await v.plugin.store.saveState(v.dir, s);
+    await v.plugin.store.saveState(dir, s);
     if (changes.length) new Notice(`Progress updated: ${changes.join("; ")}`, 5000);
     this.queue.shift();
     this.reviewed += 1;
-    if (grade === "again" && !this.requeued.has(q.id)) {
-      this.requeued.add(q.id);
-      this.queue.push(q);
+    if (grade === "again" && !this.requeued.has(key)) {
+      this.requeued.add(key);
+      this.queue.push(item);
     }
-    await v.stateChanged(s);
+    await v.stateChanged(dir === v.dir ? s : v.state ?? undefined);
     this.render();
   }
 
@@ -153,19 +193,25 @@ export class ReviewScreen implements Screen {
     const page = el.createDiv({ cls: "st-page st-review" });
     const head = page.createDiv({ cls: "st-page-head" });
     button(head, { label: "Home", icon: "arrow-left", tone: "ghost", onClick: () => v.go("home") });
-    head.createEl("h2", { cls: "st-page-title", text: `Review · ${v.topic?.title ?? ""}` });
+    head.createEl("h2", { cls: "st-page-title", text: `Review · ${this.mixed ? "all topics" : v.topic?.title ?? ""}` });
     if (v.plugin.usesSr()) return this.renderSr(page);
+    const mixed = this.mixed;
+    const minutes = v.plugin.opts.minutes;
+    button(page.createDiv({ cls: "st-actions st-review-mode" }), mixed ? { label: "This topic only", icon: "layers", tone: "ghost", onClick: () => void this.refresh() } : { label: `Timed mixed · ${minutes} min`, icon: "shuffle", tone: "ghost", title: `Due cards from every topic, mixed across subskills, to fit ${minutes} minutes`, onClick: () => void this.startMixed() });
 
-    const q = this.queue[0];
-    if (!q || !v.state) {
-      const done = emptyState(page, { icon: "check", title: this.reviewed ? `Done. ${this.reviewed} card${this.reviewed === 1 ? "" : "s"} reviewed.` : "Nothing is due today", text: "Cards come from this topic's question bank. Due cards and a few new ones appear here each day, and reviewing them uses no tokens." });
+    const item = this.queue[0];
+    const state = item ? this.stateFor(item.dir) : null;
+    if (!item || !state) {
+      const done = emptyState(page, { icon: "check", title: this.reviewed ? `Done. ${this.reviewed} card${this.reviewed === 1 ? "" : "s"} reviewed.` : mixed ? "Nothing is due in any topic" : "Nothing is due today", text: mixed ? "A timed mixed session takes due cards from every topic, and none are due now." : "Cards come from this topic's question bank. Due cards and a few new ones appear here each day, and reviewing them uses no tokens." });
       button(done, { label: "Back to home", icon: "arrow-left", onClick: () => v.go("home") });
       return;
     }
+    const q = item.q;
     const total = this.reviewed + this.queue.length;
     const meta = page.createDiv({ cls: "st-row-top" });
-    meta.createSpan({ cls: "st-meta", text: `${this.queue.length} left` });
-    chip(meta, v.state.names[q.subskill] ?? "General");
+    meta.createSpan({ cls: "st-meta", text: mixed ? `${this.queue.length} left · timed mixed, about ${Math.ceil((this.queue.length * mixed.seconds) / 60)} of ${mixed.minutes} min` : `${this.queue.length} left` });
+    if (mixed && item.dir !== v.dir) chip(meta, v.overview.find((t) => t.dir === item.dir)?.title ?? "Topic");
+    chip(meta, state.names[q.subskill] ?? "General");
     progressBar(page, total ? Math.round((100 * this.reviewed) / total) : 0, "Review progress");
 
     const card = page.createDiv({ cls: "st-card st-question" });
@@ -182,12 +228,12 @@ export class ReviewScreen implements Screen {
       v.md(a.createDiv({ cls: "st-text" }), answerText(q) + (q.explanation ? `\n\n${q.explanation}` : ""));
       const row = area.createDiv({ cls: "st-actions st-grades" });
       if (auto) {
-        button(row, { label: "Next", icon: "arrow-right", tone: "primary", onClick: () => void this.record(q, auto, how) }).focus();
+        button(row, { label: "Next", icon: "arrow-right", tone: "primary", onClick: () => void this.record(item, auto, how) }).focus();
         return;
       }
       area.createDiv({ cls: "st-meta", text: "Rate yourself against the answer. A self-rating schedules the card; it does not count as evidence for a level." });
       for (const g of ["again", "hard", "good", "easy"] as Grade[]) {
-        button(row, { label: g[0].toUpperCase() + g.slice(1), tone: g === "good" ? "primary" : "secondary", cls: `st-grade is-${g}`, onClick: () => void this.record(q, g, { ...how, grading: "self", exposed: true, assumptions: "rated by the learner after seeing the answer" }) });
+        button(row, { label: g[0].toUpperCase() + g.slice(1), tone: g === "good" ? "primary" : "secondary", cls: `st-grade is-${g}`, onClick: () => void this.record(item, g, { ...how, grading: "self", exposed: true, assumptions: "rated by the learner after seeing the answer" }) });
       }
       if (how.answer.trim()) {
         const ask = button(area, { label: "Ask the model to grade what I typed (uses tokens)", icon: "sparkles", tone: "ghost" });
@@ -231,7 +277,7 @@ export class ReviewScreen implements Screen {
         // Another form of the same expression (1/2 for 0.5): SymPy can tell, with no model call.
         check.disabled = true;
         const sym = await v.plugin.engine.checkEquivalent(q.answer, typed).catch(() => null);
-        if (this.queue[0] !== q || !this.el) return;
+        if (this.queue[0] !== item || !this.el) return;
         if (sym && sym.equal !== null) return reveal(sym.equal ? "Correct. SymPy confirms your answer equals the expected one." : "Incorrect. SymPy finds your answer is not equal to the expected one.", { grading: sym.grading, assumptions: sym.assumptions, answer: typed, exposed: false }, sym.equal ? "good" : "again");
       }
       reveal(q.type === "short" && typed.trim() ? "That could not be checked automatically. Compare it with the answer and rate yourself." : "", { grading: "self", assumptions: "", answer: typed, exposed: true });

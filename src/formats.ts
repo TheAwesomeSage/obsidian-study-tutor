@@ -7,6 +7,7 @@ import type { CodeTask } from "./codetask";
 import { decodeSolution, parseCodeTask, renderCodeTask } from "./codequestions";
 import { examDay, readObjectiveLine, type ObjectiveExam } from "./objective-meta";
 export type { ObjectiveExam } from "./objective-meta";
+import { FsrsMemory, ReviewEntry, SchedulerRecord, Sm2State, formatLog, formatMemory, parseLog, parseMemory, parseSchedulerRecord, reviewCard } from "./scheduler";
 // Parsing and serialising of the plugin's markdown files. Pure functions, no Obsidian imports.
 
 export type Mode = "auto" | "tutor" | "teach" | "quiz" | "expert";
@@ -430,11 +431,19 @@ export const mcqLetter = (s: string): string => (/[A-Za-z]/.exec(s)?.[0] ?? "").
 // ---------- learner state ----------
 
 export interface CardSched {
+  /** The day the card is next due, set by the scheduler the state records (scheduler.ts). */
   due: string;
+  // SM-2's own state, kept up to date whichever scheduler is active, so going back to SM-2 loses nothing.
   interval: number;
   ease: number;
   reps: number;
   lapses: number;
+  /** FSRS memory state, while FSRS schedules the card. */
+  fsrs?: FsrsMemory;
+  /** The latest reviews, oldest first. Absent on cards not reviewed since 0.10. */
+  log?: ReviewEntry[];
+  /** The SM-2 state just before `log[0]`, when the log does not begin at the card's first review. */
+  logFrom?: Sm2State;
 }
 export interface LearnerState {
   /** Every marked answer, with how it was marked. Kept in evidence.md beside the state file. */
@@ -467,6 +476,8 @@ export interface LearnerState {
   /** Misconceptions as evidence-backed records, kept in evidence.md. Absent in states built before 0.9. */
   misconceptionRecords?: Misconception[];
   cards: Record<string, CardSched>;
+  /** The scheduler the card dates come from, and every switch. Absent: SM-2, as before 0.10. */
+  scheduler?: SchedulerRecord;
   newDate: string;
   newCount: number;
 }
@@ -562,6 +573,11 @@ export function serializeState(s: LearnerState, today: string): string {
   };
   // Links not yet moved into the course graph are written back, so a failed migration loses nothing.
   if (s.links?.length) fm.links = JSON.stringify(s.links);
+  if (s.scheduler) {
+    fm.scheduler = `${s.scheduler.id}@${s.scheduler.version}`;
+    if (s.scheduler.retention !== undefined) fm.retention = s.scheduler.retention;
+    if (s.scheduler.switches.length) fm.scheduler_switches = JSON.stringify(s.scheduler.switches);
+  }
   const cell = (t: string) => t.replace(/\|/g, "/");
   const lines = ["## Skill map", "", "| # | Subskill | Level | Bank |", "| --- | --- | --- | --- |"];
   for (const n of Object.keys(s.names).map(Number).sort((a, b) => a - b)) {
@@ -569,8 +585,8 @@ export function serializeState(s: LearnerState, today: string): string {
     lines.push(`| ${n} | ${cell(s.names[n])} | ${s.levels[n] ?? "-"} | ${b.right}/${b.total} |`);
   }
   lines.push("", "## Misconceptions", "", ...(s.misconceptions.length ? s.misconceptions.map((m) => `- ${m}`) : ["None recorded."]));
-  lines.push("", "## Review schedule", "", "| Card | Due | Interval | Ease | Reps | Lapses |", "| --- | --- | --- | --- | --- | --- |");
-  for (const [id, c] of Object.entries(s.cards)) lines.push(`| ${id} | ${c.due} | ${c.interval} | ${c.ease} | ${c.reps} | ${c.lapses} |`);
+  lines.push("", "## Review schedule", "", "| Card | Due | Interval | Ease | Reps | Lapses | FSRS | Log |", "| --- | --- | --- | --- | --- | --- | --- | --- |");
+  for (const [id, c] of Object.entries(s.cards)) lines.push(`| ${id} | ${c.due} | ${c.interval} | ${c.ease} | ${c.reps} | ${c.lapses} | ${formatMemory(c.fsrs)} | ${formatLog(c)} |`);
   return withFrontmatter(fm, lines.join("\n") + "\n");
 }
 
@@ -614,8 +630,14 @@ export function parseState(md: string): LearnerState {
   }
   for (const r of tableRows(section(body, "Review schedule"))) {
     if (!r[0] || !/^\d{4}-\d{2}-\d{2}$/.test(r[1] ?? "")) continue;
-    s.cards[r[0]] = { due: r[1], interval: Number(r[2]) || 0, ease: Number(r[3]) || 2.5, reps: Number(r[4]) || 0, lapses: Number(r[5]) || 0 };
+    // Files from before 0.10 have the first six columns only.
+    const c: CardSched = { due: r[1], interval: Number(r[2]) || 0, ease: Number(r[3]) || 2.5, reps: Number(r[4]) || 0, lapses: Number(r[5]) || 0 };
+    const mem = parseMemory(r[6] ?? "");
+    if (mem) c.fsrs = mem;
+    s.cards[r[0]] = { ...c, ...parseLog(r[7] ?? "") };
   }
+  const scheduler = parseSchedulerRecord(fmStr(fm, "scheduler"), fmNum(fm, "retention", NaN), fmStr(fm, "scheduler_switches"));
+  if (scheduler) s.scheduler = scheduler;
   return s;
 }
 
@@ -704,32 +726,16 @@ export function applyStateUpdate(s: LearnerState, u: StateUpdate, opts: { levels
   return changes;
 }
 
-// ---------- spaced repetition (SM-2 style) ----------
+// ---------- spaced repetition (scheduler.ts) ----------
 
 export type Grade = "again" | "hard" | "good" | "easy";
 
-export function schedule(prev: CardSched | undefined, grade: Grade, today: string): CardSched {
-  const c: CardSched = prev ? { ...prev } : { due: today, interval: 0, ease: 2.5, reps: 0, lapses: 0 };
-  if (grade === "again") {
-    c.reps = 0;
-    c.lapses += 1;
-    c.interval = 0;
-    c.ease = Math.max(1.3, c.ease - 0.2);
-  } else {
-    if (grade === "hard") {
-      c.interval = Math.max(1, Math.round(c.interval * 1.2));
-      c.ease = Math.max(1.3, c.ease - 0.15);
-    } else if (grade === "good") {
-      c.interval = c.reps === 0 ? 1 : c.reps === 1 ? 3 : Math.max(c.interval + 1, Math.round(c.interval * c.ease));
-    } else {
-      c.interval = c.reps === 0 ? 3 : Math.max(c.interval + 2, Math.round(c.interval * c.ease * 1.3));
-      c.ease = c.ease + 0.15;
-    }
-    c.reps += 1;
-  }
-  c.ease = Math.round(c.ease * 100) / 100;
-  c.due = addDays(today, c.interval);
-  return c;
+/**
+ * One review of a card. `using` is the learner state's scheduler record; without it the card is
+ * scheduled by SM-2, exactly as before 0.10. The review is logged on the card either way.
+ */
+export function schedule(prev: CardSched | undefined, grade: Grade, today: string, using?: SchedulerRecord): CardSched {
+  return reviewCard(prev, grade, today, using);
 }
 
 /** Due cards first, then unseen cards up to today's remaining allowance. */

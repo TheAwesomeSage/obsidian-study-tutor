@@ -11,6 +11,7 @@ import { sessionFor } from "./session";
 import { ToolResult } from "./tools";
 import { ReasoningAssessment, finalExpression, withCheck } from "./reasoning";
 import { gradeOfOutcome, normaliseMark, outcomeOfGrade, withNote } from "./grading";
+import { tutorSchedules } from "./scheduler";
 import { TurnResult, TurnOpts, MAX_ANSWER_SECONDS, applyAttempt, pickQuizQuestion } from "./engine-common";
 import { fadedFor, followUp, freshVariant, markTask, metBefore, taskHelp, taskOf } from "./bankvariants";
 import { baseQuestionId } from "./families";
@@ -93,7 +94,7 @@ export async function placementTurn(eng: Engine, dir: string, chatPath: string, 
       b.total += 1;
       if (result === "correct") b.right += 1;
     }
-    if (!s.externalFlashcards) state.cards[pending.id] = schedule(state.cards[pending.id], result === "correct" ? "good" : "again", eng.today());
+    if (tutorSchedules(s)) state.cards[pending.id] = schedule(state.cards[pending.id], result === "correct" ? "good" : "again", eng.today(), state.scheduler);
   }
   chat.fm.pending_confidence = "";
   const verdict = result === "correct" ? "**Correct.**" : result === "incorrect" ? "**Not quite.**" : result === "skipped" ? "**Skipped.**" : "**Could not be checked automatically**, so this subskill is left unplaced for now.";
@@ -394,7 +395,7 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
       if (!repeat && scheduled) {
         // New numbers for a question are the same card: its schedule is the question's.
         const card = baseQuestionId(pending.id);
-        if (!s.externalFlashcards) state.cards[card] = schedule(state.cards[card], scheduled, today);
+        if (tutorSchedules(s)) state.cards[card] = schedule(state.cards[card], scheduled, today, state.scheduler);
         if (pending.subskill in state.names) {
           const b = state.bank[pending.subskill] ?? (state.bank[pending.subskill] = { right: 0, total: 0 });
           b.total += 1;

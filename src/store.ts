@@ -13,6 +13,7 @@ import type { CoursePackage } from "./coursepkg";
 import { passageWindow, type SourceRevision } from "./compile-sources";
 import { Misconception, parseMisconception, reconcile } from "./misconceptions";
 import { ExpansionRecord, parseExpansion } from "./expansion";
+import { SchedulerChoice, SchedulerRecord, syncScheduler } from "./scheduler";
 
 /** One learner interaction with an activity. Kept apart from evidence.md; only an assessed answer also becomes an attempt there. */
 export interface ActivityEvent {
@@ -150,6 +151,9 @@ export class Store {
     public root: string,
     private today: () => string = () => ymd(),
   ) {}
+
+  /** The card scheduler the settings choose. Each state is brought onto it as it loads; unset, states load as they are. */
+  scheduler: (() => SchedulerChoice) | null = null;
 
   get skillsDir(): string {
     return `${this.root}/_skills`;
@@ -420,6 +424,7 @@ export class Store {
     if (!(await this.fs.exists(p))) {
       const s = newState(topic, target);
       s.concepts = concepts;
+      if (this.scheduler) syncScheduler(s, this.scheduler(), this.today());
       await this.saveState(dir, s);
       return s;
     }
@@ -466,8 +471,16 @@ export class Store {
     // Attempts made before concepts had ids take the id of the subskill they were recorded on.
     for (const a of s.attempts) if (!a.concept && a.skill in concepts) a.concept = concepts[a.skill];
     const moved = await this.migrateLinks(dir, s, graph);
-    if (legacy || moved) await this.saveState(dir, s);
+    // A change of scheduler in settings: card dates are rebuilt from their logs and the switch is recorded.
+    const switched = !!this.scheduler && syncScheduler(s, this.scheduler(), this.today());
+    if (legacy || moved || switched) await this.saveState(dir, s);
     return s;
+  }
+
+  /** The scheduler record in a topic's state file, read without loading or migrating anything. */
+  async schedulerRecord(dir: string): Promise<SchedulerRecord | undefined> {
+    const p = `${dir}/state.md`;
+    return (await this.fs.exists(p)) ? parseState(await this.fs.read(p)).scheduler : undefined;
   }
 
   /**
@@ -520,6 +533,8 @@ export class Store {
     // A new question bank starts its card schedule again. A partial refresh keeps the schedule
     // of every question it left untouched. Everything else is kept either way.
     if (previous && p.keepCards) for (const id of p.keepCards) if (previous.cards[id]) next.cards[id] = previous.cards[id];
+    // The kept cards' dates come from the previous scheduler, so its record (and switch history) goes with them.
+    if (previous?.scheduler) next.scheduler = previous.scheduler;
     await this.saveState(dir, next);
     return dir;
   }

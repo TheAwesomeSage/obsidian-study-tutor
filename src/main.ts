@@ -20,6 +20,7 @@ import { existsSync, promises as fsp, readFileSync } from "fs";
 import { createHash } from "crypto";
 import * as visualRegistry from "./visuals/registry";
 import { adaptRegistry } from "./visualcontract";
+import { DEFAULT_RETENTION, RETENTION_RANGE, ScheduleOwner, SchedulerChoice, SchedulerId, clampRetention, scheduleOwner, schedulerFor, schedulerLabel, schedulerRef } from "./scheduler";
 
 export interface TutorSettings extends EngineSettings {
   root: string;
@@ -28,6 +29,10 @@ export interface TutorSettings extends EngineSettings {
   bankQuiz: boolean;
   /** Hand flashcard review and scheduling to the Spaced Repetition community plugin when it is enabled. */
   useSpacedRepetition: boolean;
+  /** The built-in review's card scheduler. SM-2 is what every version before 0.10 used. */
+  scheduler: SchedulerId;
+  /** FSRS only: the chance of recall each card is scheduled for. */
+  desiredRetention: number;
   /** Compute and check maths with SymPy. On by default: SymPy ships with the plugin and runs offline. */
   mathCheck: boolean;
   /** A new learner is placed with bank questions marked by code, not model turns. */
@@ -85,6 +90,8 @@ const DEFAULTS: TutorSettings = {
   newCardsPerDay: 10,
   bankQuiz: true,
   useSpacedRepetition: true,
+  scheduler: "sm2",
+  desiredRetention: DEFAULT_RETENTION,
   mathCheck: true,
   codePlacement: true,
   smartRouting: true,
@@ -237,6 +244,7 @@ export default class StudyTutorPlugin extends Plugin {
   buildStore(): void {
     const root = this.opts.root.replace(/^\/+|\/+$/g, "") || "Tutor";
     this.store = new Store(this.app.vault.adapter as FS, root);
+    this.store.scheduler = () => this.schedulerChoice();
     this.engine = new Engine(this.store, () => ({ ...this.opts, externalFlashcards: this.usesSr() }));
     const searchKey = process.env.BRAVE_SEARCH_API_KEY?.trim();
     this.engine.researchProvider = searchKey ? braveResearch(searchKey) : null;
@@ -311,9 +319,18 @@ export default class StudyTutorPlugin extends Plugin {
     }
   }
 
-  /** Flashcards are handed to Spaced Repetition when the setting is on and that plugin is there. */
+  /** Who keeps the flashcard schedule (scheduler.ts decides): Spaced Repetition when the setting is on and that plugin is there. */
+  scheduleOwner(): ScheduleOwner {
+    return scheduleOwner(this.opts.useSpacedRepetition, this.srAvailable());
+  }
+
   usesSr(): boolean {
-    return this.opts.useSpacedRepetition && this.srAvailable();
+    return this.scheduleOwner() === "spaced-repetition";
+  }
+
+  /** The built-in review's scheduler, as the settings choose it. */
+  schedulerChoice(): SchedulerChoice {
+    return { id: this.opts.scheduler === "fsrs" ? "fsrs" : "sm2", retention: clampRetention(this.opts.desiredRetention) };
   }
 
   /** Brings the topic's flashcard note up to date, opens it, and starts that plugin's review on it. */
@@ -590,6 +607,57 @@ class TutorSettingTab extends PluginSettingTab {
     super(app, plugin);
   }
 
+  /** Who keeps the schedule, the built-in scheduler, and what the active topic's state records. */
+  private schedulerSettings(containerEl: HTMLElement): void {
+    const s = this.plugin.opts;
+    const choice = this.plugin.schedulerChoice();
+    const external = this.plugin.scheduleOwner() === "spaced-repetition";
+    new Setting(containerEl)
+      .setName("Flashcard schedule kept by")
+      .setDesc(external ? "The Spaced Repetition plugin. Study Tutor does not schedule these cards itself; the scheduler below applies only to the built-in review." : `Study Tutor, with ${schedulerLabel(choice)} (${schedulerRef(choice)}).`);
+    // Every view reloads, so each topic's state moves onto the new scheduler now and records the switch.
+    const switched = async () => {
+      await this.plugin.save();
+      for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) if (leaf.view instanceof TutorView) await leaf.view.reload();
+      this.display();
+    };
+    const row = new Setting(containerEl)
+      .setName("Card scheduler")
+      .setDesc("Built-in review only. Every card keeps a log of its latest reviews and its SM-2 dates, so going back to SM-2 restores them exactly. Switching to FSRS rebuilds each card from its log; a card not reviewed since this version starts from its SM-2 interval and ease. Each topic's state records the scheduler and every switch.")
+      .addDropdown((d) =>
+        d
+          .addOptions({ sm2: `${schedulerFor({ id: "sm2", retention: DEFAULT_RETENTION }).label} (default)`, fsrs: schedulerFor({ id: "fsrs", retention: DEFAULT_RETENTION }).label })
+          .setValue(s.scheduler)
+          .onChange(async (v) => {
+            s.scheduler = v === "fsrs" ? "fsrs" : "sm2";
+            await switched();
+          }),
+      );
+    const active = this.plugin.data.activeTopic;
+    if (active) {
+      void this.plugin.store.schedulerRecord(active).then((rec) => {
+        const last = rec?.switches[rec.switches.length - 1];
+        const text = `This topic's cards: ${schedulerLabel(rec)} (${schedulerRef(rec)})${last ? `, last switched ${last.at} from ${last.from}` : ""}.`;
+        (row.descEl ?? row.settingEl).createDiv({ cls: "st-scheduler-record", text });
+      }).catch(() => undefined);
+    }
+    if (s.scheduler !== "fsrs") return;
+    const options: Record<string, string> = {};
+    for (const r of [0.8, 0.85, 0.9, 0.95, choice.retention].sort((a, b) => a - b)) options[String(r)] = r === DEFAULT_RETENTION ? `${r} (default)` : String(r);
+    new Setting(containerEl)
+      .setName("Desired retention")
+      .setDesc(`FSRS only: the chance of recall each card is scheduled for, from ${RETENTION_RANGE[0]} to ${RETENTION_RANGE[1]}. Higher means shorter intervals and more reviews.`)
+      .addDropdown((d) =>
+        d
+          .addOptions(options)
+          .setValue(String(choice.retention))
+          .onChange(async (v) => {
+            s.desiredRetention = clampRetention(Number(v));
+            await switched();
+          }),
+      );
+  }
+
   display(): void {
     const { containerEl } = this;
     const s = this.plugin.opts;
@@ -678,9 +746,11 @@ class TutorSettingTab extends PluginSettingTab {
         t.setValue(s.useSpacedRepetition).onChange(async (v) => {
           s.useSpacedRepetition = v;
           await this.plugin.save();
+          this.display();
         }),
       );
     num("New flashcards per day", "Built-in review only: unseen cards added to each day's review, per topic.", "newCardsPerDay", 0);
+    this.schedulerSettings(containerEl);
 
     new Setting(containerEl).setName("Study policy").setHeading();
     new Setting(containerEl).setDesc("These weights decide which concept Adaptive mode and the home screen suggest next. They only rank suggestions. A level changes through marked answers and nothing else, whatever the weights are. 0 switches a component off.").addButton((b) =>
