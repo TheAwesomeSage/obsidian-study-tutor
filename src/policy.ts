@@ -3,8 +3,10 @@
 // replayed. Weights only rank what to study next. They cannot change a level: levels move
 // through the evidence rules in evidence.ts and nowhere else.
 
-import type { Mode, NextStep } from "./formats";
+import type { Mode, NextStep, Topic } from "./formats";
 import type { Intent } from "./session";
+import type { Attempt } from "./evidence";
+import { BKT_DEFAULTS, BktParams, BrierComparison, bktAll, bktTrace, brierComparison } from "./bkt";
 
 /**
  * Bumped whenever the scoring or the action rules change, so logged decisions can be compared
@@ -14,6 +16,10 @@ import type { Intent } from "./session";
  *   3  0.6.0: concept-level delayed checks; recency from unaided work only; no transfer question
  *      on the day it cannot count; prerequisites in other topics checked one by one with their
  *      outcomes; teach-back and edge-case steps toward level 5; Home uses the same decision
+ *      0.10.0 adds, still as 3: exam weight and the exam date scale a subskill's priority within
+ *      fixed bounds, with the reason in the decision, and unaided practice suggests the exam's
+ *      minutes. Without exam metadata every decision is unchanged, so logs stay comparable; BKT is
+ *      logged in shadow and never read. Bump to 4 if exam-weighted logs must be told apart.
  */
 export const POLICY_VERSION = 3;
 
@@ -140,7 +146,35 @@ export interface SkillInput {
   /** Level 5 still needs an unaided teach-back, or an unaided edge case. */
   needsTeachBack?: boolean;
   needsEdgeCase?: boolean;
+  /** Exam metadata from the objectives this subskill teaches (examSignals). It scales the priority within fixed bounds. */
+  exam?: ExamSignal;
+  /**
+   * Shadow measurement (bkt.ts), logged with the decision so it can be re-scored later.
+   * decide() never reads it, and a test holds it to that.
+   */
+  shadow?: { pKnown: number; pCorrect: number; observations: number };
 }
+
+/** What the exam says about one subskill, from the objectives it teaches. */
+export interface ExamSignal {
+  /** Its share of the exam's marks, 0 to 1: each objective's weight split evenly over the subskills that teach it. */
+  weight: number | null;
+  /** Days from today to the nearest exam date that has not passed (negative when all have), or null with no date. */
+  daysToExam: number | null;
+  /** Typical minutes and marks for a question on it, from its heaviest objective that gives them. */
+  minutes: number | null;
+  marks: number | null;
+  /** Papers or components, and command words, as the objectives give them. */
+  paper: string;
+  commands: string[];
+}
+
+/** Exam metadata scales a subskill's priority by at most these factors, whatever the weights and dates say. */
+export const EXAM_FACTOR_MAX = 1.5;
+export const EXAM_FACTOR_MIN = 0.75;
+/** Within this many days of the exam, nearness raises the priority, by up to EXAM_URGENCY on the day. */
+export const EXAM_WINDOW = 60;
+export const EXAM_URGENCY = 0.25;
 
 /**
  * How a prerequisite check in another topic came out in this chat, by the prerequisite's id.
@@ -179,6 +213,11 @@ export interface Score {
   name: string;
   score: number;
   parts: { gap: number; exam: number; prerequisite: number; errors: number; uncertainty: number; recency: number; time: number };
+  /**
+   * Present when the subskill has exam metadata: the factor applied to its priority (1 when the
+   * metadata changed nothing), why, and what the exam asks ("Paper 2 · derive · 6 marks · 8 min").
+   */
+  exam?: { factor: number; priority: number; note: string; about: string };
 }
 
 export interface Decision {
@@ -203,19 +242,63 @@ export interface Decision {
    * The lesson is exposure to that concept, not to the focus.
    */
   teaches?: string;
+  /** Minutes suggested for timed practice, as in the exam. Set only on unaided practice the time available can hold. */
+  timed?: number;
 }
 
 /** Level a prerequisite must hold before what builds on it is taught. */
 export const UNLOCK = 2;
 
 const round = (x: number): number => Math.round(x * 1000) / 1000;
+const clamp = (x: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, x));
+const pct = (x: number): string => `${Math.round(x * 1000) / 10}%`;
+const num = (x: number): string => String(Math.round(x * 100) / 100);
+
+/** Mean share of the marks over the subskills that have one, or null with fewer than two to compare. */
+function meanWeight(skills: SkillInput[]): number | null {
+  const ws = skills.map((s) => s.exam?.weight ?? 0).filter((x) => x > 0);
+  return ws.length >= 2 ? ws.reduce((a, b) => a + b, 0) / ws.length : null;
+}
+
+/**
+ * How a subskill's exam metadata scales its study priority, and why. Weight counts relative to the
+ * topic's average share (so it only reorders concepts within a topic), and an exam date within
+ * EXAM_WINDOW days adds up to EXAM_URGENCY. The product is held between EXAM_FACTOR_MIN and
+ * EXAM_FACTOR_MAX, and the priority stays within its usual 0.1 to 5. Null without metadata.
+ */
+export function examEffect(s: SkillInput, mean: number | null): { factor: number; priority: number; note: string; about: string } | null {
+  const e = s.exam;
+  if (!e) return null;
+  const why: string[] = [];
+  let byWeight = 1;
+  let byDate = 1;
+  if (e.weight !== null && e.weight > 0 && mean) {
+    byWeight = e.weight / mean;
+    why.push(`it carries ${pct(e.weight)} of the marks, ${byWeight.toFixed(1)}× this topic's average`);
+  }
+  const d = e.daysToExam;
+  if (d !== null && d >= 0 && d <= EXAM_WINDOW) {
+    byDate = 1 + EXAM_URGENCY * (1 - d / EXAM_WINDOW);
+    why.push(d === 0 ? "the exam is today" : `the exam is in ${d} day${d === 1 ? "" : "s"}`);
+  }
+  const raw = byWeight * byDate;
+  const factor = round(clamp(raw, EXAM_FACTOR_MIN, EXAM_FACTOR_MAX));
+  const base = clamp(s.priority, 0.1, 5);
+  const priority = round(clamp(base * factor, 0.1, 5));
+  const bound = raw > EXAM_FACTOR_MAX ? `, the most exam metadata can add` : raw < EXAM_FACTOR_MIN ? `, the most exam metadata can take away` : "";
+  const note = factor === 1 ? "" : `Exam weighting: ${why.join(" and ")}, so its priority is scaled ×${factor.toFixed(2)}${bound} (${num(base)} → ${num(priority)}).`;
+  const about = [e.paper, e.commands.join(", "), e.marks ? `${e.marks} marks` : "", e.minutes ? `${e.minutes} min` : "", e.weight ? `${pct(e.weight)} of the marks` : "", d === null ? "" : d < 0 ? "exam date passed" : d === 0 ? "exam today" : `exam in ${d} day${d === 1 ? "" : "s"}`].filter(Boolean).join(" · ");
+  return { factor, priority, note, about };
+}
 
 /** Ranks every subskill. Higher means more worth studying now. */
 export function scoreSkills(p: PolicyInput): Score[] {
   const w = p.weights;
   const by = new Map(p.skills.map((s) => [s.n, s]));
+  const mean = meanWeight(p.skills);
   return p.skills
     .map((s) => {
+      const ex = examEffect(s, mean);
       const level = s.level ?? 0;
       const backed = s.level !== null && s.level <= s.supported;
       let gap = Math.max(0, p.target - level) / Math.max(1, p.target);
@@ -227,7 +310,7 @@ export function scoreSkills(p: PolicyInput): Score[] {
       const below = p.skills.filter((o) => o.n !== s.n && (o.level ?? 0) < p.target && rests(o.n, s.n, by)).length;
       const parts = {
         gap: round(gap),
-        exam: round((Math.min(5, Math.max(0.1, s.priority)) - 1) / 4),
+        exam: round(((ex ? ex.priority : Math.min(5, Math.max(0.1, s.priority))) - 1) / 4),
         prerequisite: round(below / Math.max(1, p.skills.length - 1)),
         errors: round(Math.min(1, s.recentFailures / 3 + (s.lapse ? 0.5 : 0))),
         uncertainty: round(s.level === null ? 1 : 1 / (1 + s.independent)),
@@ -237,7 +320,7 @@ export function scoreSkills(p: PolicyInput): Score[] {
       const lift = 1 + w.exam * parts.exam + w.prerequisite * parts.prerequisite + w.errors * parts.errors + w.uncertainty * parts.uncertainty + w.recency * parts.recency + w.time * parts.time;
       // Nothing left to gain: only staleness can bring it back, and weakly.
       const score = gap > 0 ? gap * Math.max(0.05, lift) : 0.1 * w.recency * parts.recency;
-      return { n: s.n, name: s.name, score: round(score), parts };
+      return { n: s.n, name: s.name, score: round(score), parts, ...(ex ? { exam: ex } : {}) };
     })
     .sort((a, b) => b.score - a.score || a.n - b.n);
 }
@@ -292,7 +375,8 @@ export function decide(p: PolicyInput): Decision {
       a = a === "diagnose" ? "explain" : a === "diagnose-error" ? "re-explain" : "guided-practice";
       constraint = constraint || "Learn mode stays within explanation, examples and guided practice";
     }
-    return { version: POLICY_VERSION, action: a, focus, reason, constraint, local: p.mode === "auto" ? local : null, suggestIndependent, scores };
+    const timed = a === "independent-practice" || a === "transfer" || a === "retrieval" ? timedPractice(focus !== null ? by.get(focus) : undefined, p.minutes) : null;
+    return { version: POLICY_VERSION, action: a, focus, reason: timed ? `${reason} ${timed.note}` : reason, constraint, local: p.mode === "auto" ? local : null, suggestIndependent, scores, ...(timed ? { timed: timed.minutes } : {}) };
   };
 
   // 1. The open step.
@@ -412,16 +496,70 @@ export function homeStep(d: Decision, opts: { due: number; atTarget: boolean }):
 
 function whyChosen(score: Score, p: PolicyInput): string {
   const w = p.weights;
+  // A priority raised by exam metadata alone is the exam's doing, not the learner's.
+  const fromExam = !!score.exam && score.exam.factor > 1 && (p.skills.find((s) => s.n === score.n)?.priority ?? 1) <= 1;
   const named: [number, string][] = [
     [w.errors * score.parts.errors, "your recent answers on it were wrong"],
     [w.prerequisite * score.parts.prerequisite, "other concepts rest on it"],
-    [w.exam * score.parts.exam, "you gave it a high priority"],
+    [w.exam * score.parts.exam, fromExam ? "it counts for a lot in the exam" : "you gave it a high priority"],
     [w.recency * score.parts.recency, "it has not been practised for a while"],
     [w.uncertainty * score.parts.uncertainty, "there is little evidence on it yet"],
     [w.time * score.parts.time, "it fits the time you have"],
   ];
   const lead = named.filter(([v]) => v > 0.15).sort((a, b) => b[0] - a[0])[0];
-  return lead ? `Chosen because ${lead[1]}. ` : "";
+  return `${lead ? `Chosen because ${lead[1]}. ` : ""}${score.exam?.note ? `${score.exam.note} ` : ""}`;
+}
+
+/**
+ * Timed practice, as in the exam: for unaided practice on a subskill whose objectives give typical
+ * minutes, when the time available holds them and the exam is not past or more than EXAM_WINDOW
+ * days away (an objective without a date still gets it).
+ */
+function timedPractice(k: SkillInput | undefined, available: number): { minutes: number; note: string } | null {
+  const e = k?.exam;
+  if (!e || !e.minutes || e.minutes > available) return null;
+  if (e.daysToExam !== null && (e.daysToExam < 0 || e.daysToExam > EXAM_WINDOW)) return null;
+  const like = [e.marks ? `${e.marks} marks` : "", e.commands.join(", "), e.paper].filter(Boolean).join(", ");
+  return { minutes: e.minutes, note: `Exam practice: allow about ${e.minutes} minute${e.minutes === 1 ? "" : "s"}, as in the exam${like ? ` (${like})` : ""}.` };
+}
+
+const dayNumber = (d: string): number => Date.UTC(Number(d.slice(0, 4)), Number(d.slice(5, 7)) - 1, Number(d.slice(8, 10))) / 86400000;
+
+/**
+ * The exam signal for each subskill, from the objectives it teaches (Objective.exam, parsed from
+ * the card) and the topic's exam date. An objective's weight is split evenly over the subskills
+ * that teach it; the nearest exam date that has not passed counts. Subskills with neither are left
+ * out. `today` is yyyy-mm-dd, so the result, and decide(), stay deterministic.
+ */
+export function examSignals(topic: Pick<Topic, "subskills" | "objectives" | "examDate">, today: string): Record<number, ExamSignal> {
+  const objectives = topic.objectives ?? [];
+  const teaches = (n: number, id: string) => (topic.subskills.find((s) => s.n === n)?.objectives ?? []).some((x) => x.toLowerCase() === id.toLowerCase());
+  const now = dayNumber(today);
+  const out: Record<number, ExamSignal> = {};
+  for (const s of topic.subskills) {
+    const mine = objectives.filter((o) => teaches(s.n, o.id));
+    const meta = mine.filter((o) => o.exam).map((o) => o.exam!);
+    const dates = (mine.length ? mine.map((o) => o.exam?.date ?? topic.examDate ?? "") : [topic.examDate ?? ""]).filter(Boolean);
+    if (!meta.length && !dates.length) continue;
+    let weight: number | null = null;
+    for (const o of mine) {
+      if (!o.exam?.weight) continue;
+      const shared = topic.subskills.filter((x) => teaches(x.n, o.id)).length;
+      weight = (weight ?? 0) + o.exam.weight / Math.max(1, shared);
+    }
+    const days = Number.isFinite(now) ? dates.map((d) => Math.round(dayNumber(d) - now)) : [];
+    const ahead = days.filter((d) => d >= 0);
+    const timed = meta.filter((e) => e.minutes).sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))[0];
+    out[s.n] = {
+      weight: weight === null ? null : Math.round(weight * 10000) / 10000,
+      daysToExam: days.length ? (ahead.length ? Math.min(...ahead) : Math.max(...days)) : null,
+      minutes: timed?.minutes ?? null,
+      marks: timed?.marks ?? meta.find((e) => e.marks)?.marks ?? null,
+      paper: [...new Set(meta.map((e) => e.paper ?? "").filter(Boolean))].join(", "),
+      commands: [...new Set(meta.flatMap((e) => e.commands ?? []))],
+    };
+  }
+  return out;
 }
 
 /** One logged decision: what the policy saw and what it chose. */
@@ -432,14 +570,54 @@ export interface PolicyCase {
   decision: { version: number; action: Action; focus: number | null; local: Decision["local"] };
 }
 
-/** Runs logged cases through the policy with other weights and reports where the choice differs. */
-export function replay(cases: PolicyCase[], weights: PolicyWeights): { total: number; same: number; changed: { t: string; topic: string; was: string; now: string }[] } {
+/** BKT re-scored over a decision log (replay with `shadow`). */
+export interface ShadowReplay {
+  params: BktParams;
+  /** Per logged case: BKT on the logged focus, traced from the attempts made before the case. */
+  cases: { t: string; topic: string; focus: number | null; pKnown: number | null; pCorrect: number | null; observations: number }[];
+  /** BKT's predictions against the existing estimate's, over every unaided answer in the attempts given. */
+  comparison: BrierComparison;
+  /** Every replayed decision came out identical with the logged shadow values removed. */
+  unaffected: boolean;
+}
+
+/**
+ * Runs logged cases through the policy with other weights and reports where the choice differs.
+ * With `shadow` (each case topic's attempts, optional BKT parameters and multiple-choice option
+ * counts by topic) it also re-scores BKT over the log: its P(known) for each logged focus at the
+ * time, its Brier score against the existing estimate's, and a check that removing the shadow
+ * values changes no decision.
+ */
+export function replay(
+  cases: PolicyCase[],
+  weights: PolicyWeights,
+  shadow?: { attempts: Record<string, Attempt[]>; params?: BktParams; options?: Record<string, Record<string, number>> },
+): { total: number; same: number; changed: { t: string; topic: string; was: string; now: string }[]; shadow?: ShadowReplay } {
   const changed: { t: string; topic: string; was: string; now: string }[] = [];
   const name = (c: PolicyCase, focus: number | null) => c.input.skills.find((s) => s.n === focus)?.name ?? "none";
+  let unaffected = true;
   for (const c of cases) {
     const d = decide({ ...c.input, weights });
+    if (shadow) {
+      const plain = c.input.skills.map((k) => {
+        const copy = { ...k };
+        delete copy.shadow;
+        return copy;
+      });
+      if (JSON.stringify(decide({ ...c.input, weights, skills: plain })) !== JSON.stringify(d)) unaffected = false;
+    }
     if (d.action === c.decision.action && d.focus === c.decision.focus) continue;
     changed.push({ t: c.t, topic: c.topic, was: `${c.decision.action} on ${name(c, c.decision.focus)}`, now: `${d.action} on ${name(c, d.focus)}` });
   }
-  return { total: cases.length, same: cases.length - changed.length, changed };
+  const out = { total: cases.length, same: cases.length - changed.length, changed };
+  if (!shadow) return out;
+  const params = shadow.params ?? BKT_DEFAULTS;
+  const rows = cases.map((c) => {
+    const at = Date.parse(c.t);
+    const before = (shadow.attempts[c.topic] ?? []).filter((a) => Date.parse(a.timestamp) < at);
+    const t = c.decision.focus === null ? null : bktTrace(before, c.decision.focus, { params, options: shadow.options?.[c.topic] });
+    return { t: c.t, topic: c.topic, focus: c.decision.focus, pKnown: t ? round(t.pKnown) : null, pCorrect: t ? round(t.pCorrect) : null, observations: t?.steps.length ?? 0 };
+  });
+  const comparison = brierComparison(Object.entries(shadow.attempts).flatMap(([topic, list]) => bktAll(list, { params, options: shadow.options?.[topic] })));
+  return { ...out, shadow: { params, cases: rows, comparison, unaffected } };
 }

@@ -17,6 +17,7 @@ import { GEdge, GGroup, GNode, GraphCanvas, GraphColors } from "./graphcanvas";
 import { layoutGraph } from "./graphlayout";
 import { ago } from "./overview";
 import { ACTION_LABEL, Decision } from "./policy";
+import { bktTrace, brierComparison, comparisonLine, mcqOptions, shadowLine } from "./bkt";
 import type { Screen, TutorView } from "./view";
 import { button, chip, emptyState, iconButton, levelPips, pct } from "./ui";
 
@@ -563,9 +564,13 @@ export class GraphScreen implements Screen {
       const next = p.createDiv({ cls: "st-graph-next" });
       next.createDiv({ cls: "st-kicker", text: "Suggested next" });
       const adviceEl = next.createDiv({ cls: "st-card-text", text: "…" });
+      const examEl = next.createDiv({ cls: "st-meta" });
       const show = (d: Decision) => {
         const on = d.focus !== null && d.focus !== c.n ? ` on ${s.names[d.focus] ?? "another concept"}` : "";
         adviceEl.setText(`${ACTION_LABEL[d.action]}${on}. ${d.reason}`);
+        // What the exam says about this concept, and how far it moved the ranking (policy.ts, examEffect).
+        const ex = d.scores.find((x) => x.n === c.n)?.exam;
+        examEl.setText(ex ? `Exam: ${ex.about || "metadata given"}. ${ex.note || "It does not change the ranking here."}` : "");
       };
       const cached = this.advice.get(c.id);
       if (cached) show(cached);
@@ -599,6 +604,13 @@ export class GraphScreen implements Screen {
         const errs = Object.entries(e.errors).sort((a, b) => b[1] - a[1]);
         if (errs.length) row("Errors", errs.map(([t, k]) => `${k} ${t}`).join(" · "));
         if (e.ungraded || e.disputed) row("Not counted", [`${e.ungraded} unmarked`, `${e.disputed} disputed`].join(" · "));
+        // Knowledge tracing in shadow (bkt.ts): shown and scored, never used to choose or to set a level.
+        dl.createEl("dt", { text: "BKT (shadow)" });
+        const bktEl = dl.createEl("dd", { text: "…" });
+        void v.plugin.store.loadQuestions(c.topic).then(mcqOptions, () => ({})).then((options) => {
+          const t = bktTrace(s.attempts, c.n, { options });
+          bktEl.setText(`${shadowLine(t)}. ${comparisonLine(brierComparison([t]))}.`);
+        });
         if (e.independent >= MIN_ESTIMATE_N) ev.createDiv({ cls: "st-meta", text: `The estimate is the chance that ${PREDICTION_TARGET}. Your own confidence is kept separate and never changes a level.` });
         if (m.level !== null && m.level < 5 && m.backed) {
           const need = missingFor(e, m.level + 1, c.n in s.taught);

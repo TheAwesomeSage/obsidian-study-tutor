@@ -5,6 +5,8 @@ import { reservedQuestions } from "./coursepkg";
 import { FamilySpec, parseFamilySpec } from "./families";
 import type { CodeTask } from "./codetask";
 import { decodeSolution, parseCodeTask, renderCodeTask } from "./codequestions";
+import { examDay, readObjectiveLine, type ObjectiveExam } from "./objective-meta";
+export type { ObjectiveExam } from "./objective-meta";
 // Parsing and serialising of the plugin's markdown files. Pure functions, no Obsidian imports.
 
 export type Mode = "auto" | "tutor" | "teach" | "quiz" | "expert";
@@ -188,6 +190,8 @@ export interface Objective {
   text: string;
   /** Where the objective comes from: a spec label, a [[note]] or a link. */
   source: string;
+  /** Exam metadata from the line, when it had any that read cleanly. */
+  exam?: ObjectiveExam;
 }
 export interface Topic {
   title: string;
@@ -197,6 +201,8 @@ export interface Topic {
   body: string;
   /** Objectives listed under "## Objectives". Empty on cards compiled before 0.6. */
   objectives?: Objective[];
+  /** The topic's exam date (yyyy-mm-dd), from `exam:` in the properties or an "Exam:" line under Objectives. */
+  examDate?: string;
 }
 
 const VISUAL_KINDS = ["text", "worked-example", "diagram", "simulation", "game", "external", "none"];
@@ -239,13 +245,19 @@ export function parseTopic(md: string): Topic {
     });
   });
   const objectives: Objective[] = [];
+  let examDate = ["exam", "exam-date", "exam_date", "examDate"].map((k) => examDay(fmStr(fm, k))).find((d) => d) ?? "";
   for (const line of section(body, "Objectives").split(/\r?\n/)) {
+    const day = /^\s*(?:[-*]\s+)?\**exam(?:\s+date)?\**\s*[:=]\**\s*(.+?)\s*$/i.exec(line);
+    if (day) {
+      examDate = examDate || (examDay(day[1]) ?? "");
+      continue;
+    }
     const m = /^\s*[-*]\s+\**([A-Za-z]?[\w.]*\d[\w.]*)\**\s*[:.)-]\s*(.+)$/.exec(line);
     if (!m) continue;
-    const src = /\s*\(([^()]*)\)\s*$/.exec(m[2]);
-    objectives.push({ id: m[1], text: (src ? m[2].slice(0, src.index) : m[2]).trim(), source: src ? src[1].trim() : "" });
+    const o = readObjectiveLine(m[2]);
+    objectives.push({ id: m[1], text: o.text, source: o.source, ...(o.exam ? { exam: o.exam } : {}) });
   }
-  return { title: fmStr(fm, "title") || (h1 ? h1[1].trim() : "Untitled"), fm, overview: section(body, "Overview"), subskills, body: body.trim(), objectives };
+  return { title: fmStr(fm, "title") || (h1 ? h1[1].trim() : "Untitled"), fm, overview: section(body, "Overview"), subskills, body: body.trim(), objectives, ...(examDate ? { examDate } : {}) };
 }
 
 export interface CompileOutput {

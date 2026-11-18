@@ -77,6 +77,8 @@ The estimate shown for a concept is the chance that **the next unaided first ans
 
 Your stated confidence is compared with the same yes-or-no outcome. The Brier score is the mean squared gap between the two, where lower is better, and it is not shown with fewer than three rated answers. Your confidence, the plugin's estimate and the level are three separate things.
 
+A fourth number, labelled **BKT (shadow, not used for decisions)**, is a standard knowledge-tracing model run alongside for comparison. It learns only from the same unaided answers, and its predictions are scored against what happened next, next to the estimate's. Nothing uses it to choose a step or set a level.
+
 ## Choosing what to do next
 
 Adaptive mode and the home screen rank concepts with a score:
@@ -84,6 +86,8 @@ Adaptive mode and the home screen rank concepts with a score:
 `score = gap × (1 + exam × priority + prerequisite × dependents + errors × recent errors + uncertainty × lack of evidence + recency × time since unaided practice + time × fit to the time you have)`
 
 The weights are in settings. They only rank suggestions; they cannot change a level.
+
+When a topic card's objectives give exam metadata (a share of the marks, a paper, command words, typical marks and minutes, an exam date), a concept's priority is scaled by it, never by more than ×1.5 or less than ×0.75: its share of the marks counts against the topic's average, and an exam within 60 days adds up to a quarter. The reason shown says when this happened and by how much. Unaided practice on a concept with typical minutes suggests answering in that time, as in the exam, when you have that long. The syntax is in the plugin's docs/OBJECTIVE-METADATA.md.
 
 Explicit rules come before the ranking, in this order:
 

@@ -6,6 +6,7 @@
 // the subskills whose notes changed. Pure functions, no Obsidian imports.
 
 import type { Question, Topic } from "./formats";
+import { readObjectiveLine, type ObjectiveExam } from "./objective-meta";
 import type { StagedCourse } from "./compiler";
 import type { ObjectiveVersion } from "./objective-version";
 
@@ -19,6 +20,8 @@ export interface PackageObjective {
   subskills: number[];
   questions: string[];
   covered: boolean;
+  /** Exam weight, paper, command words, marks, minutes and date, when the objective line gave them (docs/OBJECTIVE-METADATA.md). */
+  exam?: ObjectiveExam;
 }
 
 export interface PackageLesson {
@@ -57,6 +60,8 @@ export interface CoursePackage {
   /** Where the objectives came from: the card's Objectives section, or one per subskill. */
   objectivesFrom: "card" | "subskills";
   objectives: PackageObjective[];
+  /** The topic's exam date (yyyy-mm-dd), when the card gives one. */
+  examDate?: string;
   lessons: PackageLesson[];
   families: QuestionFamily[];
   rubrics: { question: string; rubric: string }[];
@@ -78,7 +83,11 @@ export function withStagedCoverage(pkg: CoursePackage, staged: StagedCourse): Co
   const availability = new Map(staged.availability.map(a => [a.objective, a]));
   const objectives = staged.inventory.map(o => {
     const a = availability.get(o.id);
-    return { id: o.id, text: o.text, source: o.references.join(", "), subskills: a?.lessons ?? [], questions: a?.questions ?? [], covered: !!a && !a.gaps.length };
+    // Exam metadata the specification's wording carried, or else what the card's line for this id gave.
+    const line = readObjectiveLine(o.text);
+    const exam = line.exam ?? pkg.objectives.find(x => x.id === o.id)?.exam;
+    const text = line.exam ? (line.source ? `${line.text} (${line.source})` : line.text) : o.text;
+    return { id: o.id, text, source: o.references.join(", "), subskills: a?.lessons ?? [], questions: a?.questions ?? [], covered: !!a && !a.gaps.length, ...(exam ? { exam } : {}) };
   });
   const missing = objectives.filter(o => !o.covered).map(o => o.id);
   return { ...pkg, objectives, objectivesFrom: "card", staged, coverage: { ...pkg.coverage, objectives: objectives.length, covered: objectives.length - missing.length, missing, complete: staged.status === "complete" } };
@@ -132,7 +141,7 @@ export function buildPackage(p: { topic: Topic; questions: Question[]; concepts:
     ? topic.objectives!.map((o) => {
         const subskills = topic.subskills.filter((s) => (s.objectives ?? []).some((x) => x.toLowerCase() === o.id.toLowerCase())).map((s) => s.n);
         const qs = questions.filter((q) => subskills.includes(q.subskill)).map((q) => q.id);
-        return { id: o.id, text: o.text, source: o.source, subskills, questions: qs, covered: subskills.length > 0 && qs.length > 0 };
+        return { id: o.id, text: o.text, source: o.source, subskills, questions: qs, covered: subskills.length > 0 && qs.length > 0, ...(o.exam ? { exam: o.exam } : {}) };
       })
     : topic.subskills.map((s) => ({ id: `S${s.n}`, text: s.name, source: "subskill", subskills: [s.n], questions: bySkill(s.n).map((q) => q.id), covered: bySkill(s.n).length > 0 }));
 
@@ -151,6 +160,7 @@ export function buildPackage(p: { topic: Topic; questions: Question[]; concepts:
     research: p.research,
     objectivesFrom: fromCard ? "card" : "subskills",
     objectives,
+    ...(topic.examDate ? { examDate: topic.examDate } : {}),
     lessons,
     families,
     rubrics: questions.filter((q) => q.rubric).map((q) => ({ question: q.id, rubric: q.rubric! })),

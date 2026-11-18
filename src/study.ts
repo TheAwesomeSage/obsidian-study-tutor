@@ -11,6 +11,7 @@ import { Material, TurnResult, PresentationOutcome } from "./engine";
 import { Attempt, gradingLabel } from "./evidence";
 import { Mode, fmStr, splitFrontmatter } from "./formats";
 import { ACTION_LABEL, Action, POLICY_VERSION } from "./policy";
+import { bktTrace, brierComparison, comparisonLine, mcqOptions, shadowLine } from "./bkt";
 import { SessionRecord, openQuestion, sessionFor } from "./session";
 import { toolLine } from "./tools";
 import { moveLine } from "./tutormove";
@@ -338,6 +339,8 @@ export class StudyScreen implements Screen {
         for (const x of [s.score, s.parts.gap, s.parts.exam, s.parts.prerequisite, s.parts.errors, s.parts.uncertainty, s.parts.recency]) tr.createEl("td", { cls: "st-num", text: x.toFixed(2) });
       }
     }
+    const exam = decision.scores.find((s) => s.n === decision.focus)?.exam;
+    if (exam) box.createDiv({ cls: "st-meta", text: `Exam: ${exam.about || "metadata given"}. ${exam.note || "It does not change the ranking here."}` });
     box.createDiv({ cls: "st-meta", text: `Policy version ${POLICY_VERSION}. Scores only rank what to study next. Levels change through marked answers and nothing else. Weights are in settings.` });
   }
 
@@ -670,9 +673,35 @@ export class StudyScreen implements Screen {
     if (r?.expansion) body.createDiv({ text: `${expansionLine(r.expansion)}.` });
     for (const n of r?.notes ?? []) body.createDiv({ text: `Note: ${n}.` });
     for (const t of r?.tools ?? []) body.createDiv({ text: `Tool: ${toolLine(t)}.` });
+    this.shadowLines(body);
     const su = v.sessionUsage;
     const st = su.input + su.cacheRead + su.cacheWrite;
     body.createDiv({ text: `This sitting: ${k(st)} tokens in (${st ? Math.round((100 * su.cacheRead) / st) : 0}% from cache) · ${k(su.output)} out over ${su.calls} call${su.calls === 1 ? "" : "s"}.` });
+  }
+
+  /** Multiple-choice option counts of the open topic's bank, for BKT's guess floor. Loaded once per topic. */
+  private bankOptions: { dir: string; options: Record<string, number> | null } | null = null;
+
+  /** Knowledge tracing on the focus concept, in shadow (bkt.ts): shown and scored, never used to decide. */
+  private shadowLines(body: HTMLElement): void {
+    const v = this.view;
+    const st = v.state;
+    const n = st?.focus;
+    if (!st || n === null || n === undefined || !(n in st.names) || !v.dir) return;
+    if (this.bankOptions?.dir !== v.dir) {
+      const dir = v.dir;
+      this.bankOptions = { dir, options: null };
+      void v.plugin.store.loadQuestions(dir).then(mcqOptions, () => ({})).then((options) => {
+        if (this.bankOptions?.dir !== dir) return;
+        this.bankOptions.options = options;
+        this.syncDiagnostics();
+      });
+      return;
+    }
+    if (!this.bankOptions.options) return;
+    const t = bktTrace(st.attempts, n, { options: this.bankOptions.options });
+    body.createDiv({ text: `${shadowLine(t)}, on ${st.names[n]}.` });
+    body.createDiv({ cls: "st-meta", text: `${comparisonLine(brierComparison([t]))}.` });
   }
 
   // ---------- actions ----------

@@ -6,8 +6,9 @@ import { CallResult, ModelCliError, Usage, addUsage } from "./claude";
 import { callModel, modelFor, type ModelRequest } from "./model-provider";
 import { dependentCounts } from "./course";
 import { Attempt, EVIDENCE_RULES, Grading, Outcome, checkDue, recordAttempt } from "./evidence";
-import { Chat, LearnerState, Mode, NextStep, Prereqs, Question, objectiveStamp, applyStateUpdate, chatWords, extractStateTrailer, fmList, fmStr, mastery, placementQuestions, prereqGaps, setLevel, ymd } from "./formats";
-import { ACTION_GUIDE, DEFAULT_WEIGHTS, Decision, POLICY_VERSION, PolicyInput, decide, homeStep } from "./policy";
+import { Chat, LearnerState, Mode, NextStep, Prereqs, Question, Topic, objectiveStamp, applyStateUpdate, chatWords, extractStateTrailer, fmList, fmStr, mastery, placementQuestions, prereqGaps, setLevel, ymd } from "./formats";
+import { ACTION_GUIDE, DEFAULT_WEIGHTS, Decision, POLICY_VERSION, PolicyInput, decide, examSignals, homeStep } from "./policy";
+import { bktShadow, mcqOptions } from "./bkt";
 import type { ResearchProvider } from "./compile-research";
 import type { CodeRunner } from "./codetask";
 import { LocalModel } from "./ollama";
@@ -172,7 +173,7 @@ export class Engine {
   // ---------- the study policy ----------
 
   /** Everything the policy looks at, gathered into one plain object that can be logged and replayed. */
-  private policyInput(p: { mode: Mode; state: LearnerState; pre: Prereqs; chat: Chat; session: SessionRecord; intent: Intent; questions: Question[]; external: ExternalPrereq[] }): PolicyInput {
+  private policyInput(p: { mode: Mode; state: LearnerState; pre: Prereqs; chat: Chat; session: SessionRecord; intent: Intent; questions: Question[]; external: ExternalPrereq[]; topic?: Topic }): PolicyInput {
     const s = this.settings();
     const { state } = p;
     const today = this.today();
@@ -180,9 +181,13 @@ export class Engine {
     const seenToday = new Set(state.attempts.filter((a) => a.timestamp.slice(0, 10) === today).map((a) => a.questionId));
     const kept = reservedQuestions(p.questions);
     const dependents = dependentCounts(p.pre);
+    // Exam metadata scales priority (bounded, policy.ts); BKT rides along in shadow and is only logged.
+    const exam = p.topic ? examSignals(p.topic, today) : {};
+    const options = mcqOptions(p.questions);
     const skills = Object.keys(state.names).map(Number).sort((a, b) => a - b).map((n) => {
       const m = mastery(state, n);
       const e = m.evidence;
+      const shadow = bktShadow(state.attempts, n, options);
       return {
         n,
         name: state.names[n],
@@ -206,6 +211,8 @@ export class Engine {
         transferReady: !e.firstIndependentDay || e.firstIndependentDay < today,
         needsTeachBack: !e.teachBack,
         needsEdgeCase: !e.edgeCase,
+        ...(exam[n] ? { exam: exam[n] } : {}),
+        ...(shadow ? { shadow } : {}),
       };
     });
     return {
@@ -233,7 +240,7 @@ export class Engine {
     const state = await this.store.loadState(dir, s.targetLevel);
     const chat: Chat = { fm: {}, summary: "", messages: [] };
     const questions = await this.store.loadQuestions(dir);
-    const input = this.policyInput({ mode: "auto", state, pre: await this.store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions, external: await this.store.externalPrereqs(dir, state.target) });
+    const input = this.policyInput({ mode: "auto", state, pre: await this.store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions, external: await this.store.externalPrereqs(dir, state.target), topic });
     const decision = decide(input);
     const ns = Object.keys(state.names).map(Number);
     const atTarget = ns.length > 0 && input.skills.every((k) => (k.level ?? 0) >= state.target && (k.level ?? 0) <= k.supported && !k.checkDue);
@@ -281,7 +288,7 @@ export class Engine {
     const state = await this.store.loadState(dir, s.targetLevel);
     const session = sessionFor(chat, state, mode);
     return decide(
-      this.policyInput({ mode, state, pre: await this.store.prereqs(dir, topic), chat, session, intent: readIntent(message, !!session.pendingQuestion), questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target) }),
+      this.policyInput({ mode, state, pre: await this.store.prereqs(dir, topic), chat, session, intent: readIntent(message, !!session.pendingQuestion), questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target), topic }),
     );
   }
 
@@ -292,7 +299,7 @@ export class Engine {
     const state = await this.store.loadState(dir, s.targetLevel);
     if (n in state.names) state.focus = n;
     const chat: Chat = { fm: {}, summary: "", messages: [] };
-    const input = this.policyInput({ mode: "auto", state, pre: await this.store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target) });
+    const input = this.policyInput({ mode: "auto", state, pre: await this.store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target), topic });
     input.placementReady = false;
     return decide(input);
   }
@@ -395,7 +402,7 @@ export class Engine {
     const external = await this.store.externalPrereqs(dir, state.target);
     let decision: Decision | null = null;
     if (mode === "auto" || mode === "teach") {
-      const input = this.policyInput({ mode, state, pre, chat, session, intent, questions: await this.store.loadQuestions(dir), external });
+      const input = this.policyInput({ mode, state, pre, chat, session, intent, questions: await this.store.loadQuestions(dir), external, topic });
       decision = decide(input);
       if (decision.focus !== null && decision.focus in state.names && decision.focus !== state.focus) {
         state.focus = decision.focus;
@@ -903,7 +910,7 @@ export class Engine {
   async planFrom(dir: string, chat: Chat, state: LearnerState, mode: Mode, continuing: number | null): Promise<Decision> {
     const topic = await this.store.loadTopic(dir);
     const session = { ...sessionFor(chat, state, mode), pendingQuestion: "", completedStep: true };
-    const input = this.policyInput({ mode, state, pre: await this.store.prereqs(dir, topic), chat, session, intent: "none", questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target) });
+    const input = this.policyInput({ mode, state, pre: await this.store.prereqs(dir, topic), chat, session, intent: "none", questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target), topic });
     input.continuing = continuing;
     const decision = decide(input);
     void this.store.logDecision({ t: new Date().toISOString(), topic: topic.title, input, decision: { version: POLICY_VERSION, action: decision.action, focus: decision.focus, local: decision.local } });

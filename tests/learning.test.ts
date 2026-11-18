@@ -1233,3 +1233,236 @@ test("question families: in Adaptive mode, guided practice is a faded worked exa
   assert.match(a.attempt!.assistance.join(" "), /faded worked example/);
   assert.equal(calls(), 0);
 });
+
+// ---------- exam metadata on objectives, BKT in shadow, and the measurement summary ----------
+
+const EXAM_CARD = (fm = "") => [
+  ...(fm ? ["---", fm, "---"] : []),
+  "# Calculus", "", "## Overview", "Rates of change.", "", "## Objectives",
+  "- O1: Derive the power rule (Spec 2.1) (weight 8%, paper 2, command: derive, 6 marks, 8 min)",
+  "- O2: Apply the chain rule {weight 12, explain, marks 4-6}",
+  "- O3: Sketch a gradient function (weight lots, paper two-ish, 3 marks)",
+  "- O4: Find f(x) (Spec 3.4)",
+  "- O5: State the limit (weight banana)",
+  "- O6: Integrate (derive)",
+  "Exam date: 2027-05-01",
+  "", "## Subskills", "",
+  "### 1. Power rule", "prerequisites: none", "objectives: O1, O3", "- A claim ([[Calc notes]]).", "",
+  "### 2. Chain rule", "prerequisites: 1", "objectives: O2", "- A claim.", "",
+  "### 3. Composites", "prerequisites: 1", "objectives: O2, O4", "- A claim.", "",
+].join("\n");
+
+test("exam metadata: a trailing group on an objective line is read when it reads cleanly, and ignored when it does not", async () => {
+  const { readObjectiveLine, examDay } = await import("../src/objective-meta");
+  const t = F.parseTopic(EXAM_CARD("exam: 2027-06-12"));
+  const by = Object.fromEntries((t.objectives ?? []).map((o) => [o.id, o]));
+  assert.equal(t.examDate, "2027-06-12", "the properties win over an Exam: line");
+  assert.equal(F.parseTopic(EXAM_CARD()).examDate, "2027-05-01", "without one, the Exam: line under Objectives gives the date");
+  // Valid: every field, beside a separate source group.
+  assert.deepEqual([by.O1.text, by.O1.source], ["Derive the power rule", "Spec 2.1"]);
+  assert.deepEqual(by.O1.exam, { weight: 0.08, paper: "Paper 2", commands: ["derive"], marks: 6, minutes: 8 });
+  // Braces, a bare percentage, a bare command word beside a keyed field, a range of marks.
+  assert.deepEqual([by.O2.text, by.O2.source, by.O2.exam], ["Apply the chain rule", "", { weight: 0.12, commands: ["explain"], marks: 5 }]);
+  // Partial: what reads cleanly is kept, the rest is ignored and reported.
+  assert.deepEqual(by.O3.exam, { marks: 3 });
+  assert.deepEqual(readObjectiveLine("Sketch a gradient function (weight lots, paper two-ish, 3 marks)").ignored, ["weight lots", "paper two-ish"]);
+  // Malformed only, or no metadata: the line is read exactly as before, the group being the source.
+  assert.deepEqual([by.O4.text, by.O4.source, by.O4.exam], ["Find f(x)", "Spec 3.4", undefined]);
+  assert.deepEqual([by.O5.source, by.O5.exam], ["weight banana", undefined]);
+  assert.deepEqual([by.O6.source, by.O6.exam], ["derive", undefined], "a bare command word alone stays a source");
+  assert.equal(t.objectives!.length, 6, "the Exam: line is not an objective");
+  // Metadata before the source, a mixed group, an objective date, bad values.
+  assert.deepEqual(readObjectiveLine("Prove it (8% of marks; exam 2027-06-03) (Spec 1)"), { text: "Prove it", source: "Spec 1", exam: { weight: 0.08, date: "2027-06-03" }, ignored: [] });
+  assert.deepEqual(readObjectiveLine("Prove it (Spec 1; time 5 minutes)"), { text: "Prove it", source: "Spec 1", exam: { minutes: 5 }, ignored: [] });
+  assert.equal(readObjectiveLine("Prove it (weight 140%)").exam, null, "a weight over 100% is not a weight");
+  assert.deepEqual([examDay("2027-02-30"), examDay("2027/6/3"), examDay("June 3")], [null, "2027-06-03", null]);
+
+  // The course package keeps it, from the card or from the specification wording of a staged compile.
+  const { buildPackage, withStagedCoverage } = await import("../src/coursepkg");
+  const pkg = buildPackage({ topic: t, questions: [], concepts: {}, sources: {}, previous: null, at: "2026-11-18T00:00:00.000Z", mode: "notes", research: false });
+  assert.deepEqual(pkg.objectives.find((o) => o.id === "O1")!.exam, by.O1.exam);
+  assert.equal(pkg.objectives.find((o) => o.id === "O4")!.exam, undefined);
+  assert.equal(pkg.examDate, "2027-06-12");
+  const staged: any = { status: "complete", inventory: [{ id: "O1", text: "Derive the power rule", references: ["p1"], search: "" }, { id: "O9", text: "Compare rates (weight 5%, compare)", references: ["p2"], search: "" }], sourceRevisions: [], lessons: [], availability: [], issues: [], metrics: {} };
+  const sp = withStagedCoverage(pkg, staged);
+  assert.deepEqual(sp.objectives.map((o) => [o.id, o.text, o.exam]), [["O1", "Derive the power rule", by.O1.exam], ["O9", "Compare rates", { weight: 0.05, commands: ["compare"] }]]);
+});
+
+test("exam metadata: weight and the exam date scale priority within fixed bounds, say why, and add timed practice", async () => {
+  const P = await import("../src/policy");
+  type Signal = import("../src/policy").ExamSignal;
+  const sig = (over: Partial<Signal>): Signal => ({ weight: null, daysToExam: null, minutes: null, marks: null, paper: "", commands: [], ...over });
+  // From the card: weight split over the subskills that teach an objective; the nearest date counts.
+  const signals = P.examSignals(F.parseTopic(EXAM_CARD("exam: 2027-06-12")), "2027-06-02");
+  assert.deepEqual(signals[1], { weight: 0.08, daysToExam: 10, minutes: 8, marks: 6, paper: "Paper 2", commands: ["derive"] });
+  assert.deepEqual([signals[2].weight, signals[3].weight], [0.06, 0.06], "O2's 12% is shared by the two subskills that teach it");
+
+  const two = (a: Partial<SkillInput>, b: Partial<SkillInput>) => input({ completedStep: true, skills: [skill({ n: 1, level: 2, supported: 2, ...a }), skill({ n: 2, level: 2, supported: 2, ...b })] });
+  const plain = scoreSkills(two({}, {}));
+  assert.equal(plain[0].score, plain[1].score);
+  assert.equal("exam" in plain[0], false, "no metadata, no exam field: decisions without it are unchanged");
+  const light = sig({ weight: 0.02 }), heavy = sig({ weight: 0.2 });
+  const s = scoreSkills(two({ exam: light }, { exam: heavy }));
+  const s1 = s.find((x) => x.n === 1)!, s2 = s.find((x) => x.n === 2)!;
+  assert.deepEqual([s2.exam!.factor, s1.exam!.factor], [P.EXAM_FACTOR_MAX, P.EXAM_FACTOR_MIN], "nearly twice the average share is capped; a fifth of it is floored");
+  assert.deepEqual([s2.parts.exam, s1.parts.exam], [0.125, -0.062]);
+  assert.ok(s2.score > s1.score);
+  const d = decide(two({ exam: light }, { exam: heavy }));
+  assert.equal(d.focus, 2);
+  assert.match(d.reason, /Exam weighting: it carries 20% of the marks, 1\.8× this topic's average, so its priority is scaled ×1\.50, the most exam metadata can add \(1 → 1\.5\)\./);
+  // Bounded whatever the inputs: a huge share on exam day, and a priority already at its maximum.
+  const extreme = scoreSkills(two({ exam: sig({ weight: 0.001 }) }, { exam: sig({ weight: 1, daysToExam: 0 }), priority: 5 })).find((x) => x.n === 2)!;
+  assert.deepEqual([extreme.exam!.factor, extreme.exam!.priority, extreme.parts.exam], [1.5, 5, 1]);
+  // The date alone: up to +25% within 60 days, nothing outside them or after the exam.
+  const near = (days: number) => scoreSkills(input({ skills: [skill({ n: 1, level: 2, supported: 2, exam: sig({ daysToExam: days }) })] }))[0].exam!;
+  assert.deepEqual([0, 30, 60, 90, -3].map((x) => near(x).factor), [1.25, 1.125, 1, 1, 1]);
+  assert.equal(near(90).note, "", "no effect, nothing to explain");
+  assert.match(near(90).about, /exam in 90 days/);
+  // A single weighted subskill has nothing to be compared with, so weight alone changes nothing.
+  assert.equal(scoreSkills(input({ skills: [skill({ n: 1, level: 2, supported: 2, exam: heavy })] }))[0].exam!.factor, 1);
+
+  // Timed practice: unaided practice, minutes the time available holds, exam not past or far off.
+  const practise = (exam: Signal, minutes = 25) => decide(input({ minutes, skills: [skill({ n: 1, level: 3, supported: 3, bankLeft: 2, exam })] }));
+  const timed = practise(sig({ minutes: 8, marks: 6, commands: ["derive"], paper: "Paper 2", daysToExam: 10 }));
+  assert.deepEqual([timed.action, timed.timed], ["independent-practice", 8]);
+  assert.match(timed.reason, /Exam practice: allow about 8 minutes, as in the exam \(6 marks, derive, Paper 2\)\.$/);
+  assert.equal(practise(sig({ minutes: 30 })).timed, undefined, "more minutes than the learner has");
+  assert.equal(practise(sig({ minutes: 8, daysToExam: 90 })).timed, undefined, "the exam is too far off");
+  assert.equal(practise(sig({ minutes: 8, daysToExam: -1 })).timed, undefined, "the exam has passed");
+  assert.equal(decide(input({ skills: [skill({ n: 1, level: 1, supported: 1, exam: sig({ minutes: 8 }) })] })).timed, undefined, "a lesson is not timed");
+  assert.equal(decide(input({ mode: "teach", skills: [skill({ n: 1, level: 3, supported: 3, exam: sig({ minutes: 8 }) })] })).timed, undefined, "Learn mode is not timed");
+  // Deterministic: the same input gives the same decision.
+  assert.deepEqual(decide(two({ exam: light }, { exam: heavy })), d);
+});
+
+test("exam metadata reaches the policy from a compiled card, and BKT rides along in shadow", async () => {
+  const { store, engine, dir } = await setup();
+  const body = EXAM_CARD().replace("Exam date: 2027-05-01", "Exam: 2026-11-23").replace("(weight 8%,", "(weight 18%,");
+  await store.saveCompiled({ title: "Calculus", fm: { subject: "none" }, topicBody: body, questionsBody: BANK, target: 4, existingDir: dir });
+  const topic = await store.loadTopic(dir);
+  const state = await store.loadState(dir, 4);
+  state.attempts.push(attempt({ id: "x1", skill: 1, concept: state.concepts[1] ?? "", questionId: "Q1", timestamp: "2026-11-12T10:00:00.000Z" }));
+  const chat: F.Chat = { fm: {}, summary: "", messages: [] };
+  const pin = (engine as any).policyInput({ mode: "auto", state, pre: await store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions: await store.loadQuestions(dir), external: [], topic }) as PolicyInput;
+  assert.deepEqual(pin.skills[0].exam, { weight: 0.18, daysToExam: 10, minutes: 8, marks: 6, paper: "Paper 2", commands: ["derive"] });
+  // Q1 is a two-option multiple-choice question, so the guess is 1/2.
+  const after = (0.3 * 0.9) / (0.3 * 0.9 + 0.7 * 0.5);
+  const known = after + (1 - after) * 0.15;
+  assert.deepEqual(pin.skills[0].shadow, { pKnown: Math.round(known * 1000) / 1000, pCorrect: Math.round((known * 0.9 + (1 - known) * 0.2) * 1000) / 1000, observations: 1 });
+  assert.equal(pin.skills[1].shadow, undefined, "no observation, no shadow value");
+  await store.saveState(dir, state);
+  const advice = await engine.advise(dir, 1);
+  assert.ok(advice.scores.find((x) => x.n === 1)!.exam!.factor > 1);
+});
+
+test("BKT in shadow: the update matches hand-computed values, with the multiple-choice guess floor", async () => {
+  const B = await import("../src/bkt");
+  const params = { pInit: 0.5, pLearn: 0.1, pSlip: 0.1, pGuess: 0.2 };
+  const seq = [attempt({ id: "a", timestamp: "2026-11-10T10:00:00.000Z" }), attempt({ id: "b", result: "incorrect", timestamp: "2026-11-11T10:00:00.000Z" })];
+  const t = B.bktTrace(seq, 1, { params });
+  const close = (x: number, y: number) => assert.ok(Math.abs(x - y) < 1e-12, `${x} vs ${y}`);
+  // Correct: P(c) = 0.5·0.9 + 0.5·0.2 = 0.55; posterior 0.45/0.55 = 9/11; with learning 9/11 + 2/11·0.1 = 46/55.
+  close(t.steps[0].pCorrect, 0.55);
+  close(t.steps[0].after, 46 / 55);
+  // Incorrect: P(c) = 46/55·0.9 + 9/55·0.2 = 43.2/55; posterior 4.6/(4.6 + 7.2) = 23/59; with learning 26.6/59.
+  close(t.steps[1].pCorrect, 43.2 / 55);
+  close(t.steps[1].after, 26.6 / 59);
+  close(t.pKnown, 26.6 / 59);
+  close(t.pCorrect, (26.6 / 59) * 0.9 + (32.4 / 59) * 0.2);
+  assert.deepEqual(t.steps.map((s) => s.estimate), [0.5, 2 / 3], "the existing estimate before each answer: (correct + 1) / (n + 2)");
+  // A four-option question raises the guess to 1/4; a ten-option one leaves it at pGuess.
+  close(B.bktTrace(seq, 1, { params, options: { "q-a": 4 } }).steps[0].pCorrect, 0.5 * 0.9 + 0.5 * 0.25);
+  close(B.bktTrace(seq, 1, { params, options: { "q-a": 10 } }).steps[0].pCorrect, 0.55);
+  assert.deepEqual(B.mcqOptions(F.parseQuestions(BANK)), { Q1: 2, Q5: 2 });
+  assert.match(B.shadowLine(t), /^BKT \(shadow, not used for decisions\): P\(known\) 0\.45 after 2 unaided answers$/);
+  assert.equal(B.shadowLine(B.bktTrace([], 1)), "BKT (shadow, not used for decisions): P(known) 0.30, the starting value: no unaided answers yet");
+});
+
+test("BKT in shadow: helped, exposed, self-rated, inconclusive, disputed and repeated attempts are not observations", async () => {
+  const B = await import("../src/bkt");
+  const base = [attempt({ id: "a", timestamp: "2026-11-10T10:00:00.000Z" }), attempt({ id: "b", result: "incorrect", timestamp: "2026-11-11T10:00:00.000Z" })];
+  const noise = [
+    attempt({ id: "h", assisted: true, assistance: ["hint"], timestamp: "2026-11-10T11:00:00.000Z" }),
+    attempt({ id: "x", answerExposed: true, timestamp: "2026-11-10T12:00:00.000Z" }),
+    attempt({ id: "s", grading: "self", verification: "unverified", timestamp: "2026-11-10T13:00:00.000Z" }),
+    attempt({ id: "i", mark: { v: 1, proposed: "correct", rules: [], conclusive: false } as any, timestamp: "2026-11-10T14:00:00.000Z" }),
+    attempt({ id: "d", verification: "disputed", timestamp: "2026-11-10T15:00:00.000Z" }),
+    attempt({ id: "u", result: "ungraded", timestamp: "2026-11-10T16:00:00.000Z" }),
+    attempt({ id: "r", questionId: "q-a", timestamp: "2026-11-10T17:00:00.000Z" }),
+    attempt({ id: "o", skill: 2, timestamp: "2026-11-10T18:00:00.000Z" }),
+  ];
+  const clean = B.bktTrace(base, 1);
+  const noisy = B.bktTrace([...noise, ...base], 1);
+  assert.deepEqual(noisy.steps.map((s) => s.attempt), ["a", "b"]);
+  assert.deepEqual([noisy.pKnown, noisy.pCorrect], [clean.pKnown, clean.pCorrect]);
+  assert.equal(noisy.skipped, 7, "every attempt on the subskill that is not an observation is counted as skipped");
+  assert.equal(noisy.steps.length, skillEvidence([...noise, ...base], 1).independent, "the observations are exactly skillEvidence's independent data points");
+});
+
+test("BKT in shadow never changes a decision, and replay re-scores it over a decision log", async () => {
+  const skills = [skill({ n: 1, level: 2, supported: 2 }), skill({ n: 2, level: 3, supported: 3, bankLeft: 2, recentFailures: 1 })];
+  const base = input({ skills, completedStep: true });
+  const d = decide(base);
+  for (const v of [0, 0.5, 1]) {
+    const shadowed = { ...base, skills: base.skills.map((k) => ({ ...k, shadow: { pKnown: v, pCorrect: 1 - v, observations: 40 } })) };
+    assert.deepEqual(decide(shadowed), d, `shadow ${v} changes nothing`);
+    assert.deepEqual(scoreSkills(shadowed), scoreSkills(base));
+  }
+  const logged = { ...base, skills: base.skills.map((k) => ({ ...k, shadow: { pKnown: 0.9, pCorrect: 0.85, observations: 3 } })) };
+  const cases = [{ t: "2026-11-12T09:00:00.000Z", topic: "Calculus", input: logged, decision: { version: d.version, action: d.action, focus: d.focus, local: d.local } }];
+  const history = [attempt({ id: "a", skill: d.focus!, timestamp: "2026-11-10T10:00:00.000Z" }), attempt({ id: "b", skill: d.focus!, result: "incorrect", timestamp: "2026-11-13T10:00:00.000Z" })];
+  const r = replay(cases, DEFAULT_WEIGHTS, { attempts: { Calculus: history } });
+  assert.deepEqual([r.total, r.same, r.changed], [1, 1, []]);
+  assert.equal(r.shadow!.unaffected, true);
+  assert.deepEqual([r.shadow!.cases[0].focus, r.shadow!.cases[0].observations], [d.focus, 1], "only attempts before the logged decision count");
+  assert.equal(r.shadow!.comparison.n, 2);
+  assert.deepEqual(Object.keys(replay(cases, DEFAULT_WEIGHTS)), ["total", "same", "changed"], "without attempts, replay is as before");
+});
+
+test("BKT in shadow: Brier scores against the existing estimate and the learner's confidence on a fixture history", async () => {
+  const B = await import("../src/bkt");
+  const params = { pInit: 0.5, pLearn: 0.1, pSlip: 0.1, pGuess: 0.2 };
+  const history = [
+    attempt({ id: "a", confidence: 0.8, timestamp: "2026-11-10T10:00:00.000Z" }),
+    attempt({ id: "b", result: "incorrect", confidence: 0.6, timestamp: "2026-11-11T10:00:00.000Z" }),
+    attempt({ id: "h", assisted: true, timestamp: "2026-11-11T11:00:00.000Z" }),
+    attempt({ id: "c", timestamp: "2026-11-12T10:00:00.000Z" }),
+  ];
+  const c = B.brierComparison([B.bktTrace(history, 1, { params })]);
+  const l3 = 26.6 / 59;
+  const p = [0.55, 43.2 / 55, l3 * 0.9 + (1 - l3) * 0.2];
+  const close = (x: number | null, y: number) => assert.ok(x !== null && Math.abs(x - y) < 1e-12, `${x} vs ${y}`);
+  assert.deepEqual([c.n, c.rated], [3, 2]);
+  close(c.bkt, ((p[0] - 1) ** 2 + p[1] ** 2 + (p[2] - 1) ** 2) / 3);
+  close(c.estimate, ((0.5 - 1) ** 2 + (2 / 3) ** 2 + (0.5 - 1) ** 2) / 3);
+  close(c.bktRated, ((p[0] - 1) ** 2 + p[1] ** 2) / 2);
+  close(c.estimateRated, ((0.5 - 1) ** 2 + (2 / 3) ** 2) / 2);
+  close(c.confidence, 0.2);
+  close(c.confidence, skillEvidence(history, 1).brier!);
+  assert.match(B.comparisonLine(c), /^Brier over 3 unaided answers \(lower is better\): BKT 0\.35, existing estimate 0\.31; on the 2 with your confidence: BKT 0\.41, estimate 0\.35, your confidence 0\.20; fewer than 20 answers, too few to tell them apart$/);
+  assert.equal(B.comparisonLine(B.brierComparison([])), "No unaided answers to score BKT against yet");
+});
+
+test("the measurement summary reads saved records without a model, and says call counts are not savings", async () => {
+  const M = await import("../src/metrics");
+  const line = (r: object) => JSON.stringify(r);
+  const evidence = ["---", "tutor: evidence", "---", "", "```jsonl", line({ kind: "attempt", ...attempt({ id: "a", seconds: 20 }) }), line({ kind: "change", t: "x" }), "{not json", line({ kind: "attempt", ...attempt({ id: "b", grading: "model", verification: "unverified", seconds: 40, timestamp: "2026-11-11T10:00:00.000Z" }) }), line({ kind: "attempt", ...attempt({ id: "c", assisted: true, seconds: 60, timestamp: "2026-11-11T11:00:00.000Z" }) }), "```"].join("\n");
+  const attempts = M.attemptsFromText(evidence);
+  assert.deepEqual(attempts.map((a) => a.id), ["a", "b", "c"]);
+  const pkg = M.packageFromText('head\n\n```json\n{"format":"study-tutor-course","topic":"Calculus","staged":{"metrics":{"localCalls":2,"cacheHits":3,"elapsedMs":1000,"generators":4,"generatorsRejected":1,"laterCounter":5,"escalated":""}}}\n```\n')!;
+  const s = M.summariseMetrics({
+    packages: [pkg, { topic: "old" }],
+    attempts: { Calculus: attempts },
+    activities: [{ status: "ready", localCalls: 2, repairs: 1, claudeCalls: 0, firstPassValid: false, timing: { wallMs: 900, localMs: 800, loadMs: 100, promptTokens: 50, evalTokens: 20 } }],
+    decisions: [{ decision: { version: 4, local: "bank" } }, { decision: { version: 3, local: null } }],
+  });
+  assert.deepEqual(s.compile.totals, { localCalls: 2, cacheHits: 3, generators: 4, generatorsRejected: 1, laterCounter: 5 }, "every numeric counter is summed, new ones included");
+  assert.deepEqual([s.compile.packages, s.compile.staged, s.compile.elapsedMs.median], [2, 1, 1000]);
+  assert.deepEqual([s.attempts.markedByCode, s.attempts.markedByModel, s.attempts.assisted, s.attempts.independent, s.attempts.seconds.median], [2, 1, 1, 2, 40]);
+  assert.deepEqual([s.activities.localCalls, s.activities.repairs, s.activities.firstPassValid, s.activities.firstPassKnown], [2, 1, 0, 1]);
+  assert.deepEqual([s.decisions.bank, s.decisions.model, s.decisions.byVersion], [1, 1, { "3": 1, "4": 1 }]);
+  assert.equal(s.shadow.n, 2);
+  const report = M.metricsReport(s);
+  assert.ok(report.includes(M.CALL_COUNT_CAVEAT));
+  assert.match(report, /Token use and cost per study turn: shown in Details for the current sitting only, not saved\./);
+});
