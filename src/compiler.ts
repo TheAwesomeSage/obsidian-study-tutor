@@ -4,6 +4,7 @@ import { digest, excerpt, indexSource, passageWindow, rankPassages, type SourceI
 import { parseQuestions, type Question, type SourceMode } from "./formats";
 import { validateJson, type Schema } from "./jsonschema";
 import { FAMILY_SPEC_VERSION, parseFamilySpec } from "./families";
+import { codeTaskLine, encodeSolution, parseCodeTask } from "./codequestions";
 import type { LocalModel } from "./ollama";
 
 export interface CompileObjective {
@@ -41,6 +42,9 @@ export interface CompileMetrics {
   /** Question generators kept after trusted code checked them, and those it dropped. */
   generators?: number;
   generatorsRejected?: number;
+  /** Coding exercises kept after trusted code checked their tests (codequestions.ts), and those it dropped. */
+  codeTasks?: number;
+  codeTasksRejected?: number;
   /** Lesson groups (objective cohorts) compiled, and how many needed no model call. */
   groups?: number;
   groupsReused?: number;
@@ -83,7 +87,18 @@ function checkedGenerator(q: DraftQuestion): string {
   return Number.isFinite(stated) && tests?.some((t) => close(t.answer)) ? JSON.stringify(parsed.spec) : "";
 }
 
-type DraftQuestion = Pick<Question, "type" | "question" | "options" | "answer" | "explanation"> & Required<Pick<Question, "rubric" | "difficulty" | "family" | "task">> & { generator: string };
+/**
+ * A draft coding exercise's task as one line of JSON, when trusted code accepts it
+ * (codequestions.ts). "" when the draft is not a coding exercise; null when it is one and its
+ * task fails the checks, and then the whole question is dropped: its tests cannot be trusted.
+ */
+function checkedCode(q: DraftQuestion): string | null {
+  if (q.type !== "code" && !q.code?.trim()) return "";
+  const parsed = parseCodeTask(q.code ?? "");
+  return "task" in parsed ? codeTaskLine(parsed.task) : null;
+}
+
+type DraftQuestion = Pick<Question, "question" | "options" | "answer" | "explanation"> & Required<Pick<Question, "rubric" | "difficulty" | "family" | "task">> & { type: Question["type"] | "code"; generator: string; code?: string };
 type DraftUnit = {
   objective: string; name: string; prerequisites: string[]; claims: string[]; example: string; misconceptions: string[];
   details: string; passages: string[]; questions: DraftQuestion[]; visualKind: string; visualReason: string;
@@ -94,9 +109,11 @@ const LOCAL_VERSION = "passage-selector-1";
 // Checkpoint versions of the lesson stages. Bump one whenever that stage's prompt, schema or the
 // validation and use of its reply changes. The keys also digest the prompt and schema, so a missed
 // bump there still invalidates old entries; a change in validation is caught only by the bump.
-const SYNTHESIS_VERSION = "synthesis-2";
+const SYNTHESIS_VERSION = "synthesis-3";
 /** How a short numeric question describes its numbers, so code can make new ones (families.ts). */
 const GENERATOR_RULE = `For a short question whose answer is one number computed from values in the question, set generator to a one-line JSON family spec so code can make fresh numbers; otherwise use the empty string. The spec: {"v":${FAMILY_SPEC_VERSION},"params":{"u":{"min":1,"max":9,"step":1}},"where":["conditions such as a!=0"],"template":"the question with {u} for each value and {=expr} for a computed one","answer":"expression over the params","dp":decimal places when the answer is rounded,"steps":["worked steps, same placeholders"],"mistakes":[{"label":"a common mistake","expr":"the value it gives","step":index of the step it breaks,"says":"what that step says when the mistake is made"}],"tests":[{"params":{"u":3},"answer":the question's own answer}]}. Expressions use + - * / ^, parentheses, pi, e and sqrt, abs, sin, cos, tan, exp, ln, log10, min, max, round, floor, ceil only. Keep bounds realistic for the context, and include the question as written as the first test.`;
+/** How a programming objective gets a coding exercise whose tests code can run (codequestions.ts). */
+const CODE_RULE = `When an objective is about writing code (a programming language, data structures, algorithms, concurrency, systems or numerical programming), one of its questions may be a coding exercise: type "code", the task in question, a complete reference solution in answer, and code set to a one-line JSON task. For any other question leave code empty. The task: {"language":"python, cpp or c","entry":"Python only: the function each test calls; leave it out for a program that reads standard input","tests":[{"name":"a short label","stdin":"the program's input","args":[JSON values, entry tasks only],"expected":"the exact expected output, or for an entry task the return value as JSON text","hidden":true for a test kept back until the answer is marked,"compare":"trim, exact, tokens or float"}],"timeLimitMs":2000,"concurrent":true only when it uses threads or shared state,"starter":"optional starting code"}. Tests are data, never code: write 3 to 8, at least one visible and the edge cases hidden, each expected value worked out from the task and checked against your reference solution. Use the rubric only for what tests cannot check, such as a required complexity bound.`;
 const AUDIT_VERSION = "audit-1";
 const MAX_LOCAL = 8;
 const BATCH_CHARS = 16_000;
@@ -109,9 +126,12 @@ const arr = (items: Schema, maxItems: number): Schema => ({ type: "array", items
 const obj = (properties: Record<string, Schema>): Schema => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
 const PLAN = obj({ objectives: arr(obj({ text: str, references: arr(str, 24), search: str }), 150) });
 const REVIEW = obj({ fetch: arr(obj({ objective: str, url: str }), 6), searches: arr(obj({ objective: str, query: str }), 4), inspect: arr(obj({ passage: str, offset: integer }), 5) });
+const DRAFT_QUESTION = obj({ type: { ...str, enum: ["short", "mcq", "open", "code"] }, question: str, options: arr(str, 4), answer: str, explanation: str, rubric: str, task: str, family: str, difficulty: integer, generator: str });
+// `code` is optional, so a reply written before coding exercises existed still passes.
+const DRAFT_QUESTION_CODE: Schema = { ...DRAFT_QUESTION, properties: { ...(DRAFT_QUESTION.properties as Record<string, Schema>), code: str } };
 const SYNTHESIS = obj({ overview: str, subject: str, units: arr(obj({
   objective: str, name: str, prerequisites: arr(str, 6), claims: arr(str, 6), example: str, misconceptions: arr(str, 4), details: str, passages: arr(str, 8),
-  questions: arr(obj({ type: { ...str, enum: ["short", "mcq", "open"] }, question: str, options: arr(str, 4), answer: str, explanation: str, rubric: str, task: str, family: str, difficulty: integer, generator: str }), 4),
+  questions: arr(DRAFT_QUESTION_CODE, 4),
   visualKind: str, visualReason: str,
 }), 6) });
 const AUDIT = obj({ rows: arr(obj({ objective: str, sources: arr(str, 8), teaching: bool, questions: arr(str, 24), gap: str }), 12) });
@@ -177,8 +197,8 @@ export async function compileCourse(p: {
   let usage = zeroUsage();
   let calls = 0;
   const issues: string[] = [];
-  const metrics: CompileMetrics & Required<Pick<CompileMetrics, "stageCacheHits" | "rejected" | "groups" | "groupsReused" | "generators" | "generatorsRejected">> = {
-    searches: 0, pages: 0, fetchAttempts: 0, cacheHits: 0, localCalls: 0, localMs: 0, elapsedMs: 0, escalated: "", stageCacheHits: 0, rejected: 0, groups: 0, groupsReused: 0, generators: 0, generatorsRejected: 0,
+  const metrics: CompileMetrics & Required<Pick<CompileMetrics, "stageCacheHits" | "rejected" | "groups" | "groupsReused" | "generators" | "generatorsRejected" | "codeTasks" | "codeTasksRejected">> = {
+    searches: 0, pages: 0, fetchAttempts: 0, cacheHits: 0, localCalls: 0, localMs: 0, elapsedMs: 0, escalated: "", stageCacheHits: 0, rejected: 0, groups: 0, groupsReused: 0, generators: 0, generatorsRejected: 0, codeTasks: 0, codeTasksRejected: 0,
   };
   const get = async <T>(key: string) => { try { return await p.cache.read<T>(key); } catch { return null; } };
   const save = async <T>(key: string, value: T) => {
@@ -442,7 +462,7 @@ export async function compileCourse(p: {
   const teachable = inventory.filter(o => !o.unmapped);
   const cohorts = groups(teachable, OBJECTIVES_PER_SYNTHESIS);
   const prerequisites = new Map<number, number[]>();
-  const synthPrompt = `Write structured teaching units, one per supplied objective that you can teach. Use the exact supplied objective ID in each unit. Keep claims and the compact worked example concise; use details for the full lesson, including definitions, assumptions, and a worked example with reasoning. Reference only verified passage IDs from that objective's packet. If a source is insufficient, leave it uncited. Write 2–3 aligned questions with an answer and explanation; use a rubric for open questions, an empty options array for other than multiple choice, and one fresh application when useful. Task is a short label such as "application" or "transfer"; difficulty is 1–5. ${GENERATOR_RULE} Choose visualKind only if an existing diagram, simulation or game helps; otherwise use the empty string. List prerequisites by objective ID from this group or earlier topics only when required. Omit outside material. ${REFERENCE_RULE}\n\nUse pedagogical guidance from the saved compilation skill where compatible. Its legacy output formatting does not apply:\n${p.skill.split(/^FORMAT[ \t]*$/m)[0].slice(0, 1800)}`;
+  const synthPrompt = `Write structured teaching units, one per supplied objective that you can teach. Use the exact supplied objective ID in each unit. Keep claims and the compact worked example concise; use details for the full lesson, including definitions, assumptions, and a worked example with reasoning. Reference only verified passage IDs from that objective's packet. If a source is insufficient, leave it uncited. Write 2–3 aligned questions with an answer and explanation; use a rubric for open questions, an empty options array for other than multiple choice, and one fresh application when useful. Task is a short label such as "application" or "transfer"; difficulty is 1–5. ${GENERATOR_RULE} ${CODE_RULE} Choose visualKind only if an existing diagram, simulation or game helps; otherwise use the empty string. List prerequisites by objective ID from this group or earlier topics only when required. Omit outside material. ${REFERENCE_RULE}\n\nUse pedagogical guidance from the saved compilation skill where compatible. Its legacy output formatting does not apply:\n${p.skill.split(/^FORMAT[ \t]*$/m)[0].slice(0, 1800)}`;
   metrics.groups = lessonGroups.total = cohorts.length;
   // Each group's validated synthesis and audit are checkpoints: a repeated or cancelled compile reuses finished groups.
   for (const [i, cohort] of cohorts.entries()) {
@@ -490,15 +510,22 @@ export async function compileCourse(p: {
       ].join("\n"));
       const ids: string[] = [];
       for (const q of u.questions) {
-        if (!q.question.trim() || !q.answer.trim() || !q.explanation.trim() || (q.type === "open" && !q.rubric.trim())) continue;
+        // A coding exercise is an open question with tests; its tests stand in for a rubric.
+        const code = checkedCode(q);
+        const type = code === "" ? q.type : "open";
+        if (!q.question.trim() || !q.answer.trim() || !q.explanation.trim() || (type === "open" && code === "" && !q.rubric.trim())) continue;
+        if (code !== "") metrics[code ? "codeTasks" : "codeTasksRejected"]++;
+        if (code === null) continue;
         const id = `Q${questionSections.length + 1}`;
-        const markdown = [`### ${id}`, `subskill: ${n}`, `type: ${q.type}`, `task: ${inline(q.task, 32)}`, `family: s${n}-${inline(q.family, 45)}`, `difficulty: ${Math.max(1, Math.min(5, q.difficulty))}`, `question: ${inline(q.question, 900)}`,
-          ...(q.type === "mcq" ? ["options:", ...q.options.map(v => `- ${inline(v, 320)}`)] : []), `answer: ${inline(q.answer, 1400)}`, ...(q.rubric ? [`rubric: ${inline(q.rubric, 800)}`] : []), `explanation: ${inline(q.explanation, 1100)}`].join("\n");
-        const generator = checkedGenerator(q);
+        // A reference solution keeps its lines and indentation as one JSON string.
+        const markdown = [`### ${id}`, `subskill: ${n}`, `type: ${type}`, `task: ${inline(q.task, 32)}`, `family: s${n}-${inline(q.family, 45)}`, `difficulty: ${Math.max(1, Math.min(5, q.difficulty))}`, `question: ${inline(q.question, 900)}`,
+          ...(type === "mcq" ? ["options:", ...q.options.map(v => `- ${inline(v, 320)}`)] : []), `answer: ${code ? encodeSolution(q.answer) : inline(q.answer, 1400)}`, ...(q.rubric ? [`rubric: ${inline(q.rubric, 800)}`] : []), `explanation: ${inline(q.explanation, 1100)}`,
+          ...(code ? [`code: ${code}`] : [])].join("\n");
+        const generator = code ? "" : checkedGenerator(q);
         if (q.generator.trim()) metrics[generator ? "generators" : "generatorsRejected"]++;
         const section = generator ? `${markdown}\ngenerator: ${generator}` : markdown;
         const checked = parseQuestions(section)[0];
-        if (!checked || checked.type !== q.type) continue;
+        if (!checked || checked.type !== type || (!!code && !checked.code)) continue;
         validQuestions.push(checked);
         questionSections.push(section);
         ids.push(id);

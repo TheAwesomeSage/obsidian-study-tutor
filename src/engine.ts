@@ -9,6 +9,7 @@ import { Attempt, EVIDENCE_RULES, Grading, Outcome, checkDue, recordAttempt } fr
 import { Chat, LearnerState, Mode, NextStep, Prereqs, Question, objectiveStamp, applyStateUpdate, chatWords, extractStateTrailer, fmList, fmStr, mastery, placementQuestions, prereqGaps, setLevel, ymd } from "./formats";
 import { ACTION_GUIDE, DEFAULT_WEIGHTS, Decision, POLICY_VERSION, PolicyInput, decide, homeStep } from "./policy";
 import type { ResearchProvider } from "./compile-research";
+import type { CodeRunner } from "./codetask";
 import { LocalModel } from "./ollama";
 import { PRESENT_RULE, extractPresent, presentationNote, readPresentationRequest } from "./presentation";
 import { ModuleRegistry } from "./visualcontract";
@@ -45,6 +46,11 @@ type Rest<F> = F extends (eng: Engine, ...a: infer A) => unknown ? A : never;
 export class Engine {
   /** The SymPy checker, when the plugin has one. Null in tests and wherever workers are unavailable. */
   maths: MathBackend | null = null;
+  /**
+   * Runs the learner's code for code questions (codetask.ts), when the host has a runner. Absent
+   * or null: a code answer goes to the grading call instead, and the attempt says it was not run.
+   */
+  codeRunner?: CodeRunner | null;
   /** Reads a source note by name, when the host can. Used for short source excerpts. */
   readNote: ((name: string) => Promise<string | null>) | null = null;
   /** Resolves a source note to its vault path and text, for activity provenance. Falls back to readNote. */

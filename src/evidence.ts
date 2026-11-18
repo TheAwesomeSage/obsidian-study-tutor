@@ -7,6 +7,7 @@ import { ReasoningAssessment, normaliseReasoning } from "./reasoning";
 import { MarkBasis, conclusive, normaliseBasis } from "./grading";
 import { onCurrentVersion } from "./objective-version";
 import { baseQuestionId } from "./families";
+import { CodeRunRecord, normaliseCodeRun } from "./codequestions";
 
 export type Outcome = "correct" | "partial" | "incorrect" | "skipped" | "ungraded";
 
@@ -15,10 +16,11 @@ export type Outcome = "correct" | "partial" | "incorrect" | "skipped" | "ungrade
  *   deterministic  plain code: a multiple-choice letter or an exact match after normalising
  *   symbolic       SymPy simplified the difference of the two expressions to zero
  *   numeric        SymPy compared values (random test points, or the decimal places written)
+ *   executed       the learner's code was run against the question's tests (codequestions.ts)
  *   model          a language model judged it
  *   self           the learner rated themselves after seeing the answer
  */
-export type Grading = "deterministic" | "symbolic" | "numeric" | "model" | "self";
+export type Grading = "deterministic" | "symbolic" | "numeric" | "executed" | "model" | "self";
 
 /** verified: decided or confirmed by code. unverified: one judgement, unchecked. disputed: the learner contests it. */
 export type Verification = "verified" | "unverified" | "disputed";
@@ -55,7 +57,10 @@ export interface Attempt {
   mode: string;
   difficulty: number | null;
   result: Outcome;
-  /** conceptual, procedural, arithmetic, notation, prerequisite, careless, skipped, or empty. */
+  /**
+   * conceptual, procedural, arithmetic, notation, prerequisite, careless, skipped, or empty. A run
+   * code question records compile-error, wrong-output, timeout, runtime-error or sanitizer.
+   */
   errorType: string;
   /** Feedback shown to the learner, or why the attempt could not be graded. */
   note: string;
@@ -96,6 +101,11 @@ export interface Attempt {
    * made. Attempts from before 0.10 have none and are dated by their timestamp instead.
    */
   objectives?: string[];
+  /**
+   * A code question: the run that marked it, with each test's result (hidden tests are named only
+   * here, after marking), or, when the code could not be run, why not. Absent for other questions.
+   */
+  code?: CodeRunRecord;
 }
 
 /** One change of level, with what caused it. Every change is logged so it can be explained later. */
@@ -111,7 +121,7 @@ export interface LevelChange {
 }
 
 const OUTCOMES: Outcome[] = ["correct", "partial", "incorrect", "skipped", "ungraded"];
-const GRADINGS: Grading[] = ["deterministic", "symbolic", "numeric", "model", "self"];
+const GRADINGS: Grading[] = ["deterministic", "symbolic", "numeric", "executed", "model", "self"];
 
 /** FNV-1a over the normalised text. Two wordings that differ only in case or spacing share a key. */
 export function questionKey(text: string): string {
@@ -151,6 +161,7 @@ export function normaliseAttempt(raw: unknown): Attempt | null {
   const confidence = typeof r.confidence === "number" && r.confidence >= 0 && r.confidence <= 1 ? r.confidence : null;
   const reasoning = normaliseReasoning(r.reasoning);
   const mark = normaliseBasis(r.mark);
+  const code = normaliseCodeRun(r.code);
   return {
     id: r.id,
     v: 2,
@@ -181,6 +192,7 @@ export function normaliseAttempt(raw: unknown): Attempt | null {
     ...(reasoning ? { reasoning } : {}),
     ...(mark ? { mark } : {}),
     ...(Array.isArray(r.objectives) ? { objectives: r.objectives.filter((x): x is string => typeof x === "string" && OBJECTIVE_REF.test(x)).slice(0, 12) } : {}),
+    ...(code ? { code } : {}),
   };
 }
 
@@ -449,7 +461,7 @@ export function missingFor(e: SkillEvidence, level: number, taught = false): str
 
 /** How a grading method reads in the interface. */
 export function gradingLabel(a: Pick<Attempt, "grading" | "verification">): string {
-  const base = { deterministic: "checked by the plugin", symbolic: "checked symbolically by SymPy", numeric: "checked numerically by SymPy", model: "graded by the model", self: "self-rated" }[a.grading];
+  const base = { deterministic: "checked by the plugin", symbolic: "checked symbolically by SymPy", numeric: "checked numerically by SymPy", executed: "checked by running the tests", model: "graded by the model", self: "self-rated" }[a.grading];
   if (a.verification === "disputed") return `${base}, disputed`;
   if (a.grading === "model") return a.verification === "verified" ? `${base}, confirmed` : `${base}, unverified`;
   return base;

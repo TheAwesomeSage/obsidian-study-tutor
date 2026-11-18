@@ -14,6 +14,8 @@ import { gradeOfOutcome, normaliseMark, outcomeOfGrade, withNote } from "./gradi
 import { TurnResult, TurnOpts, MAX_ANSWER_SECONDS, applyAttempt, pickQuizQuestion } from "./engine-common";
 import { fadedFor, followUp, freshVariant, markTask, metBefore, taskHelp, taskOf } from "./bankvariants";
 import { baseQuestionId } from "./families";
+import { CodeRunRecord, codeGradingQuestion, codeRunMarkdown, codeRunRecord, codeSource, looksLikeCode, markCodeRun, notRun, sentAsCode, solutionMarkdown } from "./codequestions";
+import type { CodeRunReport, CodeTask } from "./codetask";
 import type { Engine } from "./engine";
 
 /**
@@ -194,6 +196,23 @@ export function bankSession(eng: Engine, chat: Chat, state: LearnerState, mode: 
 }
 
 /**
+ * Runs a code answer with the engine's runner. No runner, or a runner that throws despite its
+ * contract, gives an "unavailable" report: no execution evidence, so the caller asks the grader.
+ * Stopping the turn aborts the run.
+ */
+async function runCode(eng: Engine, task: CodeTask, source: string, opts: TurnOpts): Promise<CodeRunReport> {
+  const runner = eng.codeRunner;
+  if (!runner) return notRun(task.language, "no code runner is set up here");
+  const ctl = new AbortController();
+  opts.onSpawn?.(() => ctl.abort());
+  try {
+    return await runner.run(task, source, ctl.signal);
+  } catch (e) {
+    return notRun(task.language, `the code runner failed: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+  }
+}
+
+/**
  * A turn that uses plain code wherever it can. Questions come from the question bank;
  * multiple-choice and exact short answers are marked without a model, and other forms of a
  * typed expression by SymPy. The model is called only when an answer needs judgement (a
@@ -213,8 +232,9 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
   const pending = task?.question;
   const text = message.trim();
   const last = chat.messages[chat.messages.length - 1];
-  // A question, or a request for a diagram or simulation, goes to the tutor as help with the open question.
-  const asksTutor = (t: string) => (looksLikeQuestion(t) || !!readPresentationRequest(t)) && !givesUp(t);
+  // A question, or a request for a diagram or simulation, goes to the tutor as help with the open
+  // question. A block of code sent for a code question is an answer, whatever its last line says.
+  const asksTutor = (t: string) => (looksLikeQuestion(t) || !!readPresentationRequest(t)) && !givesUp(t) && !(pending?.code && sentAsCode(t));
   const tools: ToolResult[] = [];
   // A bank quiz may need SymPy for the next typed answer; load it while the learner reads.
   if (questions.some((q) => q.type === "short")) eng.warmMaths();
@@ -257,6 +277,8 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
       let assumptions = "";
       let reasoning: ReasoningAssessment | null = null;
       let mistake = "";
+      let rubric = pending.rubric;
+      let codeRun: CodeRunRecord | null = null;
       const skipped = givesUp(answer);
       if (skipped) [grade, assumptions] = ["again", "the learner skipped the question"];
       else if (pending.type === "mcq") {
@@ -269,6 +291,37 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
         }
         grade = letter === mcqLetter(pending.answer) ? "good" : "again";
         assumptions = "the chosen letter was compared with the answer key";
+      } else if (pending.code) {
+        if (!looksLikeCode(answer)) {
+          const reply = "Reply with your code, in a fenced code block or as plain text, or say **skip**.";
+          chat.messages.push({ role: "tutor", text: reply });
+          await eng.store.saveChat(chatPath, chat);
+          return { reply, changes: [], state, usage, local: true };
+        }
+        // A code question: the learner's source is run against the task's tests (codequestions.ts).
+        // The run decides the result and nothing else. When nothing could run it, one grading call
+        // judges the code instead, and the attempt says it was not run.
+        const report = await runCode(eng, pending.code, codeSource(answer), opts);
+        const run = markCodeRun(pending.code, report, pending.rubric);
+        codeRun = run ? run.record : codeRunRecord(pending.code, report);
+        if (run) {
+          grade = run.proposed === "correct" ? "good" : run.proposed === "partial" ? "hard" : "again";
+          note = run.feedback;
+          grading = "executed";
+          assumptions = run.assumptions;
+          reasoning = run.reasoning;
+          rubric = run.rubric;
+          mistake = run.errorType;
+        } else {
+          const why = codeRun.message.replace(/\s+/g, " ").replace(/[.\s]+$/, "") || "no runner for this language here";
+          const g = await eng.grade(codeGradingQuestion(pending), answer);
+          grade = g.grade;
+          note = [`Not run (${why}), so the model judged your code without running it.`, g.feedback].filter(Boolean).join(" ");
+          usage = g.usage;
+          grading = "model";
+          assumptions = `the code was not run (${why}); one model judgement of it against the tests and the reference solution, not independently checked`;
+          reasoning = g.reasoning;
+        }
       } else if (task?.inst) {
         // New numbers or a repair task: code computed the answer, so code marks it.
         const m = markTask(task, answer);
@@ -320,7 +373,7 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
       // disagreeing with the grader, or a mark its own breakdown contradicts is left ungraded,
       // never guessed; a right result whose required method could not be judged is partly right
       // and counts neither way.
-      const mark = normaliseMark({ proposed: skipped ? "skipped" : outcomeOfGrade(grade), reasoning, rubric: pending.rubric });
+      const mark = normaliseMark({ proposed: skipped ? "skipped" : outcomeOfGrade(grade), reasoning, rubric });
       const result: Outcome = mark.result;
       const conflict = result === "ungraded";
       note = withNote(note, mark);
@@ -331,9 +384,12 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
       const repeat = state.attempts.some((a) => a.id === id);
       attempt = eng.bankAttempt({ id, chat, state, q: pending, answer, result, activity: opts.adaptive ? (sessionFor(chat, state, mode).action === "retrieval" ? "retrieval" : "independent-practice") : "quiz", mode, grading, assumptions, note: result === "correct" ? "" : note, now, errorType: result === "correct" ? "" : mistake, help: taskHelp(task) });
       if (reasoning) {
-        attempt.reasoning = reasoning;
+        // A run's breakdown is its result alone, and reasoning.ts has no way to say a run decided
+        // it, so it is not kept as a grader's judgement: the run record says what ran instead.
+        if (grading !== "executed") attempt.reasoning = reasoning;
         attempt.mark = mark.basis;
       }
+      if (codeRun) attempt.code = codeRun;
       state.attempts = recordAttempt(state.attempts, attempt);
       if (!repeat && scheduled) {
         // New numbers for a question are the same card: its schedule is the question's.
@@ -356,8 +412,10 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
       chat.fm.pending_confidence = "";
       const head = skipped ? "**Skipped.**" : conflict ? "**Left ungraded.**" : result === "incorrect" ? "**Incorrect.**" : result === "partial" ? "**Partly right.**" : "**Correct.**";
       const parts = [note ? `${head} ${note}` : head];
+      // Each test's result, hidden ones included now that the answer is marked.
+      if (codeRun && grading === "executed") parts.push(codeRunMarkdown(codeRun));
       // The solution is shown only now, after an attempt or an explicit skip.
-      if (result !== "correct") parts.push(`Answer: ${answerText(pending)}${pending.explanation ? `\n\n${pending.explanation}` : ""}`);
+      if (result !== "correct") parts.push(`${pending.code ? solutionMarkdown(pending) : `Answer: ${answerText(pending)}`}${pending.explanation ? `\n\n${pending.explanation}` : ""}`);
       if (!opts.adaptive && fmNum(chat.fm, "total", 0) % 5 === 0) parts.push(`*Score so far: ${fmNum(chat.fm, "right", 0)}/${fmNum(chat.fm, "total", 0)}.*`);
       verdict = parts.join("\n\n");
     }

@@ -21,6 +21,10 @@ import { skillEvidence } from "../src/evidence";
 import { fallbackMaterial, lessonDepth, missingEvidence } from "../src/lessondepth";
 import { CourseExpander, ExpansionRequest, ExpansionResult, expansionLine, expansionNote, expansionRequest, inCourse, readResult } from "../src/expansion";
 import { Claim, ClaimResult, MathBackend } from "../src/sympy";
+import type { CodeRunReport, CodeRunner, CodeTask, CodeTestStatus } from "../src/codetask";
+import { markCodeRun, notRun, parseCodeTask } from "../src/codequestions";
+import { gradingLabel } from "../src/evidence";
+import { compileCourse } from "../src/compiler";
 
 // ---------- fixtures ----------
 
@@ -833,4 +837,254 @@ test("Details: the move, its reason and evidence read as one line; old session r
   const next = readSessionReply("What is 2+2?", { ...old, pendingQuestion: "" }, { now: "t", aim: { targets: M, discriminates: "" } }).record;
   assert.deepEqual([next.pendingQuestion, next.targets, next.hints], ["What is 2+2?", M, 0]);
   assert.equal(readSessionReply(`Done.\n${session({ pendingQuestion: "", completedStep: true })}`, next, { resolved: true }).record.targets, "");
+});
+
+// ---------- code questions: from a spec to marked evidence ----------
+
+const ADD_TASK = { language: "python", entry: "add", tests: [{ name: "small", args: [1, 2], expected: "3" }, { name: "negatives cancel", args: [-1, 1], expected: "0", hidden: true }] };
+const THREAD_TASK = { language: "cpp", concurrent: true, starter: "#include <thread>\nint main() {}\n", tests: [{ name: "three lines", stdin: "a\nb\nc\n", expected: "3" }, { name: "empty stream", stdin: "", expected: "0", hidden: true }] };
+const ADD_SOLUTION = "def add(a, b):\n    return a + b";
+const CODE_BANK = [
+  "### Q1", "subskill: 1", "type: code", "question: Write add(a, b), returning the sum.", `answer: ${JSON.stringify(ADD_SOLUTION)}`, "explanation: Return a + b.", `code: ${JSON.stringify(ADD_TASK)}`, "",
+  "### Q2", "subskill: 2", "type: code", "question: Count the lines on standard input with two threads.", `answer: ${JSON.stringify("int main() { return 0; }")}`, "explanation: Join both threads before printing.", `code: ${JSON.stringify(THREAD_TASK)}`, "",
+  // Its "entry" would make a test's argument run as code: the task is refused, and the question stays an open one.
+  "### Q3", "subskill: 1", "type: code", "question: Evaluate the expression.", "answer: 2", "explanation: Add.", 'code: {"language":"python","entry":"eval","tests":[{"name":"t","args":["1+1"],"expected":"2"}]}', "",
+].join("\n");
+
+/** A scripted runner: it runs nothing, and answers with whatever the test sets. */
+class FakeRunner implements CodeRunner {
+  runs: { task: CodeTask; source: string }[] = [];
+  constructor(public next: (task: CodeTask) => CodeRunReport) {}
+  async available() {
+    return { ok: true, backend: "fake" };
+  }
+  async run(task: CodeTask, source: string) {
+    this.runs.push({ task, source });
+    return this.next(task);
+  }
+}
+
+const ran = (task: CodeTask, statuses: CodeTestStatus[], over: Partial<CodeRunReport> = {}): CodeRunReport => {
+  const st = (i: number): CodeTestStatus => statuses[i] ?? "pass";
+  return {
+    status: "ran", language: task.language, backend: "CPython 3.12 (fake)", message: "", limits: "2 s per test, no network", ms: 12,
+    tests: task.tests.map((t, i) => ({ name: t.name, hidden: !!t.hidden, status: st(i), detail: st(i) === "pass" ? "" : `expected ${t.expected}, got 41`, ms: 3 })),
+    passed: task.tests.filter((_, i) => st(i) === "pass").length, total: task.tests.length, ...over,
+  };
+};
+
+async function codeQuiz(runner: CodeRunner | null) {
+  const t = await setup();
+  await t.fs.write(`${t.dir}/questions.md`, F.withFrontmatter({ tutor: "questions", topic: "Calculus" }, CODE_BANK));
+  if (runner) t.engine.codeRunner = runner;
+  const chat = await t.chatIn("quiz");
+  const answer = async (card: string, text: string) => {
+    const c = await t.store.loadChat(chat);
+    c.fm.card = card;
+    await t.store.saveChat(chat, c);
+    return t.engine.quizTurn(t.dir, chat, text);
+  };
+  return { ...t, chat, answer };
+}
+
+test("code questions: a task is checked as data, and one with code in its tests, too many tests or an unknown language is refused", () => {
+  const ok = parseCodeTask(JSON.stringify(ADD_TASK));
+  assert.ok("task" in ok);
+  assert.deepEqual(ok.task.tests.map((x) => [x.name, x.args, x.expected, !!x.hidden]), [["small", [1, 2], "3", false], ["negatives cancel", [-1, 1], "0", true]]);
+  // A whole program reads stdin; a number given as its expected output is the same text.
+  const program = parseCodeTask({ language: "c", tests: [{ name: "one", stdin: "1\n", expected: 1 }] });
+  assert.ok("task" in program && program.task.tests[0].expected === "1" && program.task.tests[0].stdin === "1\n");
+  const err = (v: unknown) => {
+    const r = parseCodeTask(v);
+    return "error" in r ? r.error : "accepted";
+  };
+  const withTest = (o: Record<string, unknown>) => ({ ...ADD_TASK, tests: [{ name: "t", args: [1, 2], expected: "3", ...o }] });
+  const cases: [string, unknown, RegExp][] = [
+    ["unknown language", { ...ADD_TASK, language: "rust" }, /unknown language "rust"/],
+    ["missing tests", { language: "python", entry: "add" }, /no tests/],
+    ["empty tests", { ...ADD_TASK, tests: [] }, /no tests/],
+    ["over the test limit", { ...ADD_TASK, tests: Array.from({ length: 31 }, (_, i) => ({ name: `t${i}`, args: [i, 0], expected: String(i) })) }, /more than 30 tests/],
+    ["over the time limit", { ...ADD_TASK, timeLimitMs: 60000 }, /time limit/],
+    ["over the size limit", JSON.stringify({ ...ADD_TASK, starter: "x".repeat(30000) }), /size limit/],
+    ["args written as code", withTest({ args: "add(1, 2)" }), /args must be a JSON array of values/],
+    ["a check written as code", withTest({ check: "lambda r: r == 3" }), /unknown field "check": tests are data, never code/],
+    ["a harness written as code", { ...ADD_TASK, harness: "import os" }, /unknown field "harness"/],
+    ["an entry that runs its arguments", { ...ADD_TASK, entry: "eval" }, /not a plain function name/],
+    ["a dunder entry", { ...ADD_TASK, entry: "__import__" }, /not a plain function name/],
+    ["an entry for C++", { ...ADD_TASK, language: "cpp" }, /only a Python task calls an entry function/],
+    ["args without an entry", { language: "python", tests: [{ name: "t", args: [1], expected: "1" }] }, /args need an entry function/],
+    ["an expected value that is not JSON text", withTest({ expected: "three" }), /return value as JSON text/],
+    ["every test hidden", withTest({ hidden: true }), /no test is visible/],
+    ["not JSON", "{language: python}", /not JSON/],
+  ];
+  for (const [name, v, re] of cases) assert.match(err(v), re, name);
+
+  // The bank reads a coding exercise as an open question with its task; a refused task leaves an open question with none.
+  const qs = F.parseQuestions(CODE_BANK);
+  assert.deepEqual(qs.map((q) => [q.id, q.type, !!q.code]), [["Q1", "open", true], ["Q2", "open", true], ["Q3", "open", false]]);
+  assert.equal(qs[0].answer, ADD_SOLUTION, "the reference solution keeps its lines and indentation");
+  const state = F.blankState("Calculus");
+  state.names = { 1: "Limits", 2: "Derivatives" };
+  const shown = F.formatQuizQuestion(qs[0], state);
+  assert.match(shown, /add\(1, 2\)\n→ 3/);
+  assert.match(shown, /1 more is hidden until your answer is marked/);
+  assert.doesNotMatch(shown, /negatives cancel|-1, 1/, "a hidden test is not shown before marking");
+  const threads = F.formatQuizQuestion(qs[1], state);
+  assert.match(threads, /```cpp\n#include <thread>\nint main\(\) \{\}\n```/);
+  assert.match(threads, /counts as fully correct only when a thread sanitizer runs clean/);
+  assert.doesNotMatch(threads, /empty stream/);
+
+  // Old attempts read as before; a damaged run record is dropped, and "executed" survives a reload.
+  const back = normaliseAttempt({ ...attempt({ id: "x" }), grading: "executed", code: { v: 1, language: "rust", status: "ran" } })!;
+  assert.deepEqual([back.grading, back.verification, back.code], ["executed", "unverified", undefined]);
+  assert.equal(normaliseAttempt({ ...attempt({ id: "y" }), verification: undefined, grading: "executed" })?.verification, "verified");
+  assert.equal("code" in normaliseAttempt(attempt({ id: "z" }))!, false);
+});
+
+test("code questions: a run settles the result only; a required method, races nobody checked, and failures each mark as they should", () => {
+  const add = (parseCodeTask(ADD_TASK) as { task: CodeTask }).task;
+  const marked = (report: CodeRunReport, rubric = "") => {
+    const m = markCodeRun(add, report, rubric)!;
+    const n = normaliseMark({ proposed: m.proposed, reasoning: m.reasoning, rubric: m.rubric });
+    return [n.result, n.basis.conclusive, n.basis.rules, m.errorType];
+  };
+  assert.deepEqual(marked(ran(add, [])), ["correct", true, [], ""]);
+  assert.deepEqual(marked(ran(add, []), "uses a single pass over the input; runs in O(n) time"), ["partial", false, ["method-unassessed"], ""], "tests cannot show a method the rubric asks for");
+  assert.deepEqual(marked(ran(add, ["pass", "error"])), ["partial", true, [], "runtime-error"]);
+  assert.deepEqual(marked(ran(add, ["timeout", "timeout"])), ["incorrect", true, [], "timeout"]);
+  assert.deepEqual(marked(ran(add, ["fail", "fail"])), ["incorrect", true, [], "wrong-output"]);
+  // A runner that reports fewer tests than the task has has not passed the rest.
+  assert.deepEqual(marked({ ...ran(add, []), tests: ran(add, []).tests.slice(0, 1), passed: 1, total: 1 }), ["partial", true, [], "runtime-error"]);
+  assert.equal(markCodeRun(add, notRun("python", "switched off")), null, "no runner: no execution evidence");
+  assert.equal(markCodeRun(add, { ...ran(add, []), status: "rejected", message: "source over the limit" }), null);
+});
+
+test("code questions in a quiz: the runner marks passes, partial work and compile errors with no model call, and keeps the provenance", async () => {
+  const runner = new FakeRunner((task) => ran(task, ["pass", "pass"]));
+  const t = await codeQuiz(runner);
+  let r = await t.answer("Q1", "Here it is:\n\n```python\ndef add(a, b):\n    return a + b\n```");
+  assert.equal(runner.runs[0].source, `${ADD_SOLUTION}\n`, "the fenced block is what runs");
+  assert.equal(runner.runs[0].task.entry, "add");
+  let a = r.attempt!;
+  assert.deepEqual([a.result, a.grading, a.verification, a.errorType, a.mark?.conclusive, a.reasoning], ["correct", "executed", "verified", "", true, undefined]);
+  assert.equal(gradingLabel(a), "checked by running the tests");
+  assert.match(a.assumptions, /ran the learner's Python code against 2 tests with CPython 3\.12 \(fake\); 2 passed; 2 s per test, no network; the tests check outputs only, not the method/);
+  assert.deepEqual(a.code?.tests.map((x) => [x.name, x.hidden, x.status]), [["small", false, "pass"], ["negatives cancel", true, "pass"]]);
+  assert.match(r.reply, /^\*\*Correct\.\*\* All 2 tests passed, including 1 hidden\./);
+  assert.match(r.reply, /- passed: negatives cancel \(hidden\)/, "hidden tests are named once the answer is marked");
+  let st = await t.store.loadState(t.dir, 4);
+  assert.deepEqual(st.attempts.find((x) => x.id === a.id)?.code, a.code, "the run is stored and read back");
+  assert.equal(skillEvidence(st.attempts, 1).independentCorrect, 1, "an unaided pass is independent evidence");
+
+  // Some tests pass: partly right, with the failed test's diff and the reference solution shown now.
+  runner.next = (task) => ran(task, ["pass", "fail"]);
+  r = await t.answer("Q1", "def add(a, b):\n    return a + b if a > 0 else 41");
+  a = r.attempt!;
+  assert.deepEqual([a.result, a.errorType, a.mark?.conclusive, a.code?.passed, a.code?.total], ["partial", "wrong-output", true, 1, 2]);
+  assert.match(r.reply, /^\*\*Partly right\.\*\* 1 of 2 tests passed; "negatives cancel" gave the wrong output\./);
+  assert.match(r.reply, /negatives cancel:\n\n```text\nexpected 0, got 41\n```/);
+  assert.match(r.reply, /A reference solution:\n\n```python\ndef add\(a, b\):\n {4}return a \+ b\n```/);
+
+  // A compile error is a wrong answer, with the compiler's output.
+  runner.next = (task) => ({ ...ran(task, []), status: "compile-error", tests: [], passed: 0, backend: "g++ 13.2.0 -std=c++20", message: "main.cpp:1:28: error: expected ';' before '}'" });
+  r = await t.answer("Q2", "```cpp\nint main() { return 0 }\n```");
+  a = r.attempt!;
+  assert.deepEqual([a.result, a.errorType, a.code?.status], ["incorrect", "compile-error", "compile-error"]);
+  assert.match(r.reply, /Did not compile \(C\+\+, run by g\+\+ 13\.2\.0 -std=c\+\+20\)/);
+  assert.match(r.reply, /```text\nmain\.cpp:1:28: error: expected ';' before '\}'\n```/);
+
+  // Words are not code: the learner is asked for code, and nothing runs or is recorded.
+  const runs = runner.runs.length;
+  r = await t.answer("Q1", "use a plus sign");
+  assert.match(r.reply, /^Reply with your code/);
+  assert.deepEqual([r.attempt, runner.runs.length], [undefined, runs]);
+  assert.equal(t.calls.length, 0, "no model call happened while the runner marked");
+  st = await t.store.loadState(t.dir, 4);
+  assert.equal(st.attempts.filter((x) => x.grading === "executed").length, 3);
+});
+
+test("code questions in a quiz: threaded code counts only with a clean thread sanitizer, and a sanitizer report is a failure", async () => {
+  const runner = new FakeRunner((task) => ran(task, ["pass", "pass"], { backend: "g++ 13.2.0 -std=c++20 -fsanitize=address,undefined", sanitizer: "clean" }));
+  const t = await codeQuiz(runner);
+  const source = "```cpp\n#include <thread>\nint main() {}\n```";
+  let r = await t.answer("Q2", source);
+  let a = r.attempt!;
+  assert.deepEqual([a.result, a.grading, a.mark?.conclusive, a.mark?.rules, a.errorType], ["partial", "executed", false, ["assumptions-unassessed"], ""]);
+  assert.match(a.note, /All 2 tests passed, but passing tests cannot show that threaded code is free of data races, and no thread sanitizer ran clean\./);
+  assert.match(a.assumptions, /passing tests cannot show the absence of data races/);
+  let st = await t.store.loadState(t.dir, 4);
+  const e = skillEvidence(st.attempts, 2);
+  assert.deepEqual([e.inconclusive, e.independent], [1, 0], "kept for the record, not a data point either way");
+
+  runner.next = (task) => ran(task, ["pass", "pass"], { backend: "clang++ 17 -std=c++20 -fsanitize=thread", sanitizer: "clean" });
+  r = await t.answer("Q2", source);
+  assert.deepEqual([r.attempt?.result, r.attempt?.mark?.conclusive], ["correct", true]);
+  assert.match(r.attempt!.assumptions, /a thread sanitizer ran clean on these runs/);
+
+  runner.next = (task) => ran(task, ["pass", "pass"], { backend: "clang++ 17 -std=c++20 -fsanitize=thread", sanitizer: "reported" });
+  r = await t.answer("Q2", source);
+  a = r.attempt!;
+  assert.deepEqual([a.result, a.errorType], ["incorrect", "sanitizer"]);
+  assert.match(r.reply, /The sanitizer reported a data race or a memory error, although every output matched/);
+  assert.equal(t.calls.length, 0);
+  st = await t.store.loadState(t.dir, 4);
+  assert.deepEqual(st.attempts.map((x) => x.result), ["partial", "correct", "incorrect"]);
+});
+
+test("code questions in a quiz: with no runner, or one that cannot run the language, the grader marks it and says the code was not run", async () => {
+  const runner = new FakeRunner((task) => ({ status: "unavailable", language: task.language, backend: "", message: "no C++ compiler found", tests: [], passed: 0, total: 0, limits: "", ms: 0 }));
+  const t = await codeQuiz(runner);
+  t.replies.push(JSON.stringify({ grade: "good", feedback: "This would pass the tests.", reasoning: { result: "correct", method: "sound", certainty: "complete" } }));
+  const r = await t.answer("Q2", "```cpp\n#include <thread>\nint main() {}\n```");
+  assert.equal(t.calls.length, 1, "one grading call");
+  assert.match(t.calls[0].input, /code was not run\. Judge whether it would pass these tests/);
+  assert.match(t.calls[0].input, /empty stream/, "the grader sees every test, as data");
+  const a = r.attempt!;
+  assert.deepEqual([a.result, a.grading, a.verification, a.code?.status, a.code?.message], ["correct", "model", "unverified", "unavailable", "no C++ compiler found"]);
+  assert.equal(gradingLabel(a), "graded by the model, unverified");
+  assert.ok(a.reasoning, "the grader's breakdown is kept as its judgement");
+  assert.match(r.reply, /^\*\*Correct\.\*\* Not run \(no C\+\+ compiler found\), so the model judged your code without running it\. This would pass the tests\./);
+  assert.match(a.assumptions, /the code was not run \(no C\+\+ compiler found\); one model judgement/);
+
+  const bare = await codeQuiz(null);
+  bare.replies.push(JSON.stringify({ grade: "again", feedback: "It returns the difference.", reasoning: { result: "incorrect", method: "flawed", certainty: "complete" } }));
+  const r2 = await bare.answer("Q1", "def add(a, b): return a - b");
+  assert.deepEqual([r2.attempt?.result, r2.attempt?.grading, bare.calls.length], ["incorrect", "model", 1]);
+  assert.match(r2.attempt!.assumptions, /no code runner is set up here/);
+});
+
+test("code questions: the compiler keeps a coding exercise whose tests pass the checks and drops one that fails them", async () => {
+  const data = new Map<string, unknown>();
+  const cache = { read: async <T>(k: string) => (data.get(k) as T | undefined) ?? null, write: async (k: string, v: unknown) => void data.set(k, JSON.parse(JSON.stringify(v))) };
+  const draft = { type: "code", options: [], answer: ADD_SOLUTION, explanation: "Return the sum.", rubric: "", task: "application", family: "add", difficulty: 2, generator: "" };
+  const seen: any[] = [];
+  const call = async (o: any) => {
+    seen.push(o);
+    const input = JSON.parse(o.input);
+    const props = o.jsonSchema.properties;
+    let structured: unknown;
+    if (props.objectives) structured = { objectives: input.passages.filter((p: any) => !p.text.startsWith("#")).map((p: any) => ({ text: p.text.trim().slice(0, 120), references: [p.id], search: "" })) };
+    else if (props.units) {
+      structured = { overview: "Functions return values.", subject: "none", units: input.objectives.map((ob: any, i: number) => ({
+        objective: ob.id, name: "Writing a function", prerequisites: [], claims: ["A function returns its result."], example: "add(1, 2) returns 3.", misconceptions: [], details: "Define the function with def and return the result.",
+        passages: input.packet[i].passages.map((p: any) => p.id), visualKind: "", visualReason: "",
+        questions: [
+          { ...draft, question: "Write add(a, b), returning the sum.", code: JSON.stringify(ADD_TASK) },
+          { ...draft, question: "Write add(a, b) again.", code: JSON.stringify({ ...ADD_TASK, tests: [{ name: "small", args: "add(1, 2)", expected: "3" }] }) },
+          { ...draft, type: "short", question: "What does add(1, 2) return?", answer: "3", code: "" },
+        ],
+      })) };
+    } else if (props.rows) structured = { rows: input.objectives.map((ob: any, i: number) => ({ objective: ob.id, sources: input.packet[i].passages.map((p: any) => p.id), teaching: true, questions: input.questions.map((q: any) => q.id), gap: "" })) };
+    else assert.fail("unexpected compile stage");
+    return { structured, text: "", usage };
+  };
+  const r = await compileCourse({ title: "Python functions", goal: "Write small functions", mode: "notes", material: [{ name: "Python notes", path: "Py/Python notes.md", text: "# Functions\n\nA function returns its result with return.\n" }], subjects: [], skill: "compile exercises", model: "fixture", singlePassWords: 600, cache, call });
+  const synth = seen.find((o) => o.jsonSchema.properties.units);
+  assert.match(synth.system, /coding exercise: type "code"/);
+  assert.ok(synth.jsonSchema.properties.units.items.properties.questions.items.properties.code, "the schema offers a code task");
+  const qs = F.parseQuestions(r.questionsBody);
+  assert.deepEqual(qs.map((q) => [q.id, q.type, !!q.code]), [["Q1", "open", true], ["Q2", "short", false]], "the exercise with code for args is dropped whole");
+  assert.equal(qs[0].answer, ADD_SOLUTION);
+  assert.deepEqual(qs[0].code?.tests.map((x) => [x.name, !!x.hidden]), [["small", false], ["negatives cancel", true]]);
+  assert.deepEqual([r.staged.metrics.codeTasks, r.staged.metrics.codeTasksRejected], [1, 1]);
 });

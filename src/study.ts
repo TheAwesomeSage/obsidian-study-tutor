@@ -17,6 +17,7 @@ import { moveLine } from "./tutormove";
 import { reasoningLines } from "./reasoning";
 import { conclusive, markLine } from "./grading";
 import { isBankId } from "./bankvariants";
+import { codeRunSummary, codeTestRows } from "./codequestions";
 import { expansionLine } from "./expansion";
 import type { Screen, TutorView } from "./view";
 import { MODE_INFO, button, chip, confirmAction, iconButton, modeInfo } from "./ui";
@@ -525,6 +526,8 @@ export class StudyScreen implements Screen {
     if (a.confidence !== null) bits.push(`your confidence: ${confidenceLabel(a.confidence).toLowerCase()}`);
     if (a.seconds !== null) bits.push(a.seconds < 90 ? `${a.seconds}s` : `${Math.round(a.seconds / 60)} min`);
     line.createSpan({ cls: "st-meta", text: bits.join(" · ") });
+    // A code answer: how many tests passed and what ran them, or why it was not run.
+    if (a.code) box.createDiv({ cls: "st-meta", text: codeRunSummary(a.code) });
     const more = box.createEl("details", { cls: "st-feedback-more" });
     more.createEl("summary", { text: "How this was checked" });
     if (a.assumptions) more.createDiv({ cls: "st-meta", text: `Basis: ${a.assumptions}.` });
@@ -534,6 +537,14 @@ export class StudyScreen implements Screen {
     if (a.note) more.createDiv({ cls: "st-meta", text: a.note });
     // The result, the method and the assumptions, each with who decided it.
     if (a.reasoning) for (const l of reasoningLines(a.reasoning)) more.createDiv({ cls: "st-meta st-reasoning", text: l });
+    // Each test, hidden ones named now that the answer is marked, with the first failures' details as plain text.
+    if (a.code) {
+      if (a.code.status === "compile-error" && a.code.message) more.createEl("pre", { cls: "st-meta", text: a.code.message });
+      for (const row of codeTestRows(a.code)) {
+        more.createDiv({ cls: "st-meta st-reasoning", text: row.line });
+        if (row.detail) more.createEl("pre", { cls: "st-meta", text: row.detail });
+      }
+    }
     if (this.markedNote) box.createDiv({ cls: "st-meta", text: this.markedNote });
     if (a.result === "ungraded" || a.result === "skipped" || a.grading === "self" || this.busy || !v.dir) return;
     const row = box.createDiv({ cls: "st-actions" });

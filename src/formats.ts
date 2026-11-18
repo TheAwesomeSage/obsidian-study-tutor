@@ -3,6 +3,8 @@ import type { Relation } from "./course";
 import type { Misconception } from "./misconceptions";
 import { reservedQuestions } from "./coursepkg";
 import { FamilySpec, parseFamilySpec } from "./families";
+import type { CodeTask } from "./codetask";
+import { decodeSolution, parseCodeTask, renderCodeTask } from "./codequestions";
 // Parsing and serialising of the plugin's markdown files. Pure functions, no Obsidian imports.
 
 export type Mode = "auto" | "tutor" | "teach" | "quiz" | "expert";
@@ -291,9 +293,16 @@ export interface Question {
   rubric?: string;
   /** A bounded family spec (families.ts): code makes fresh numbers for this question and marks them. */
   generator?: FamilySpec;
+  /**
+   * A coding exercise (codequestions.ts): the learner answers with source code, which is run
+   * against these tests when a runner is available. The question's type stays "open", so every
+   * path that does not know about code treats it as an answer for the grader; `answer` holds a
+   * reference solution.
+   */
+  code?: CodeTask;
 }
 
-const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation", "family", "task", "difficulty", "rubric", "generator"] as const;
+const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation", "family", "task", "difficulty", "rubric", "generator", "code"] as const;
 const Q_TASKS = ["recall", "application", "transfer", "prediction", "explanation", "error-finding", "teach-back", "edge-case"];
 
 const OPTION_LABEL = /^\(?[A-Za-z][.):]\s+/;
@@ -366,6 +375,14 @@ export function parseQuestions(md: string): Question[] {
     // A spec that fails its checks is dropped: the question stays, with its own numbers only.
     const generator = type === "short" && get("generator") ? parseFamilySpec(get("generator")) : null;
     if (generator && "spec" in generator) q.generator = generator.spec;
+    // "code:" is a one-line JSON task. One that fails its checks is dropped, and the question
+    // stays an open one for the grader, with no tests to run.
+    const code = type !== "mcq" && get("code") ? parseCodeTask(get("code")) : null;
+    if (code && "task" in code) {
+      q.type = "open";
+      q.code = code.task;
+      q.answer = decodeSolution(q.answer);
+    }
     out.push(q);
   }
   return out;
@@ -716,6 +733,8 @@ export function reviewQueue(questions: Question[], s: LearnerState, today: strin
 export function formatQuizQuestion(q: Question, s: LearnerState): string {
   const head = `**${s.names[q.subskill] ?? "Question"}**\n\n${q.question}`;
   if (q.type === "mcq") return `${head}\n\n${q.options.map((o) => `- ${o}`).join("\n")}\n\n*Reply with a letter.*`;
+  // A code question shows its visible tests and starting code; hidden tests only after marking.
+  if (q.code) return `${head}\n\n${renderCodeTask(q.code)}`;
   return head;
 }
 
