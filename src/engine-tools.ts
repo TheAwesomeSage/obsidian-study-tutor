@@ -1,4 +1,4 @@
-// The tools a turn can run: maths with SymPy, the question bank, evidence, the course graph, retrieval and lessons.
+// The tools a turn can run: maths with SymPy, running code against a code task's tests, the question bank, evidence, the course graph, retrieval and lessons.
 // Part of the engine (see engine.ts): each function takes the engine it works for, and the
 // engine has a method of the same name that calls it. No Obsidian imports.
 
@@ -7,6 +7,8 @@ import { need } from "./tools";
 import { Retrieval, RetrievalConcept, renderContext, renderRetrieval, retrieve } from "./retrieval";
 import { fallbackMaterial, missingEvidence, renderLesson } from "./lessondepth";
 import { equivalenceKind, bestExcerpts } from "./engine-common";
+import type { CodeLanguage, CodeRunReport, CodeRunner, CodeTask } from "./codetask";
+import { CODE_RUN_TIMEOUT_MS, isCodeLanguage, validateCodeTask } from "./coderun";
 import type { Engine } from "./engine";
 
 export function registerTools(eng: Engine): void {
@@ -181,6 +183,41 @@ export function registerTools(eng: Engine): void {
           outside: outside.map((e) => `${e.name} in ${e.topic} (level ${e.level ?? "unknown"})`),
         },
         assumptions: ["relations marked rejected are left out"],
+      };
+    },
+  });
+  registerCodeRun(eng);
+}
+
+/** `code.run`: code against a code task's tests, through the runner the host gives the engine (coderun.ts). */
+function registerCodeRun(eng: Engine): void {
+  // The host sets `codeRunner` on the engine (main.ts); read through a narrow type so this does not depend on where the field is declared.
+  const codeRunner = (): CodeRunner | null => (eng as { codeRunner?: CodeRunner | null }).codeRunner ?? null;
+  eng.tools.register<{ language: CodeLanguage; source: string; task: CodeTask }, CodeRunReport>({
+    name: "code.run",
+    description: "Runs code against a code task's tests: Python in the bundled Pyodide, C and C++ with a local compiler when that is switched on.",
+    kind: "computed",
+    timeoutMs: CODE_RUN_TIMEOUT_MS,
+    validate: (raw) => {
+      const o = need.object(raw);
+      if (typeof o === "string") return o;
+      const extra = Object.keys(o).filter((k) => k !== "language" && k !== "source" && k !== "task");
+      if (extra.length) return `unknown fields: ${extra.slice(0, 5).join(", ")}`;
+      if (!isCodeLanguage(o.language)) return "language must be python, cpp or c";
+      if ((o.task as { language?: unknown } | null)?.language !== o.language) return "task.language must match language";
+      const bad = validateCodeTask(o.task, o.source, { strict: true });
+      // A copy, so nothing the caller changes later reaches the run.
+      return bad ?? { language: o.language, source: o.source as string, task: JSON.parse(JSON.stringify(o.task)) as CodeTask };
+    },
+    run: async (input, ctx) => {
+      const runner = codeRunner();
+      if (!runner) throw new Error("No code runner is available.");
+      const report = await runner.run(input.task, input.source, ctx.signal);
+      // Not running at all is a failure, never a result about the code.
+      if (report.status === "unavailable" || report.status === "rejected") throw new Error(report.message || `The code was not run (${report.status}).`);
+      return {
+        output: report,
+        assumptions: [report.limits, "passing tests show the code works on these inputs, not that it is correct on all of them", ...(input.task.concurrent ? ["passing tests cannot show a program is free of races"] : [])].filter(Boolean),
       };
     },
   });

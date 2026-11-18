@@ -404,8 +404,12 @@ def run(payload):
     return json.dumps(out)
 `;
 
-/** Source of the Web Worker. Kept as text so it ships inside main.js. */
-export const WORKER_SOURCE = `
+/**
+ * The start of every Pyodide worker: this one and the code runner's (coderun-python.ts). It takes
+ * Node out of the worker and defines `serveBundle(files, what)`, which answers Pyodide's fetch and
+ * importScripts from the bundled files in memory (under LOCAL) and refuses everything else.
+ */
+export const PYODIDE_WORKER_PRELUDE = `
 // Obsidian runs on Electron with Node switched on inside workers. Pyodide would then take
 // itself to be running under Node and fail to load, and code in here could reach the file
 // system. This worker needs none of Node, so every trace of it is removed before anything loads.
@@ -413,44 +417,54 @@ for (const name of ["process", "require", "module", "exports", "global", "Buffer
   try { delete self[name]; } catch (e) {}
   try { if (typeof self[name] !== "undefined") self[name] = undefined; } catch (e) {}
 }
-const CDN = ${JSON.stringify(PYODIDE_INDEX)};
 const LOCAL = ${JSON.stringify(BUNDLED_INDEX)};
-const PYTHON = ${JSON.stringify(PYTHON)};
-let run = null;
-// The first message says where the runtime comes from: the bundled files, or the CDN.
-let gotInit;
-const init = new Promise((resolve) => (gotInit = resolve));
 const nameOf = (u) => {
   const s = String(u && typeof u === "object" && "url" in u ? u.url : u);
   return s.startsWith(LOCAL) ? s.slice(LOCAL.length).split(/[?#]/)[0] : null;
 };
 const typeOf = (n) => (n.endsWith(".wasm") ? "application/wasm" : n.endsWith(".json") ? "application/json" : n.endsWith(".js") ? "text/javascript" : "application/octet-stream");
+// Pyodide asks for its files with fetch and importScripts. Both are answered from memory, and
+// anything that is not in the bundle is refused, so nothing here touches the network. Returns a
+// function that lets go of the files once everything is loaded.
+function serveBundle(files, what) {
+  let held = files;
+  const missing = (u) => new TypeError(what + String(u && typeof u === "object" && "url" in u ? u.url : u));
+  const realImport = self.importScripts.bind(self);
+  self.fetch = async (input) => {
+    const name = nameOf(input);
+    if (!held || name === null || !held[name]) throw missing(input);
+    return new Response(held[name], { status: 200, headers: { "Content-Type": typeOf(name) } });
+  };
+  self.importScripts = (...urls) => {
+    const blobs = urls.map((u) => {
+      const name = nameOf(u);
+      if (!held || name === null || !held[name]) throw missing(u);
+      return URL.createObjectURL(new Blob([held[name]], { type: "text/javascript" }));
+    });
+    try { realImport(...blobs); } finally { blobs.forEach((b) => URL.revokeObjectURL(b)); }
+  };
+  return () => { held = null; };
+}
+`;
+
+/** Source of the Web Worker. Kept as text so it ships inside main.js. */
+export const WORKER_SOURCE = `
+${PYODIDE_WORKER_PRELUDE}
+const CDN = ${JSON.stringify(PYODIDE_INDEX)};
+const PYTHON = ${JSON.stringify(PYTHON)};
+let run = null;
+// The first message says where the runtime comes from: the bundled files, or the CDN.
+let gotInit;
+const init = new Promise((resolve) => (gotInit = resolve));
 const ready = (async () => {
   // Fail closed: if Node is somehow still reachable, SymPy stays off and the model does the maths.
   if (typeof process !== "undefined" || typeof require !== "undefined") throw new Error("Node could not be removed from the worker");
   const { files } = await init;
   let index = CDN;
+  let release = null;
   if (files) {
-    // Pyodide asks for its files with fetch and importScripts. Both are answered from memory, and
-    // anything that is not in the bundle is refused, so nothing here touches the network.
     index = LOCAL;
-    let held = files;
-    const missing = (u) => new TypeError("not part of the bundled SymPy runtime: " + String(u && typeof u === "object" && "url" in u ? u.url : u));
-    const realImport = self.importScripts.bind(self);
-    self.fetch = async (input) => {
-      const name = nameOf(input);
-      if (!held || name === null || !held[name]) throw missing(input);
-      return new Response(held[name], { status: 200, headers: { "Content-Type": typeOf(name) } });
-    };
-    self.importScripts = (...urls) => {
-      const blobs = urls.map((u) => {
-        const name = nameOf(u);
-        if (!held || name === null || !held[name]) throw missing(u);
-        return URL.createObjectURL(new Blob([held[name]], { type: "text/javascript" }));
-      });
-      try { realImport(...blobs); } finally { blobs.forEach((b) => URL.revokeObjectURL(b)); }
-    };
-    self.__releaseBundle = () => { held = null; };
+    release = serveBundle(files, "not part of the bundled SymPy runtime: ");
   }
   importScripts(index + "pyodide.js");
   const py = await loadPyodide({ indexURL: index });
@@ -458,7 +472,7 @@ const ready = (async () => {
   py.runPython(PYTHON);
   run = py.globals.get("run");
   // Everything is loaded; the 30 MB of files are no longer needed in memory.
-  if (self.__releaseBundle) self.__releaseBundle();
+  if (release) release();
 })();
 self.onmessage = async (e) => {
   if (e.data && e.data.type === "init") {

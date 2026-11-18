@@ -9,11 +9,14 @@ import { DEFAULT_WEIGHTS, PolicyWeights, WEIGHT_LABELS } from "./policy";
 import { DEFAULT_LOCAL_MODEL, DEFAULT_OLLAMA_URL, OllamaClient, locateLocal } from "./ollama";
 import { FS, Store } from "./store";
 import { BundleFiles, SympyWorker } from "./sympy";
+import { LocalCodeRunner } from "./coderun";
+import { PythonRunner, browserPyPorts } from "./coderun-python";
+import { NativeRunner } from "./coderun-native";
 import { TutorView, VIEW_TYPE } from "./view";
 import { courseExpansions, courseLessons, courseSources } from "./tutoring-adapters";
 import { SavedActivityModal, configureVisualRuntime } from "./visuals/obsidian";
 import { join } from "path";
-import { existsSync, promises as fsp } from "fs";
+import { existsSync, promises as fsp, readFileSync } from "fs";
 import { createHash } from "crypto";
 import * as visualRegistry from "./visuals/registry";
 import { adaptRegistry } from "./visualcontract";
@@ -41,6 +44,12 @@ export interface TutorSettings extends EngineSettings {
   localModel: string;
   /** The local Ollama server. Only loopback addresses are used. */
   ollamaUrl: string;
+  /** Run Python answers to code questions in the bundled Pyodide. On by default: it is sandboxed WebAssembly. */
+  pythonRunner: boolean;
+  /** Compile and run C and C++ answers with a local compiler. Off by default: no sandbox. */
+  nativeRunner: boolean;
+  /** The C or C++ compiler to use; blank searches PATH. */
+  compilerPath: string;
 }
 
 interface PluginData {
@@ -87,6 +96,9 @@ const DEFAULTS: TutorSettings = {
   researchLimits: DEFAULT_RESEARCH_LIMITS,
   localModel: DEFAULT_LOCAL_MODEL,
   ollamaUrl: DEFAULT_OLLAMA_URL,
+  pythonRunner: true,
+  nativeRunner: false,
+  compilerPath: "",
 };
 
 const SR_PLUGIN = "obsidian-spaced-repetition";
@@ -94,16 +106,17 @@ const SR_PLUGIN = "obsidian-spaced-repetition";
 /**
  * Reads the SymPy runtime shipped in the plugin's `pyodide` folder (listed with SHA-256 hashes in
  * its bundle.json). Null when the folder is not there; an error when a file is missing or damaged,
- * so a broken install says so instead of failing somewhere inside Python.
+ * so a broken install says so instead of failing somewhere inside Python. `keep` picks which
+ * files are read: the code runner needs Python without the SymPy wheels.
  */
-export async function readSympyBundle(dir: string): Promise<BundleFiles | null> {
+export async function readSympyBundle(dir: string, keep: (name: string) => boolean = () => true): Promise<BundleFiles | null> {
   let list: { files?: Record<string, string> };
   try {
     list = JSON.parse(await fsp.readFile(join(dir, "bundle.json"), "utf8"));
   } catch {
     return null;
   }
-  const entries = Object.entries(list.files ?? {});
+  const entries = Object.entries(list.files ?? {}).filter(([name]) => keep(name));
   if (!entries.some(([name]) => name === "pyodide.js")) return null;
   const out: BundleFiles = {};
   for (const [name, sha] of entries) {
@@ -139,6 +152,8 @@ export default class StudyTutorPlugin extends Plugin {
   private activeCompile: AbortController | null = null;
   /** SymPy in a worker. Nothing is downloaded or started until a check is actually asked for. */
   sympy = new SympyWorker();
+  /** Runs answers to code questions: Python in its own Pyodide worker, C and C++ with a local compiler when switched on. */
+  codeRunner!: LocalCodeRunner;
 
   get opts(): TutorSettings {
     return this.data.settings;
@@ -151,6 +166,19 @@ export default class StudyTutorPlugin extends Plugin {
     // SymPy ships in the plugin folder; the worker is given those files instead of downloading them.
     const bundled = !!pluginDir && existsSync(join(pluginDir, "pyodide", "bundle.json"));
     if (bundled) this.sympy.useBundle(() => readSympyBundle(join(pluginDir, "pyodide")));
+    // The code runner uses the same Python, without the SymPy wheels, and never downloads it.
+    let label = "Pyodide (bundled)";
+    try {
+      const info = (bundled ? JSON.parse(readFileSync(join(pluginDir, "pyodide", "bundle.json"), "utf8")) : {}) as { pyodide?: string; python?: string };
+      if (info.pyodide && info.python) label = `Pyodide ${info.pyodide} (Python ${info.python.split(".").slice(0, 2).join(".")})`;
+    } catch {
+      /* not installed: the runner says so when asked */
+    }
+    this.codeRunner = new LocalCodeRunner({
+      settings: () => ({ python: this.opts.pythonRunner, native: this.opts.nativeRunner }),
+      python: new PythonRunner(bundled ? browserPyPorts(() => readSympyBundle(join(pluginDir, "pyodide"), (name) => !name.endsWith(".whl"))) : null, label),
+      native: new NativeRunner(() => this.opts.compilerPath),
+    });
     const saved = ((await this.loadData()) ?? {}) as Partial<PluginData>;
     this.data = { settings: { ...DEFAULTS, ...(saved.settings ?? {}) }, activeTopic: saved.activeTopic ?? "", activeChat: saved.activeChat ?? {}, skills: saved.skills ?? {}, settingsVersion: saved.settingsVersion ?? 1, drafts: saved.drafts ?? {}, graphLayout: saved.graphLayout ?? {} };
     // Settings saved by an older version have no weights; a partly filled set is completed from the defaults.
@@ -213,6 +241,7 @@ export default class StudyTutorPlugin extends Plugin {
     const searchKey = process.env.BRAVE_SEARCH_API_KEY?.trim();
     this.engine.researchProvider = searchKey ? braveResearch(searchKey) : null;
     this.engine.maths = this.sympy;
+    (this.engine as { codeRunner?: unknown }).codeRunner = this.codeRunner;
     // Source notes are read by name, for the short excerpts a teaching step may need.
     const readNote = async (name: string) => {
       const f = this.app.metadataCache.getFirstLinkpathDest(name, "");
@@ -269,6 +298,7 @@ export default class StudyTutorPlugin extends Plugin {
   onunload(): void {
     this.activeCompile?.abort();
     this.sympy.dispose();
+    this.codeRunner?.dispose();
   }
 
   /** Whether the Spaced Repetition community plugin is installed and switched on in this vault. */
@@ -550,6 +580,9 @@ class NewTopicModal extends Modal {
 }
 
 class TutorSettingTab extends PluginSettingTab {
+  /** What the last check of the code runners found, shown under its button. */
+  private codeStatus = "";
+
   constructor(
     app: App,
     private plugin: StudyTutorPlugin,
@@ -707,6 +740,51 @@ class TutorSettingTab extends PluginSettingTab {
           const secs = ((Date.now() - t0) / 1000).toFixed(1);
           if (r.length === 2 && r[0].ok && r[1].ok) new Notice(`SymPy works (${sympy.source()}). It integrated x·eˣ to ${r[0].value} and confirmed the result by differentiating it (${secs}s).`, 10000);
           else new Notice(`SymPy could not be used: ${sympy.status()}. Maths falls back to the model.`, 12000);
+          this.display();
+        }),
+      );
+
+    new Setting(containerEl).setName("Code").setHeading();
+    new Setting(containerEl)
+      .setName("Run Python answers")
+      .setDesc("Answers to Python code questions are run against their tests inside the plugin, with the bundled Python (Pyodide) in a sandboxed worker: offline, with no access to your vault or files, and a time limit on every test.")
+      .addToggle((t) =>
+        t.setValue(s.pythonRunner).onChange(async (v) => {
+          s.pythonRunner = v;
+          await this.plugin.save();
+        }),
+      );
+    new Setting(containerEl)
+      .setName("Run C and C++ answers")
+      .setDesc("Compiles C and C++ answers with a compiler on this computer (g++ or clang++) and runs them against their tests. Warning: the program runs as you with no sandbox, so it could change or delete your files. Leave this off unless you trust the code.")
+      .addToggle((t) =>
+        t.setValue(s.nativeRunner).onChange(async (v) => {
+          s.nativeRunner = v;
+          await this.plugin.save();
+        }),
+      );
+    new Setting(containerEl)
+      .setName("C and C++ compiler")
+      .setDesc("The full path to g++, clang++, gcc or clang. Leave blank to use the first one on PATH.")
+      .addText((t) =>
+        t
+          .setPlaceholder("Auto-detect")
+          .setValue(s.compilerPath)
+          .onChange(async (v) => {
+            s.compilerPath = v.trim();
+            await this.plugin.save();
+          }),
+      );
+    new Setting(containerEl)
+      .setName("Check the code runners")
+      .setDesc(this.codeStatus || "Runs a tiny program in each runner and says what was found, and whether it works.")
+      .addButton((b) =>
+        b.setButtonText("Check").onClick(async () => {
+          b.setDisabled(true);
+          b.setButtonText("Checking…");
+          const found = await this.plugin.codeRunner.check();
+          this.codeStatus = found.join(" ");
+          new Notice(found.join("\n"), 15000);
           this.display();
         }),
       );
