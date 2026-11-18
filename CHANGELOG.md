@@ -19,6 +19,21 @@ What changed in each version of Study Tutor, newest first.
   - An answer that matches a known mistake is recorded with that mistake's name. The next task is a worked solution that makes the same mistake: find the wrong step and give the right answer. Then a fresh set of numbers checks the fix without help. The repair counts as helped work; only the fresh check can count as unaided.
   - In Adaptive mode, guided practice on such a question is a faded worked example: the first steps are shown, you finish it, and each right answer leaves one more step to you. It counts as helped work.
   - The compile summary records how many specs were kept and how many were dropped.
+- **Coding exercises marked by running your code.** For a programming objective the compiler can write a coding exercise in Python, C or C++. Its tests are data, inputs with expected outputs or arguments with an expected return value, and the plugin checks every task before keeping it. A task that fails the check is dropped whole and counted in the compile summary. In Practise mode your code runs against the tests:
+  - all tests passing is right; some passing is partly right; none passing, a compile error or a sanitizer report is wrong.
+  - The feedback shows each test's result, what ran the code and the limits it ran under. Hidden tests are named only after your answer is marked.
+  - Passing tests is strong evidence, not proof. A rubric that also asks for a method keeps the answer partly right until someone judges the method. Threaded code counts as fully right only when a thread sanitizer checked the run, because tests cannot show a program is free of races.
+  - When the code cannot be run here, one grading call judges it, and the attempt says it was not run.
+- **Compile strategy.** A new setting chooses which models compile a course:
+  - *Main provider:* Claude Code or Codex does every stage, and Ollama is never asked.
+  - *Hybrid* (the default, the same split as before): Ollama picks the passages and the main provider does the rest. A local reply that fails its checks hands that step, and later ones, to the main provider, and the compile notice counts how often that happened.
+  - *Local only:* Ollama does every stage and the main provider is never called. A stage the local model cannot do is shown as a gap in the coverage.
+  - Nothing falls back to the cloud without saying so. An Ollama address on this computer can still serve a cloud model, so the plugin checks the model itself. Local only refuses a cloud model, or one it cannot prove is local, before any prompt is sent. Hybrid labels it as cloud inference. The compile notice says which model answered and where it ran.
+  - The old Ollama toggle, when it was off, becomes *Main provider*.
+- Saved compile checkpoints now record the exact model that wrote them, not only its alias. A checkpoint from a different model is not reused. Checkpoints saved by earlier versions are redone once.
+- **Exam details on objectives.** An objective line can end with exam details in brackets, such as `(weight 8%, paper 2, command: derive, 6 marks, 8 min)`, and a topic can have an exam date. See `docs/OBJECTIVE-METADATA.md`. A heavier weight and a near exam raise a concept's study priority, always between ×0.75 and ×1.5, and the study plan says by how much. Unaided practice suggests the exam's time per question when you have that long. Without exam details nothing changes.
+- **Knowledge tracing, shown but not used.** Diagnostics and the graph view show a Bayesian knowledge tracing estimate for the focus concept, labelled "shadow", with its prediction score next to the current estimate's. It counts only unaided answers, as the levels do. It never chooses a step or changes a level. It is there to be measured before anyone relies on it.
+- `docs/PILOT.md` sets out a pilot study of the tutor against version 0.9.1 and against plain note-taking with a chat, at equal study time. `scripts/metrics-summary.mjs` summarises what the plugin already records, with no model or network.
 
 ## Version 0.9.1
 
