@@ -241,7 +241,7 @@ export default class StudyTutorPlugin extends Plugin {
     const searchKey = process.env.BRAVE_SEARCH_API_KEY?.trim();
     this.engine.researchProvider = searchKey ? braveResearch(searchKey) : null;
     this.engine.maths = this.sympy;
-    (this.engine as { codeRunner?: unknown }).codeRunner = this.codeRunner;
+    this.engine.codeRunner = this.codeRunner;
     // Source notes are read by name, for the short excerpts a teaching step may need.
     const readNote = async (name: string) => {
       const f = this.app.metadataCache.getFirstLinkpathDest(name, "");

@@ -24,6 +24,11 @@ What changed in each version of Study Tutor, newest first.
   - The feedback shows each test's result, what ran the code and the limits it ran under. Hidden tests are named only after your answer is marked.
   - Passing tests is strong evidence, not proof. A rubric that also asks for a method keeps the answer partly right until someone judges the method. Threaded code counts as fully right only when a thread sanitizer checked the run, because tests cannot show a program is free of races.
   - When the code cannot be run here, one grading call judges it, and the attempt says it was not run.
+- **Where code runs.** A new *Code* section in settings controls it:
+  - Python answers run in the plugin's bundled Python, in a worker of their own. It works offline, cannot reach your vault, your files or the network, and each test has a time limit. It is on by default. It keeps ordinary code contained, but it is not a hardened sandbox against code written to break out.
+  - C and C++ answers are built and run with a compiler already on your computer (g++ or clang++). This is off by default, because the program then runs with no sandbox. Turn it on and set the compiler path in the same section.
+  - When your compiler has them, C and C++ builds turn on checks for memory errors and undefined behaviour, and a thread sanitizer for multi-threaded tasks. The result says when a check was not available.
+  - The *Check* button runs a tiny program in each runner and shows what it found.
 - **Compile strategy.** A new setting chooses which models compile a course:
   - *Main provider:* Claude Code or Codex does every stage, and Ollama is never asked.
   - *Hybrid* (the default, the same split as before): Ollama picks the passages and the main provider does the rest. A local reply that fails its checks hands that step, and later ones, to the main provider, and the compile notice counts how often that happened.

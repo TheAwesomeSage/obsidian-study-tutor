@@ -7,7 +7,7 @@ import { need } from "./tools";
 import { Retrieval, RetrievalConcept, renderContext, renderRetrieval, retrieve } from "./retrieval";
 import { fallbackMaterial, missingEvidence, renderLesson } from "./lessondepth";
 import { equivalenceKind, bestExcerpts } from "./engine-common";
-import type { CodeLanguage, CodeRunReport, CodeRunner, CodeTask } from "./codetask";
+import type { CodeLanguage, CodeRunReport, CodeTask } from "./codetask";
 import { CODE_RUN_TIMEOUT_MS, isCodeLanguage, validateCodeTask } from "./coderun";
 import type { Engine } from "./engine";
 
@@ -191,8 +191,6 @@ export function registerTools(eng: Engine): void {
 
 /** `code.run`: code against a code task's tests, through the runner the host gives the engine (coderun.ts). */
 function registerCodeRun(eng: Engine): void {
-  // The host sets `codeRunner` on the engine (main.ts); read through a narrow type so this does not depend on where the field is declared.
-  const codeRunner = (): CodeRunner | null => (eng as { codeRunner?: CodeRunner | null }).codeRunner ?? null;
   eng.tools.register<{ language: CodeLanguage; source: string; task: CodeTask }, CodeRunReport>({
     name: "code.run",
     description: "Runs code against a code task's tests: Python in the bundled Pyodide, C and C++ with a local compiler when that is switched on.",
@@ -210,7 +208,7 @@ function registerCodeRun(eng: Engine): void {
       return bad ?? { language: o.language, source: o.source as string, task: JSON.parse(JSON.stringify(o.task)) as CodeTask };
     },
     run: async (input, ctx) => {
-      const runner = codeRunner();
+      const runner = eng.codeRunner;
       if (!runner) throw new Error("No code runner is available.");
       const report = await runner.run(input.task, input.source, ctx.signal);
       // Not running at all is a failure, never a result about the code.
