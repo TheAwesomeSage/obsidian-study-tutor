@@ -3,6 +3,8 @@ import { assessLesson, validateLesson } from "./registry";
 import { projectile, rangeBounds, hitsTarget, traceAlgorithm, type AlgorithmSettings, type PlotSettings, type ProjectileSettings } from "./models";
 import { el, button, slider, svgEl } from "./dom";
 import { ART } from "./art";
+import { isSystemsModule } from "./systems-modules";
+import { mountSystems, type AnswerSpec } from "./systems-view";
 
 /** Stored JSON only. This module has no inference, vault, network or code evaluation interface. */
 export async function mountPlayer(host: HTMLElement, value: unknown, options: PlayerOptions & {loadPlot?:()=>Promise<typeof import("./plot")>}): Promise<PlayerHandle> {
@@ -46,6 +48,7 @@ export async function mountPlayer(host: HTMLElement, value: unknown, options: Pl
   let play: HTMLButtonElement | null = null, step: HTMLButtonElement | null = null;
   let lockAttempt = () => {};
   let completedResponse = (): JsonObject => ({});
+  let answerSpec: AnswerSpec | null = null;
   const finish = () => {
     pause();
     if (!completed) { completed = true; emit({ version: 1, type: "completed", response: completedResponse(), independentMastery: false }); }
@@ -126,6 +129,12 @@ export async function mountPlayer(host: HTMLElement, value: unknown, options: Pl
       log.replaceChildren();trace.slice(Math.max(0,count-5),count).forEach(e=>el(log,"li",`${e.type}: ${e.detail}`));
     };
     completedResponse=()=>({result:trace[trace.length-1].result as Json, events:trace.length});
+  } else if (isSystemsModule(lesson.moduleId)) {
+    const view = mountSystems(stage, controls, lesson, { step: () => step?.click(), settings: () => { duration = view.steps; settings(); } });
+    duration = view.steps; pace = 1;
+    // The race's lock changes how many steps there are, so the length is read again on every frame.
+    render = () => { duration = view.steps; view.render(Math.min(duration, Math.floor(position))); };
+    resetModule = view.reset; lockAttempt = view.lock; completedResponse = view.response; answerSpec = view.answer;
   } else if (lesson.moduleId === "function-plotter") {
     try { const {mountPlot}=await (options.loadPlot ? options.loadPlot() : import("./plot")); const plot=mountPlot(stage,controls,lesson.settings as unknown as PlotSettings,settings); resetModule=plot.reset;freeModule=plot.destroy; }
     catch (error) { el(stage,"p",`Plot could not load: ${(error as Error).message}`); }
@@ -151,13 +160,17 @@ export async function mountPlayer(host: HTMLElement, value: unknown, options: Pl
   button(side,"Show hint",()=>{hintsUsed=true;status.textContent=lesson.hint;emit({version:1,type:"hint"});});
   const reflection=el(root,"section","","stv-reflection");el(reflection,"h3","03 · Explain & check");
   const explainLabel=el(reflection,"label","Why did that happen? Use the source and the model.","stv-field");const explanation=el(explainLabel,"textarea");explanation.rows=2;explanation.maxLength=2000;
-  const answerLabel=el(reflection,"label",lesson.moduleId==="function-plotter"?"Slope at the current point (number, or null when undefined)":lesson.moduleId==="projectile"?"Predicted range for the current launch settings (metres)":lesson.moduleId==="algorithm"?"Result (number, or sorted array as [1,2,3])":"Your source-based conclusion","stv-field");
-  const answer=el(answerLabel,"input");answer.type="text";answer.maxLength=1000;
+  const answerLabel=el(reflection,"label",answerSpec?answerSpec.label:lesson.moduleId==="function-plotter"?"Slope at the current point (number, or null when undefined)":lesson.moduleId==="projectile"?"Predicted range for the current launch settings (metres)":lesson.moduleId==="algorithm"?"Result (number, or sorted array as [1,2,3])":"Your source-based conclusion","stv-field");
+  let answer:HTMLInputElement|HTMLSelectElement;
+  if(answerSpec?.choices){const select=el(answerLabel,"select");el(select,"option","Choose…").value="";for(const c of answerSpec.choices)el(select,"option",c).value=c;answer=select;}
+  else{const input=el(answerLabel,"input");input.type="text";input.maxLength=1000;answer=input;}
   const feedback=el(reflection,"p","","stv-status");feedback.setAttribute("role","status");
   button(reflection,"Check practice answer",()=>{
     if(!predicted){feedback.textContent="Save a prediction before checking.";return;}
     if(!explanation.value.trim()){feedback.textContent="Explain your reasoning before checking.";explanation.focus();return;}
-    let parsed:Json;try{parsed=lesson.moduleId==="phet-external"?answer.value:JSON.parse(answer.value);}catch{feedback.textContent="Use a number, null, or a JSON array of numbers.";return;}
+    let parsed:Json;
+    if(answerSpec){const read=answerSpec.parse(answer.value);if(read===undefined){feedback.textContent=answerSpec.help;answer.focus();return;}parsed=read;}
+    else try{parsed=lesson.moduleId==="phet-external"?answer.value:JSON.parse(answer.value);}catch{feedback.textContent="Use a number, null, or a JSON array of numbers.";return;}
     const response:AssessmentResponse={answer:parsed,explanation:explanation.value.trim(),prediction:prediction.value,hintsUsed,settings:JSON.parse(JSON.stringify(lesson.settings))};
     const result=assessLesson(lesson,response);feedback.textContent=result.feedback;emit({version:1,type:"assessment",response,result});
   });

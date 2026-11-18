@@ -213,8 +213,16 @@ export function choosePresentation(g: GateInput, explicit: ExplicitRequest | nul
   const diagnosed = g.errorType === "conceptual" || (g.misconception && g.errorType !== "careless" && g.errorType !== "arithmetic" && g.errorType !== "notation");
   const repeated = g.recentFailures >= 2 && diagnosed;
   const helping = ["check", "diagnose-error", "re-explain", "worked-example", "guided-practice", "hint"].includes(step);
-  // A stable structure the course marked for a diagram: drawn when the idea is explained again.
-  if (eligible === "diagram" && repeated && helping) return { ...NONE, kind: "diagram", trigger: "difficulty", status: "text", reason: clip(`Another explanation of ${name}, drawn as a diagram this time.`) };
+  // A stable structure the course marked for a diagram: drawn when the idea is explained again,
+  // by a diagram module when one fits (a saved one opens as it is, otherwise it is offered), else
+  // by the tutor in the reply.
+  if (eligible === "diagram" && repeated && helping) {
+    const f = find("diagram");
+    const why = clip(`Another explanation of ${name}, drawn as a diagram this time.`);
+    if (f.ready) return { kind: "diagram", trigger: "difficulty", status: "cached", reason: why, moduleId: f.ready.moduleId, activityId: f.ready.id, candidates: f.ids };
+    if (f.candidates.length) return { kind: "diagram", trigger: "difficulty", status: "offer", reason: why, moduleId: f.candidates[0].descriptor.id, activityId: null, candidates: f.ids };
+    return { ...NONE, kind: "diagram", trigger: "difficulty", status: "text", reason: why };
+  }
   if (!eligible || (eligible !== "simulation" && eligible !== "game") || !repeated || !helping) return NONE;
   const f = find(eligible);
   const why = g.eligibility!.reason ? `: ${g.eligibility!.reason}` : "";

@@ -24,6 +24,8 @@ export interface ModuleDescriptor {
   kinds?: PresentationKind[];
   summary?: string;
   questionTemplates?: Record<string, string>;
+  /** Output allowance for a model writing this module's settings; a blueprint needs more than a few numbers. */
+  outputTokens?: number;
 }
 export interface AssessmentResponse { answer: Json; explanation?: string; prediction?: string; hintsUsed?: boolean; settings?: JsonObject }
 export interface AssessmentResult {
