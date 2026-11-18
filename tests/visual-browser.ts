@@ -32,7 +32,7 @@ if(kind!=="graph") {
     }
     overview.push(topicInfo(`t${t}`,titles[t],state,{},"2026-11-14"));
   }
-  const view={contentEl:host,topics:titles.slice(0,groups).map((title,i)=>({title,dir:`t${i}`})),overview,today:"2026-11-14",graphFocus:params.has("select")?"t0/c5":null,dir:"t0",plugin:{data:{graphLayout:{}},save:async()=>{},opts:{targetLevel:4},store:{loadCourse:async()=>course},engine:{advise:async()=>({action:"guided-practice",focus:6,reason:"Try a short application, then explain how its prerequisites support the method."})}},md:(e:HTMLElement,t:string)=>{e.textContent=t;},go:()=>{},selectTopic:async()=>{},startStudy:async()=>{}};
+  const view={contentEl:host,topics:titles.slice(0,groups).map((title,i)=>({title,dir:`t${i}`})),overview,today:"2026-11-14",graphFocus:params.has("select")?"t0/c5":null,dir:"t0",plugin:{data:{graphLayout:{}},save:async()=>{},opts:{targetLevel:4},store:{loadCourse:async()=>course,loadQuestions:async()=>[]},engine:{advise:async()=>({action:"guided-practice",focus:6,reason:"Try a short application, then explain how its prerequisites support the method.",scores:[]})}},md:(e:HTMLElement,t:string)=>{e.textContent=t;},go:()=>{},selectTopic:async()=>{},startStudy:async()=>{}};
   const screen=new GraphScreen(view as unknown as TutorView);void screen.mount(host);
   (window as unknown as {graph:GraphScreen}).graph=screen;
 }
