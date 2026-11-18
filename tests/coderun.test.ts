@@ -411,13 +411,15 @@ test("C: a whole program, and the sanitizers when the toolchain has them", { tim
   assert.equal(ok.status, "ran", ok.message);
   assert.match(ok.backend, /-std=c17/);
   assert.equal(ok.tests[0].status, "pass", ok.tests[0].detail);
-  // A heap overflow: AddressSanitizer reports it where it exists.
+  // A heap overflow: a sanitizer reports it where they exist. The runner stops at the first error, and
+  // newer gcc lets UBSan's object-size check see this store (a 16-byte malloc, index 8) before
+  // AddressSanitizer does, so either tool's report is the expected outcome.
   const overflow = await runner.run({ language: "c", tests: [{ name: "overflow", stdin: "8", expected: "0" }] }, "#include <stdio.h>\n#include <stdlib.h>\nint main(void) { int n; if (scanf(\"%d\", &n) != 1) return 1; volatile int *p = malloc(4 * sizeof *p); p[n] = 1; printf(\"%d\\n\", p[n] - 1); free((void *)p); return 0; }\n");
   assert.equal(overflow.status, "ran", overflow.message);
   if (/-fsanitize=address/.test(overflow.backend)) {
     assert.equal(overflow.sanitizer, "reported");
     assert.equal(overflow.tests[0].status, "error");
-    assert.match(overflow.tests[0].detail, /AddressSanitizer/);
+    assert.match(overflow.tests[0].detail, /AddressSanitizer|runtime error: store to address/);
     assert.match(overflow.message, /Sanitizer report/);
   } else {
     assert.equal(overflow.sanitizer, "not-available");
