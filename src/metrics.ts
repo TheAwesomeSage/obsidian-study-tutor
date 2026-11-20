@@ -54,6 +54,8 @@ function stat(xs: number[]): Stat {
 }
 
 const count = (xs: string[]): Record<string, number> => xs.reduce<Record<string, number>>((o, k) => ((o[k] = (o[k] ?? 0) + 1), o), {});
+const sum = (xs: number[]): number => xs.reduce((s, x) => s + x, 0);
+const positive = (xs: number[]): number[] => xs.filter((x) => x > 0);
 const numberAt = (o: unknown, k: string): number => (o && typeof o === "object" && typeof (o as Record<string, unknown>)[k] === "number" ? ((o as Record<string, unknown>)[k] as number) : 0);
 
 /** Summarises the saved records. No model is called and nothing is written. */
@@ -70,9 +72,12 @@ export function summariseMetrics(input: MetricsInput): MetricsSummary {
   for (const list of Object.values(input.attempts)) for (const n of new Set(list.map((a) => a.skill).filter((n) => n > 0))) independent += skillEvidence(list, n).independent;
 
   const acts = input.activities ?? [];
+  const field = (pick: (a: (typeof acts)[number]) => unknown, k: string): number[] => acts.map((a) => numberAt(pick(a), k));
+  const own = (k: string) => field((a) => a, k);
+  const timing = (k: string) => field((a) => a.timing, k);
   const decisions = input.decisions ?? [];
   return {
-    compile: { packages: input.packages.length, staged: metrics.length, totals, elapsedMs: stat(metrics.map((m) => numberAt(m, "elapsedMs")).filter((x) => x > 0)) },
+    compile: { packages: input.packages.length, staged: metrics.length, totals, elapsedMs: stat(positive(metrics.map((m) => numberAt(m, "elapsedMs")))) },
     attempts: {
       total: all.length,
       byGrading: count(graded.map((a) => a.grading)),
@@ -89,16 +94,16 @@ export function summariseMetrics(input: MetricsInput): MetricsSummary {
     activities: {
       records: acts.length,
       byStatus: count(acts.map((a) => (typeof a.status === "string" ? a.status : "unknown"))),
-      localCalls: acts.reduce((s, a) => s + numberAt(a, "localCalls"), 0),
-      repairs: acts.reduce((s, a) => s + numberAt(a, "repairs"), 0),
-      claudeCalls: acts.reduce((s, a) => s + numberAt(a, "claudeCalls"), 0),
+      localCalls: sum(own("localCalls")),
+      repairs: sum(own("repairs")),
+      claudeCalls: sum(own("claudeCalls")),
       firstPassValid: acts.filter((a) => a.firstPassValid === true).length,
       firstPassKnown: acts.filter((a) => typeof a.firstPassValid === "boolean").length,
-      wallMs: stat(acts.map((a) => numberAt(a.timing, "wallMs")).filter((x) => x > 0)),
-      localMs: stat(acts.map((a) => numberAt(a.timing, "localMs")).filter((x) => x > 0)),
-      loadMs: stat(acts.map((a) => numberAt(a.timing, "loadMs")).filter((x) => x > 0)),
-      promptTokens: acts.reduce((s, a) => s + numberAt(a.timing, "promptTokens"), 0),
-      evalTokens: acts.reduce((s, a) => s + numberAt(a.timing, "evalTokens"), 0),
+      wallMs: stat(positive(timing("wallMs"))),
+      localMs: stat(positive(timing("localMs"))),
+      loadMs: stat(positive(timing("loadMs"))),
+      promptTokens: sum(timing("promptTokens")),
+      evalTokens: sum(timing("evalTokens")),
     },
     decisions: {
       total: decisions.length,

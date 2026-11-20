@@ -2,6 +2,7 @@
 // Pure functions, no Obsidian imports.
 
 import { LearnerState, NextStep, Prereqs, addDays, dueCount, evidenceOf, mastery, nextStep, progress } from "./formats";
+import { daysBetween } from "./dates";
 import type { Decision } from "./policy";
 import { DEFAULT_SECONDS_PER_ITEM, MIN_TIMED_ANSWERS, secondsPerItem } from "./scheduler";
 
@@ -151,7 +152,7 @@ export function workloadLine(w: Workload): string {
 export function ago(stamp: string | null, today: string): string {
   if (!stamp) return "not yet";
   const day = stamp.slice(0, 10);
-  const days = Math.round((Date.parse(today + "T00:00:00") - Date.parse(day + "T00:00:00")) / 86400000);
+  const days = daysBetween(day, today);
   if (!Number.isFinite(days)) return day;
   if (days <= 0) return "today";
   if (days === 1) return "yesterday";

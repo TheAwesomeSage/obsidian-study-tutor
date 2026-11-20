@@ -45,6 +45,8 @@ export interface TutorSettings extends EngineSettings {
   localActivities: boolean;
   /** Which models compile a course (model-provider.ts). Settings from before it was added are migrated from `localCompilation`. */
   compileStrategy: CompileStrategy;
+  /** Plan diagrams and simulations at compile time with the main provider ("main" compile strategy only). */
+  compileBlueprints: boolean;
   /** The local model, an Ollama tag. */
   localModel: string;
   /** The local Ollama server. Only loopback addresses are used. */
@@ -100,6 +102,7 @@ const DEFAULTS: TutorSettings = {
   minutes: 25,
   localActivities: true,
   compileStrategy: "hybrid",
+  compileBlueprints: true,
   researchLimits: DEFAULT_RESEARCH_LIMITS,
   localModel: DEFAULT_LOCAL_MODEL,
   ollamaUrl: DEFAULT_OLLAMA_URL,
@@ -932,6 +935,12 @@ class TutorSettingTab extends PluginSettingTab {
         this.plugin.buildLocal();
         await this.plugin.save();
       }));
+    new Setting(containerEl).setName("Plan diagrams and simulations when compiling").setDesc(
+      `With the main provider only strategy, ${main} plans each diagram or simulation the course marks as worth one (up to 8 per compile, one or two calls each), so it is ready when you study. Ollama is not used for this. Skipped under Hybrid and Local only.`,
+    ).addToggle(t => t.setValue(s.compileBlueprints).onChange(async v => {
+      s.compileBlueprints = v;
+      await this.plugin.save();
+    }));
     for (const [key, name, max] of [
       ["searches", "Research search attempts", 40], ["pages", "Research page requests", 80],
       ["largeSearches", "Large specification search ceiling", 40], ["largePages", "Large specification page ceiling", 80],

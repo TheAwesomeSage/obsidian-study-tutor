@@ -16,6 +16,8 @@ import { CONFIG_PROMPT_VERSION, activityKey, checkConfiguration, configureActivi
 import { ollamaSchema, validateJson } from "../src/jsonschema";
 import { LocalModelError, OllamaClient, cloudModelName, isLoopback, locateLocal } from "../src/ollama";
 import { adaptRegistry } from "../src/visualcontract";
+import * as registryModule from "../src/visuals/registry";
+import { FIXTURES } from "../src/visuals/fixtures";
 import { buildPackage, mergeRefresh, sourceChanges } from "../src/coursepkg";
 import { ARRAY_TRACE, ASSETS, PROJECTILE, arrayReply, makeFixtureRegistry, scriptedModel, trace } from "./fixtures/visual-modules";
 import { MemFS } from "./memfs";
@@ -816,4 +818,58 @@ test("an answer in a numeric variant is assessed against that variant, and a les
   assert.equal(res.assessment.correct, true, "checked against the variant's own trace");
   await assert.rejects(t.engine.recordActivityResult(t.dir, out.activity!.id, { answer: 1 }, { lesson: { ...variant.lesson, objective: "something else entirely" } }), /does not match the saved one/);
   assert.equal(t.calls.length + t.local.requests.length, 1, "only the first configuration used a model");
+});
+
+// ---------- blueprints planned at compile time with the main provider ----------
+
+const ringReply = () => JSON.stringify({ fits: true, objective: "Track head, tail and count as a ring buffer fills, empties and wraps", settings: FIXTURES.ring.settings, assetIds: [], assessmentId: "ring-count", predictionQuestion: "How many items are in the ring at the end?", hint: "Head equals tail both when the ring is full and when it is empty.", missingOperation: "" });
+
+async function planSetup(settings: Record<string, unknown> = {}, local: string[] = []) {
+  const t = await setup({ registry: null, local, settings: { compileStrategy: "main", ...settings } });
+  t.engine.visuals = adaptRegistry(registryModule as any);
+  return t;
+}
+
+test("compiling with the main provider plans each marked blueprint once, saves it, and study time reuses it without a call", async () => {
+  const t = await planSetup();
+  t.replies.push(ringReply());
+  const planned = await t.engine.planBlueprints(t.dir);
+  assert.deepEqual([planned.planned, planned.ready, planned.failed, planned.calls, t.calls.length], [1, 1, 0, 1, 1]);
+  assert.equal(t.calls[0].model, "sonnet");
+  const [rec] = await t.store.loadActivities(t.dir);
+  assert.deepEqual([rec.status, rec.provider, rec.claudeCalls, rec.localCalls, rec.moduleId, rec.trigger], ["ready", "main", 1, 0, "circular-buffer", "compile"]);
+  // The same sources and catalogue are not planned again, so a refresh costs nothing.
+  const again = await t.engine.planBlueprints(t.dir);
+  assert.deepEqual([again.planned, again.calls, t.calls.length], [0, 0, 1]);
+  // Study time finds the record: no local call, no main call, and the report counts the plan.
+  await t.focus(3, { 1: 3, 3: 2 });
+  const chat = await t.chatIn("auto");
+  const opened = await t.engine.requestActivity(t.dir, { kind: "simulation", chatPath: chat });
+  assert.deepEqual([opened.lesson?.moduleId, t.local.requests.length, t.calls.length], ["circular-buffer", 0, 1]);
+  const report = await t.engine.activityReport(t.dir);
+  assert.equal(report.claudeCalls, 1);
+});
+
+test("a failed plan is saved as a failure, never blocks the local model, and never fails the compile", async () => {
+  const t = await planSetup({}, [ringReply()]);
+  const bad = ringReply().replace('"capacity":4', '"capacity":99');
+  t.replies.push(bad, bad);
+  const planned = await t.engine.planBlueprints(t.dir);
+  assert.deepEqual([planned.planned, planned.ready, planned.failed, planned.calls], [1, 0, 1, 2]);
+  const [rec] = await t.store.loadActivities(t.dir);
+  assert.deepEqual([rec.status, rec.provider, rec.claudeCalls], ["invalid", "main", 2]);
+  // The failed main record is not "saved" for study time, so the local model still gets its turn.
+  await t.focus(3, { 1: 3, 3: 2 });
+  const chat = await t.chatIn("auto");
+  const opened = await t.engine.requestActivity(t.dir, { kind: "simulation", chatPath: chat });
+  assert.deepEqual([opened.lesson?.moduleId, t.local.requests.length], ["circular-buffer", 1]);
+});
+
+test("blueprints are planned only under the main strategy, and the setting turns them off", async () => {
+  for (const settings of [{ compileStrategy: "hybrid" }, { compileStrategy: "local" }, { compileBlueprints: false }]) {
+    const t = await planSetup(settings);
+    t.replies.push(ringReply());
+    const planned = await t.engine.planBlueprints(t.dir);
+    assert.deepEqual([planned.planned, t.calls.length], [0, 0], JSON.stringify(settings));
+  }
 });

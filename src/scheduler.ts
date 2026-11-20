@@ -3,6 +3,7 @@
 // date whichever scheduler is active, so switching to FSRS replays the log and switching back is a
 // rollback that loses nothing. Pure functions, no Obsidian imports.
 
+import { addDays, daysBetween } from "./dates";
 import type { Attempt } from "./evidence";
 import type { CardSched, Grade } from "./formats";
 
@@ -62,12 +63,6 @@ export const RETENTION_RANGE: [number, number] = [0.7, 0.97];
 
 // ---------- dates ----------
 
-const dayNumber = (day: string): number => {
-  const [y, m, d] = day.slice(0, 10).split("-").map(Number);
-  return Date.UTC(y, m - 1, d) / 86400000;
-};
-const addDays = (day: string, n: number): string => new Date((dayNumber(day) + n) * 86400000).toISOString().slice(0, 10);
-const daysBetween = (from: string, to: string): number => dayNumber(to) - dayNumber(from);
 const round = (x: number, places: number): number => Math.round(x * 10 ** places) / 10 ** places;
 
 // ---------- SM-2, exactly as Study Tutor scheduled cards up to 0.9 ----------
@@ -328,6 +323,9 @@ export function tutorSchedules(x: ScheduleOwner | { externalFlashcards?: boolean
 
 // ---------- time per item, and timed mixed sessions ----------
 
+/** Orders two strings (ISO dates, ids) the way `<` does. */
+const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
 /** Seconds per review item until enough answers have been timed. A stated guess, not a measurement. */
 export const DEFAULT_SECONDS_PER_ITEM = 60;
 /** Below this many timed answers the default is used. */
@@ -335,7 +333,7 @@ export const MIN_TIMED_ANSWERS = 5;
 
 /** Median seconds per answer over the latest 200 timed answers, or the default when there are too few. */
 export function secondsPerItem(attempts: Pick<Attempt, "seconds" | "timestamp">[]): { seconds: number; timed: number; fallback: boolean } {
-  const timed = attempts.filter((a) => typeof a.seconds === "number" && a.seconds > 0 && a.seconds <= 3600).sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0)).slice(-200);
+  const timed = attempts.filter((a) => typeof a.seconds === "number" && a.seconds > 0 && a.seconds <= 3600).sort((a, b) => cmp(a.timestamp, b.timestamp)).slice(-200);
   if (timed.length < MIN_TIMED_ANSWERS) return { seconds: DEFAULT_SECONDS_PER_ITEM, timed: timed.length, fallback: true };
   const xs = timed.map((a) => a.seconds!).sort((a, b) => a - b);
   const mid = xs.length >> 1;
@@ -366,7 +364,7 @@ export interface MixItem {
  */
 export function timedMix<T extends MixItem>(items: T[], minutes: number, today: string): T[] {
   const ratio = new Map(items.map((i) => [i.id, overdueRatio(i, today)]));
-  const ranked = items.filter((i) => i.due <= today).sort((a, b) => ratio.get(b.id)! - ratio.get(a.id)! || (a.due < b.due ? -1 : a.due > b.due ? 1 : 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const ranked = items.filter((i) => i.due <= today).sort((a, b) => ratio.get(b.id)! - ratio.get(a.id)! || cmp(a.due, b.due) || cmp(a.id, b.id));
   let budget = Math.max(0, minutes) * 60;
   const chosen: T[] = [];
   for (const i of ranked) {

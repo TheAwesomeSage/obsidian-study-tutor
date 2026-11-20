@@ -3,6 +3,7 @@
 // routing weight or model reply can raise a level past what `supportedLevel` returns.
 // docs/policy.md describes the same rules in prose.
 
+import { addDays } from "./dates";
 import { ReasoningAssessment, normaliseReasoning } from "./reasoning";
 import { MarkBasis, conclusive, normaliseBasis } from "./grading";
 import { onCurrentVersion } from "./objective-version";
@@ -275,11 +276,7 @@ export interface SkillEvidence {
  */
 export const CHECK_INTERVALS = [1, 3, 7, 14, 30, 60];
 
-const addDaysIso = (day: string, n: number): string => {
-  const [y, m, d] = day.split("-").map(Number);
-  const t = new Date(Date.UTC(y, m - 1, d + n));
-  return t.toISOString().slice(0, 10);
-};
+const addDaysIso = addDays;
 
 /** Below this many independent data points an estimate is not shown as a number. */
 export const MIN_ESTIMATE_N = 3;

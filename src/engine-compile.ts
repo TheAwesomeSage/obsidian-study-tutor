@@ -2,7 +2,7 @@
 // Part of the engine (see engine.ts): each function takes the engine it works for, and the
 // engine has a method of the same name that calls it. No Obsidian imports.
 
-import { ClaudeError, zeroUsage } from "./claude";
+import { ClaudeError, addUsage, zeroUsage } from "./claude";
 import { compileStrategyFor, modelFor, modelIdentity, reportedModel } from "./model-provider";
 import { Frontmatter, contentHash, fmList, fmStr, parseCompileOutput, parseQuestions, parseTopic, splitFrontmatter } from "./formats";
 import { CoursePackage, linkName, buildPackage, coverageLine, mergeRefresh, sourceChanges, subskillSections, withStagedCoverage } from "./coursepkg";
@@ -43,7 +43,9 @@ export async function compile(eng: Engine, req: CompileRequest, onProgress: (msg
     existingDir: preserve ? undefined : req.existingDir,
   });
   const pkg = await eng.writePackage(dir, req, preserve ? null : existing, undefined, candidate.staged);
-  return { dir, subskills: pkg.lessons.length, questions: parseQuestions(candidate.questionsBody).length, usage: candidate.usage, agents: candidate.calls,
+  // The course is written, so a blueprint that cannot be planned costs the learner nothing but the offer.
+  const blueprints = preserve ? null : await eng.planBlueprints(dir, { signal: req.signal, progress: onProgress }).catch(() => null);
+  return { dir, subskills: pkg.lessons.length, questions: parseQuestions(candidate.questionsBody).length, usage: blueprints ? addUsage(candidate.usage, blueprints.usage) : candidate.usage, agents: candidate.calls + (blueprints?.calls ?? 0),
     status: candidate.staged.status, coverage: coverageLine(pkg), complete: pkg.coverage.complete, metrics: candidate.staged.metrics, preservedCourse: preserve ? req.existingDir : undefined };
 }
 

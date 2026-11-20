@@ -44,6 +44,9 @@ What changed in each version of Study Tutor, newest first.
   - The question about what happens next is written by code, not by the model.
   - A concept that calls for a diagram can now offer one after you have struggled with it more than once.
   - Activities saved by earlier versions are rebuilt once, because the activity catalogue changed.
+  - With the *Main provider* compile strategy, the main provider can plan these activities while compiling: each diagram or simulation the course marks as worth one, up to 8 per compile, one or two calls each. Study time then opens the finished activity with no model call. A plan goes through the same checks as a local one. A plan that fails is recorded and never fails the compile, and the local model still gets its turn at study time. Turn it off in Settings (Plan diagrams and simulations when compiling). Hybrid and Local only never do this.
+  - The activity report now counts the main-provider calls instead of showing zero.
+- Internal: calendar-day arithmetic is now written once (`src/dates.ts`) instead of in five places, and a few helpers that duplicated shared ones were removed. No behaviour changes.
 - **FSRS scheduling.** Flashcards can be scheduled by FSRS-6, with a desired retention you choose (Settings → Teaching → Card scheduler). SM-2 stays the default.
   - Every card now keeps a short log of its reviews. Switching to FSRS rebuilds each card from that log, and switching back restores SM-2's dates exactly. Each topic records which scheduler set its dates and when it was switched.
   - Exactly one plugin schedules your flashcards. When the Spaced Repetition plugin is enabled and chosen, Study Tutor no longer schedules those cards as well. Settings shows which plugin keeps the schedule.

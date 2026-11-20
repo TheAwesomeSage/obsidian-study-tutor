@@ -237,7 +237,6 @@ export function validateDiagramBlueprint(value: unknown): BlueprintCheck<Diagram
     if (!ID.test(g.id) || groups.has(g.id) || ids.has(g.id)) fail(`$.groups[${i}].id`, "needs a distinct id of letters, digits, - or _");
     groups.add(g.id);
   });
-  const node = (x: string) => ids.has(x);
   if (b.layout === "pointer-tables") {
     if (b.groups.length < 2) fail("$.groups", "pointer-tables needs 2–4 tables");
     b.nodes.forEach((n, i) => { if (!groups.has(n.group)) fail(`$.nodes[${i}].group`, `${n.group || "(empty)"} is not one of the tables`); });
@@ -257,8 +256,8 @@ export function validateDiagramBlueprint(value: unknown): BlueprintCheck<Diagram
   if (b.layout === "pointer-tables" && !b.edges.length) fail("$.edges", "pointer-tables needs at least one pointer");
   const pairs = new Set<string>();
   b.edges.forEach((e, i) => {
-    if (!node(e.from)) fail(`$.edges[${i}].from`, `${e.from} is not a node`);
-    if (!node(e.to)) fail(`$.edges[${i}].to`, `${e.to} is not a node`);
+    if (!ids.has(e.from)) fail(`$.edges[${i}].from`, `${e.from} is not a node`);
+    if (!ids.has(e.to)) fail(`$.edges[${i}].to`, `${e.to} is not a node`);
     if (b.layout === "pointer-tables" && e.from === e.to) fail(`$.edges[${i}]`, "a pointer joins two different rows");
     const key = `${e.from}\u0000${e.label.trim().toLowerCase()}`;
     if (pairs.has(key)) fail(`$.edges[${i}]`, `${e.from} already has an edge labelled "${e.label}"; the diagram must be deterministic`);
@@ -266,13 +265,13 @@ export function validateDiagramBlueprint(value: unknown): BlueprintCheck<Diagram
   });
   const markers = new Set<string>();
   b.markers.forEach((m, i) => {
-    if (!node(m.at)) fail(`$.markers[${i}].at`, `${m.at} is not a node`);
+    if (!ids.has(m.at)) fail(`$.markers[${i}].at`, `${m.at} is not a node`);
     if (markers.has(m.label.toLowerCase())) fail(`$.markers[${i}].label`, "repeats a marker");
     markers.add(m.label.toLowerCase());
   });
-  b.highlights.forEach((h, i) => { if (!node(h)) fail(`$.highlights[${i}]`, `${h} is not a node`); });
+  b.highlights.forEach((h, i) => { if (!ids.has(h)) fail(`$.highlights[${i}]`, `${h} is not a node`); });
   if (new Set(b.highlights).size !== b.highlights.length) fail("$.highlights", "repeats a node");
-  if (!node(b.start)) fail("$.start", `${b.start} is not a node`);
+  if (!ids.has(b.start)) fail("$.start", `${b.start} is not a node`);
   else if (!errors.length) {
     const walk = walkDiagram(b);
     if (walk.error) errors.push(walk.error);

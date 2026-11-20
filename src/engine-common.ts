@@ -3,6 +3,7 @@
 // Obsidian imports.
 
 import { Usage } from "./claude";
+import { daysBetween as dayGap } from "./dates";
 import type { ModelProviderSettings } from "./model-provider";
 import { Attempt, Grading, TASK_TYPES, TaskType } from "./evidence";
 import { Chat, Frontmatter, LearnerState, Mode, Question, SourceMode, Topic, fmStr, mastery, setLevel, words } from "./formats";
@@ -87,6 +88,8 @@ export interface EngineSettings extends ModelProviderSettings {
   minutes?: number;
   /** Configure existing visual modules with the local model when no saved configuration fits. Default on. */
   localActivities?: boolean;
+  /** Plan diagrams and simulations at compile time with the main provider ("main" compile strategy only). Default on. */
+  compileBlueprints?: boolean;
   /** The local model's name (Ollama tag). Part of every activity cache key. */
   localModel?: string;
 }
@@ -210,7 +213,7 @@ export const ERROR_TYPES = ["conceptual", "procedural", "arithmetic", "notation"
 /** The learner is pointing back at something said before this part of the chat. */
 export const LOOKS_BACK = /\b(earlier|before|previous(ly)?|last time|you said|you told|we (did|covered|talked|discussed|went over)|remind me|go back|at the start)\b/i;
 
-export const daysBetween = (from: string, to: string): number => Math.max(0, Math.round((Date.parse(to + "T00:00:00") - Date.parse(from.slice(0, 10) + "T00:00:00")) / 86400000));
+export const daysBetween = (from: string, to: string): number => Math.max(0, dayGap(from, to));
 
 /** What kind of evidence a SymPy comparison is, read from how it reached its verdict. */
 export function equivalenceKind(detail: string): { grading: Grading; assumptions: string } {

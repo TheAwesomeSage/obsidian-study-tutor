@@ -3,6 +3,7 @@
 // replayed. Weights only rank what to study next. They cannot change a level: levels move
 // through the evidence rules in evidence.ts and nowhere else.
 
+import { dayNumber } from "./dates";
 import type { Mode, NextStep, Topic } from "./formats";
 import type { Intent } from "./session";
 import type { Attempt } from "./evidence";
@@ -523,8 +524,6 @@ function timedPractice(k: SkillInput | undefined, available: number): { minutes:
   return { minutes: e.minutes, note: `Exam practice: allow about ${e.minutes} minute${e.minutes === 1 ? "" : "s"}, as in the exam${like ? ` (${like})` : ""}.` };
 }
 
-const dayNumber = (d: string): number => Date.UTC(Number(d.slice(0, 4)), Number(d.slice(5, 7)) - 1, Number(d.slice(8, 10))) / 86400000;
-
 /**
  * The exam signal for each subskill, from the objectives it teaches (Objective.exam, parsed from
  * the card) and the topic's exam date. An objective's weight is split evenly over the subskills
@@ -533,7 +532,10 @@ const dayNumber = (d: string): number => Date.UTC(Number(d.slice(0, 4)), Number(
  */
 export function examSignals(topic: Pick<Topic, "subskills" | "objectives" | "examDate">, today: string): Record<number, ExamSignal> {
   const objectives = topic.objectives ?? [];
-  const teaches = (n: number, id: string) => (topic.subskills.find((s) => s.n === n)?.objectives ?? []).some((x) => x.toLowerCase() === id.toLowerCase());
+  // Objective ids each subskill teaches, lowercased once; the first subskill with a number wins.
+  const taught = new Map<number, Set<string>>();
+  for (const s of topic.subskills) if (!taught.has(s.n)) taught.set(s.n, new Set((s.objectives ?? []).map((x) => x.toLowerCase())));
+  const teaches = (n: number, id: string) => taught.get(n)?.has(id.toLowerCase()) ?? false;
   const now = dayNumber(today);
   const out: Record<number, ExamSignal> = {};
   for (const s of topic.subskills) {

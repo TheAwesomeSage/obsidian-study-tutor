@@ -356,6 +356,11 @@ export class Engine {
     return activityFns.recordActivityResult(this, ...a);
   }
 
+  /** See `planBlueprints` in engine-activities.ts. */
+  planBlueprints(...a: Rest<typeof activityFns.planBlueprints>): ReturnType<typeof activityFns.planBlueprints> {
+    return activityFns.planBlueprints(this, ...a);
+  }
+
   /** See `activityReport` in engine-activities.ts. */
   activityReport(...a: Rest<typeof activityFns.activityReport>): ReturnType<typeof activityFns.activityReport> {
     return activityFns.activityReport(this, ...a);

@@ -119,6 +119,7 @@ export function systemsAnswer(lesson: Pick<VisualLesson, "moduleId" | "assessmen
 
 /** Whether a learner's answer matches: labels ignore case and spacing; numbers and lists are exact. */
 export function systemsMatches(expected: Json, answer: Json): boolean {
-  if (typeof expected === "string") return typeof answer === "string" && answer.trim().replace(/\s+/g, " ").toLowerCase() === expected.trim().replace(/\s+/g, " ").toLowerCase();
+  const norm = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+  if (typeof expected === "string") return typeof answer === "string" && norm(answer) === norm(expected);
   return JSON.stringify(expected) === JSON.stringify(answer);
 }

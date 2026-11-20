@@ -1,3 +1,4 @@
+import { addDays } from "./dates";
 import { Attempt, LevelChange, normaliseAttempt, skillEvidence, supportedLevel } from "./evidence";
 import type { Relation } from "./course";
 import type { Misconception } from "./misconceptions";
@@ -77,10 +78,7 @@ export function ymd(d: Date = new Date()): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-export function addDays(day: string, n: number): string {
-  const [y, m, d] = day.split("-").map(Number);
-  return ymd(new Date(y, m - 1, d + n));
-}
+export { addDays };
 
 // ---------- frontmatter (a small YAML subset: scalars and string lists) ----------
 

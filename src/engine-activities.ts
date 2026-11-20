@@ -1,12 +1,14 @@
-// Diagrams, simulations and games: choosing one, configuring it locally, opening a saved one and recording its result.
+// Diagrams, simulations and games: choosing one, configuring it locally (or planning blueprints at compile time with the main provider), opening a saved one and recording its result.
 // Part of the engine (see engine.ts): each function takes the engine it works for, and the
 // engine has a method of the same name that calls it. No Obsidian imports.
 
-import { zeroUsage } from "./claude";
+import { addUsage, zeroUsage, type Usage } from "./claude";
 import { Attempt, Outcome, recordAttempt } from "./evidence";
 import { Chat, LearnerState, Mode, Topic, evidenceOf, objectiveStamp, contentHash, fmStr, words } from "./formats";
 import { Decision } from "./policy";
-import { ActivityRecord, CONFIG_PROMPT_VERSION, LESSON_SCHEMA_VERSION, configureActivity, toResult } from "./configure";
+import { ActivityRecord, CONFIG_PROMPT_VERSION, LESSON_SCHEMA_VERSION, activityKey, configureActivity, providerModel, toResult } from "./configure";
+import { compileStrategyFor, modelFor, modelIdentity } from "./model-provider";
+import { isSystemsModule } from "./visuals/systems-modules";
 import { DEFAULT_LOCAL_MODEL, LocalModel } from "./ollama";
 import { ExplicitRequest, PresentationDecision, choosePresentation, matchModules } from "./presentation";
 import { AssessmentResult, ModuleDescriptor, PresentationKind, PresentationRequest, SourceRef, VisualLesson } from "./visualcontract";
@@ -36,6 +38,23 @@ export async function sourceRefsFor(eng: Engine, dir: string, topic: Topic, n: n
   return refs;
 }
 
+/** The objective an activity for a concept is written for: the card's name and its first bullet. */
+export const conceptObjective = (sk: Topic["subskills"][number]): string =>
+  `${sk.name}: ${(sk.section.split("\n").find((l) => /^\s*-\s+/.test(l)) ?? "").replace(/^\s*-\s+/, "").replace(/\s*\(\[\[[^\]]+\]\]\)\s*$/, "").trim()}`.replace(/:\s*$/, "");
+
+/** True when saved source references still match the passages an activity would rest on. */
+const sameRefs = (saved: SourceRef[], refs: SourceRef[]): boolean => saved.length === refs.length && saved.every((x) => refs.some((y) => y.path === x.path && y.contentHash === x.contentHash));
+
+/**
+ * Saved activities for a concept that still hold: sources, module, catalogue, schema and prompt
+ * unchanged. A local record also needs the same local model. A main-provider record is kept only
+ * while it is ready and does not depend on the main model's name: a blueprint that passed its
+ * checks stays valid when the model alias moves on, and a failed plan never blocks the local model.
+ */
+async function savedFor(eng: Engine, dir: string, conceptId: string, refs: SourceRef[], modelName: string, catalog: string, descriptors: ModuleDescriptor[]): Promise<ActivityRecord[]> {
+  return (await eng.store.loadActivities(dir)).filter((a) => a.conceptId === conceptId && a.schemaVersion === LESSON_SCHEMA_VERSION && a.promptVersion === CONFIG_PROMPT_VERSION && (a.provider === "main" ? a.status === "ready" : a.model === modelName) && a.catalogVersion === catalog && sameRefs(a.sourceRefs, refs) && (!a.moduleId || descriptors.some((d) => d.id === a.moduleId && d.version === a.moduleVersion)));
+}
+
 /** The compiled worked lesson for a concept: the simpler explanation offered when an interactive is not available. */
 export async function workedLesson(eng: Engine, dir: string, topic: Topic, n: number): Promise<string> {
   const sk = topic.subskills.find((k) => k.n === n);
@@ -60,14 +79,13 @@ export async function presentationFor(eng: Engine, p: { dir: string; topic: Topi
   const descriptors = eng.visuals ? eng.visuals.listModuleDescriptors() : [];
   const catalog = eng.visuals?.catalogVersion() ?? "none";
   const modelName = eng.local?.model ?? eng.settings().localModel ?? DEFAULT_LOCAL_MODEL;
-  const objective = `${sk.name}: ${(sk.section.split("\n").find((l) => /^\s*-\s+/.test(l)) ?? "").replace(/^\s*-\s+/, "").replace(/\s*\(\[\[[^\]]+\]\]\)\s*$/, "").trim()}`.replace(/:\s*$/, "");
+  const objective = conceptObjective(sk);
   // Excerpts are chosen by the concept, not by how the learner worded the request, so the same
   // activity is found again however it is asked for.
   const refs = await eng.sourceRefsFor(p.dir, p.topic, n, objective);
   // A saved record is reused only while its sources, module, catalogue, schema, prompt and
   // model are all unchanged. Anything else is a miss, and the old record stays on disk.
-  const same = (a: SourceRef[]) => a.length === refs.length && a.every((x) => refs.some((y) => y.path === x.path && y.contentHash === x.contentHash));
-  const saved = (await eng.store.loadActivities(p.dir)).filter((a) => a.conceptId === conceptId && a.schemaVersion === LESSON_SCHEMA_VERSION && a.promptVersion === CONFIG_PROMPT_VERSION && a.model === modelName && a.catalogVersion === catalog && same(a.sourceRefs) && (!a.moduleId || descriptors.some((d) => d.id === a.moduleId && d.version === a.moduleVersion)));
+  const saved = await savedFor(eng, p.dir, conceptId, refs, modelName, catalog, descriptors);
   const e = evidenceOf(p.state, n);
   const lastWrong = [...p.state.attempts].reverse().find((a) => a.skill === n && a.result !== "correct" && a.result !== "ungraded");
   // Modules are shortlisted against the card and the source passages the activity would rest on.
@@ -289,12 +307,68 @@ export async function recordActivityResult(eng: Engine, dir: string, activityId:
   return { assessment, attempt, changes };
 }
 
+/** The most blueprints one compile plans. Each is one main-provider call, or two with a repair. */
+export const MAX_COMPILE_BLUEPRINTS = 8;
+
+export interface BlueprintPlanning { planned: number; ready: number; failed: number; calls: number; usage: Usage }
+
+/**
+ * Plans the diagrams and simulations a compiled course marked as worth one, with the main
+ * provider, so the learner meets a finished blueprint instead of waiting on the local model.
+ * Runs only for the "main" compile strategy (the one that already spends the main provider on
+ * every stage) and can be switched off. A concept that already has a record for these sources and
+ * this catalogue is skipped, so a refresh costs nothing. Each plan goes through the same checks as a
+ * local one, and a failure is saved as a failure, never an error: the course is already written.
+ * Study time reuses the ready records and still never calls the main provider.
+ */
+export async function planBlueprints(eng: Engine, dir: string, opts: { signal?: AbortSignal; progress?: (message: string) => void } = {}): Promise<BlueprintPlanning> {
+  const out: BlueprintPlanning = { planned: 0, ready: 0, failed: 0, calls: 0, usage: zeroUsage() };
+  const s = eng.settings();
+  if (!eng.visuals || s.compileBlueprints === false || compileStrategyFor(s) !== "main") return out;
+  const registry = eng.visuals;
+  const descriptors = registry.listModuleDescriptors().filter((d) => isSystemsModule(d.id));
+  if (!descriptors.length) return out;
+  const catalog = registry.catalogVersion();
+  const topic = await eng.store.loadTopic(dir);
+  const state = await eng.store.loadState(dir, s.targetLevel);
+  const modelName = modelIdentity(s, "compileModel");
+  const model = providerModel(modelName, async (o) => {
+    const r = await eng.call({ model: modelFor(s, "compileModel"), system: o.system, input: o.user, jsonSchema: o.schema, effort: s.effort, timeoutMs: 180_000 }, s);
+    out.usage = addUsage(out.usage, r.usage);
+    return r.structured !== undefined ? JSON.stringify(r.structured) : r.text;
+  });
+  const existing = new Set((await eng.store.loadActivities(dir)).map((a) => a.id));
+  for (const sk of topic.subskills) {
+    if (out.planned >= MAX_COMPILE_BLUEPRINTS || opts.signal?.aborted) break;
+    const kind = sk.visual?.kind;
+    if (kind !== "diagram" && kind !== "simulation") continue;
+    const conceptId = state.concepts[sk.n] ?? "";
+    const objective = conceptObjective(sk);
+    const refs = await eng.sourceRefsFor(dir, topic, sk.n, objective);
+    const context = [sk.section, ...refs.map((r) => r.excerpt)].join("\n");
+    const candidate = matchModules(`${objective}\n${context}`, kind, descriptors, undefined, sk.name)[0]?.descriptor;
+    if (!candidate) continue;
+    if (existing.has(activityKey({ conceptId, objective, kind, moduleId: candidate.id, moduleVersion: candidate.version, catalogVersion: catalog, model: modelName, sourceRefs: refs }))) continue;
+    opts.progress?.(`Planning a ${kind} for ${sk.name}…`);
+    out.planned++;
+    const request: PresentationRequest = { version: 1, kind, reason: sk.visual?.reason ?? "", objective, sourceRefs: refs, preferredModuleId: candidate.id };
+    const rec = await configureActivity({ request, conceptId, candidates: [candidate], assets: registry.listAssets(), registry, model, modelName, provider: "main", catalogVersion: catalog, trigger: "compile" });
+    out.calls += rec.claudeCalls;
+    // A failure that depends on the moment (the CLI missing, a timeout) is not saved, so a later compile tries again.
+    if (rec.transient) { out.failed++; continue; }
+    await eng.store.saveActivity(dir, rec);
+    if (rec.status === "ready") out.ready++;
+    else out.failed++;
+  }
+  return out;
+}
+
 /**
  * How activities have fared on a topic: offers never opened (unnecessary activations), local
  * configurations, cache hits, rejected configurations, missing capabilities, and whether the
  * next unaided answer on the concept after an activity was right (resolved) or wrong.
  */
-export async function activityReport(eng: Engine, dir: string): Promise<{ offered: number; unopened: number; generated: number; reused: number; failed: number; unsupported: number; assessed: number; resolved: number; unresolved: number; pending: number; localCalls: number; claudeCalls: 0 }> {
+export async function activityReport(eng: Engine, dir: string): Promise<{ offered: number; unopened: number; generated: number; reused: number; failed: number; unsupported: number; assessed: number; resolved: number; unresolved: number; pending: number; localCalls: number; claudeCalls: number }> {
   const log = await eng.store.loadActivityLog(dir);
   const records = await eng.store.loadActivities(dir);
   const state = await eng.store.loadState(dir, eng.settings().targetLevel);
@@ -311,5 +385,5 @@ export async function activityReport(eng: Engine, dir: string): Promise<{ offere
     else if (next.result === "correct") resolved++;
     else unresolved++;
   }
-  return { offered: offeredIds.length, unopened: offeredIds.filter((e) => !opened.has(e.conceptId)).length, generated: count("generated"), reused: count("reused") + count("opened"), failed: count("failed"), unsupported: count("unsupported"), assessed: count("assessed"), resolved, unresolved, pending, localCalls: records.reduce((a, r) => a + r.localCalls, 0), claudeCalls: 0 };
+  return { offered: offeredIds.length, unopened: offeredIds.filter((e) => !opened.has(e.conceptId)).length, generated: count("generated"), reused: count("reused") + count("opened"), failed: count("failed"), unsupported: count("unsupported"), assessed: count("assessed"), resolved, unresolved, pending, localCalls: records.reduce((a, r) => a + r.localCalls, 0), claudeCalls: records.reduce((a, r) => a + r.claudeCalls, 0) };
 }

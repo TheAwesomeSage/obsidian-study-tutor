@@ -1,4 +1,5 @@
 import { addUsage } from "./claude";
+import { daysBetween } from "./dates";
 import { sessionFor } from "./session";
 import { questionKey } from "./evidence";
 // The knowledge graph screen: every concept from every topic on one map, with search, filters,
@@ -256,7 +257,7 @@ export class GraphScreen implements Screen {
       } else if (this.mode === "recency") {
         if (!e?.last) n.hollow = true;
         else {
-          const days = Math.max(0, Math.round((Date.parse(v.today) - Date.parse(e.last.slice(0, 10))) / 86400000));
+          const days = Math.max(0, daysBetween(e.last, v.today));
           n.color = seq(days <= 2 ? 6 : days <= 7 ? 5 : days <= 14 ? 4 : days <= 30 ? 3 : 2);
         }
       } else {
