@@ -1,7 +1,7 @@
 // What the home screen knows about each topic, and which one to suggest next.
 // Pure functions, no Obsidian imports.
 
-import { LearnerState, NextStep, Prereqs, addDays, dueCount, evidenceOf, mastery, nextStep, progress } from "./formats";
+import { LearnerState, NextStep, Prereqs, addDays, dueCount, evidenceOf, mastery, nextStep, progress, reviewCards } from "./formats";
 import { daysBetween } from "./dates";
 import type { Decision } from "./policy";
 import { DEFAULT_SECONDS_PER_ITEM, MIN_TIMED_ANSWERS, secondsPerItem } from "./scheduler";
@@ -123,7 +123,7 @@ export function workloadForecast(states: LearnerState[], today: string, opts: { 
     if (d) d[kind]++;
   };
   for (const s of states) {
-    if (countsCards) for (const c of Object.values(s.cards)) add(c.due, "cards");
+    if (countsCards) for (const c of reviewCards(s)) add(c.due, "cards");
     for (const k of Object.keys(s.names).map(Number)) {
       const check = evidenceOf(s, k).nextCheck;
       if (check) add(check, "checks");

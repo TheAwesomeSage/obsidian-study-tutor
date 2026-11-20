@@ -5,6 +5,7 @@ import { BUNDLED } from "./prompts";
 import { Course, CourseEdge, EdgeStatus, Relation, TopicGraph, effectivePrereqs, joinCourse, parseTopicGraph, serializeTopicGraph, syncTopicGraph, wouldCycle } from "./course";
 import { Attempt, LevelChange, normaliseAttempt } from "./evidence";
 import { SrStats, buildSrNote, srStats } from "./formats";
+import { parseMistakeCard } from "./families";
 import { Chat, Frontmatter, LearnerState, Mode, Prereqs, Question, Topic, fmNum, fmStr, newState, parseChat, parseQuestions, parseState, parseTopic, serializeChat, serializeState, textHash, withFrontmatter, ymd } from "./formats";
 import type { PolicyCase } from "./policy";
 import { SessionRecord, sessionMarkdown } from "./session";
@@ -532,7 +533,11 @@ export class Store {
     for (const c of graph.concepts) if (!c.retired) next.concepts[c.n] = c.id;
     // A new question bank starts its card schedule again. A partial refresh keeps the schedule
     // of every question it left untouched. Everything else is kept either way.
-    if (previous && p.keepCards) for (const id of p.keepCards) if (previous.cards[id]) next.cards[id] = previous.cards[id];
+    // The cards of known mistakes go with their questions.
+    if (previous && p.keepCards) {
+      const keep = new Set(p.keepCards);
+      for (const id of Object.keys(previous.cards)) if (keep.has(id) || keep.has(parseMistakeCard(id)?.base ?? "")) next.cards[id] = previous.cards[id];
+    }
     // The kept cards' dates come from the previous scheduler, so its record (and switch history) goes with them.
     if (previous?.scheduler) next.scheduler = previous.scheduler;
     await this.saveState(dir, next);

@@ -13,7 +13,7 @@ import { ReasoningAssessment, finalExpression, withCheck } from "./reasoning";
 import { gradeOfOutcome, normaliseMark, outcomeOfGrade, withNote } from "./grading";
 import { tutorSchedules } from "./scheduler";
 import { TurnResult, TurnOpts, MAX_ANSWER_SECONDS, applyAttempt, pickQuizQuestion } from "./engine-common";
-import { fadedFor, followUp, freshVariant, markTask, metBefore, taskHelp, taskOf } from "./bankvariants";
+import { dueMistake, fadedFor, followUp, freshVariant, markTask, metBefore, mistakeUpdates, pairedFor, taskHelp, taskOf } from "./bankvariants";
 import { baseQuestionId } from "./families";
 import { CodeRunRecord, codeGradingQuestion, codeRunMarkdown, codeRunRecord, codeSource, looksLikeCode, markCodeRun, notRun, sentAsCode, solutionMarkdown } from "./codequestions";
 import type { CodeRunReport, CodeTask } from "./codetask";
@@ -393,9 +393,14 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
       if (codeRun) attempt.code = codeRun;
       state.attempts = recordAttempt(state.attempts, attempt);
       if (!repeat && scheduled) {
-        // New numbers for a question are the same card: its schedule is the question's.
+        // New numbers for a question are the same card: its schedule is the question's. Helped work
+        // (a repair, a faded example, a pair) does not move it: the solution was in view, so only an
+        // unaided answer on new numbers can push the card out. Known mistakes have cards of their own.
         const card = baseQuestionId(pending.id);
-        if (tutorSchedules(s)) state.cards[card] = schedule(state.cards[card], scheduled, today, state.scheduler);
+        if (tutorSchedules(s)) {
+          if (!taskHelp(task)) state.cards[card] = schedule(state.cards[card], scheduled, today, state.scheduler);
+          for (const u of mistakeUpdates(task, attempt, state)) state.cards[u.id] = schedule(state.cards[u.id], u.grade, today, state.scheduler);
+        }
         if (pending.subskill in state.names) {
           const b = state.bank[pending.subskill] ?? (state.bank[pending.subskill] = { right: 0, total: 0 });
           b.total += 1;
@@ -427,7 +432,8 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
   let decision = opts.decision;
   let next: Question | null = null;
   // After a known mistake comes a repair task, and after a repair a fresh check (bankvariants.ts).
-  const follow = task && attempt && verdict ? followUp(task, attempt, state, asked) : null;
+  // A mistake whose check is due comes next when there is no repair to set (bankvariants.ts).
+  const follow = (task && attempt && verdict ? followUp(task, attempt, state, asked) : null) ?? (tutorSchedules(s) ? dueMistake(questions, state, today, asked) : null);
   if (follow) next = follow.question;
   else if (opts.adaptive) {
     if (!decision || verdict) decision = await eng.planFrom(dir, chat, state, mode, attempt && attempt.result === "correct" && attempt.skill ? attempt.skill : null);
@@ -436,8 +442,12 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
     const focus = decision.focus;
     // Supported practice from the bank is a faded worked example on new numbers.
     if (decision.local === "bank" && focus !== null && (decision.action === "worked-example" || decision.action === "guided-practice")) {
-      for (const q of questions.filter((x) => x.subskill === focus)) {
-        next = fadedFor(q, state, asked);
+      // Faded examples first; once they run out, a contrasting pair; then plain practice.
+      for (const make of [fadedFor, pairedFor]) {
+        for (const q of questions.filter((x) => x.subskill === focus)) {
+          next = make(q, state, asked);
+          if (next) break;
+        }
         if (next) break;
       }
     } else if (decision.local === "bank" && focus !== null) next = pickQuizQuestion(questions, state, asked, today, { purpose, only: (q) => q.subskill === focus && q.type !== "open" });

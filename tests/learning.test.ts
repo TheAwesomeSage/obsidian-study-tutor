@@ -1169,7 +1169,7 @@ async function motion() {
   const dir = await store.saveCompiled({ title: "Motion", fm: { subject: "none" }, topicBody: CARD(NAMES), questionsBody: bank, target: 4 });
   const questions = await store.loadQuestions(dir);
   assert.ok(questions[0].generator, "the spec passed its checks and is kept with the question");
-  return { store, engine, dir, questions, calls: () => calls };
+  return { store, engine, dir, questions, fs, calls: () => calls };
 }
 
 test("question families: code asks new numbers, sets a repair task after a known mistake, then checks the fix without help", async () => {
@@ -1192,9 +1192,15 @@ test("question families: code asks new numbers, sets a repair task after a known
   assert.equal(await card(), "Q1~1#fix0", "a worked solution with that mistake comes next");
   assert.match(r.reply, /one mistake in it/);
 
+  const cardsNow = async () => (await store.loadState(dir, 4)).cards;
+  const mistakeCard = "Q1#m-subtracted-the-change-in-speed";
+  const lapsed = await cardsNow();
+  assert.ok(lapsed[mistakeCard], "the known mistake starts a card of its own");
+  assert.equal(lapsed[mistakeCard].lapses, 1, "scheduled as a miss");
   r = await engine.quizTurn(dir, chat, `step 2, answer ${first.answerText}, it should be a plus`);
   assert.match(r.reply, /\*\*Correct\.\*\*/);
   assert.equal(r.attempt?.assisted, true, "the repair is helped work");
+  assert.deepEqual(await cardsNow(), lapsed, "helped work moves no card: the solution was in view");
   assert.equal(r.attempt?.taskType, "error-finding");
   assert.equal(await card(), "Q1~2", "then new numbers check the fix");
 
@@ -1206,7 +1212,9 @@ test("question families: code asks new numbers, sets a repair task after a known
   assert.equal(calls(), 0, "no model call anywhere");
 
   const st = await store.loadState(dir, 4);
-  assert.deepEqual(Object.keys(st.cards), ["Q1"], "new numbers share the question's card");
+  assert.deepEqual(Object.keys(st.cards).sort(), ["Q1", mistakeCard], "new numbers share the question's card; the mistake has its own");
+  assert.ok(st.cards.Q1.reps > lapsed.Q1.reps, "an unaided right answer on new numbers advances the question's card");
+  assert.ok(st.cards[mistakeCard].reps > lapsed[mistakeCard].reps && st.cards[mistakeCard].due > lapsed[mistakeCard].due, "and the fresh check moves the mistake's card out");
   const e = skillEvidence(st.attempts, 1);
   assert.equal(e.independentCorrect, 1, "new numbers for one question count as one question");
   assert.equal(e.delayedTransfer, false);
@@ -1231,6 +1239,92 @@ test("question families: in Adaptive mode, guided practice is a faded worked exa
   assert.match(a.reply, /\*\*Correct\.\*\*/);
   assert.deepEqual([a.attempt!.assisted, a.attempt!.grading, a.attempt!.verification], [true, "deterministic", "verified"]);
   assert.match(a.attempt!.assistance.join(" "), /faded worked example/);
+  assert.equal(calls(), 0);
+});
+
+test("question families: a due mistake card sets a fresh check, and a known mistake card never counts as a flashcard to review", async () => {
+  const { store, engine, dir, questions, calls, fs } = await motion();
+  const { taskOf } = await import("../src/bankvariants");
+  const chat = await store.newChat(dir, "Motion", "quiz", new Date(2026, 10, 17, 9, 0));
+  const card = async (c = chat) => F.fmStr((await store.loadChat(c)).fm, "card");
+  await engine.quizTurn(dir, chat, "");
+  await engine.quizTurn(dir, chat, "11");
+  const first = taskOf(questions, await card())!.inst!;
+  await engine.quizTurn(dir, chat, String(first.params.u - first.params.a * first.params.t));
+  const st = await store.loadState(dir, 4);
+  const mistakeCard = "Q1#m-subtracted-the-change-in-speed";
+  assert.ok(st.cards[mistakeCard]);
+  assert.equal(F.dueCount(st, "2099-01-01"), 1, "only the question's card is a flashcard to review");
+  assert.equal(F.reviewCards(st).length, 1);
+  // Due and in a chat of its own: the check comes first, on numbers not used before, with no model call.
+  st.cards[mistakeCard] = { ...st.cards[mistakeCard], due: "2026-11-17" };
+  await store.saveState(dir, st);
+  const fresh = await store.newChat(dir, "Motion", "quiz", new Date(2026, 10, 17, 10, 0));
+  await engine.quizTurn(dir, fresh, "");
+  assert.match(await card(fresh), /^Q1~[2-9]$/, "new numbers, not the seeds already used");
+  assert.equal(calls(), 0);
+  // Not due, or the question already asked in this chat: no check is set.
+  const { dueMistake } = await import("../src/bankvariants");
+  assert.equal(dueMistake(questions, { ...st, cards: { ...st.cards, [mistakeCard]: { ...st.cards[mistakeCard], due: "2026-12-30" } } }, "2026-11-17", []), null);
+  assert.equal(dueMistake(questions, st, "2026-11-17", ["Q1~7"]), null, "this chat has met the question already");
+  assert.match(dueMistake(questions, st, "2026-11-17", [])!.reason, /subtracted the change in speed/);
+  // The cards of known mistakes go with their questions through a refresh that keeps them.
+  const raw = fs.files.get(`${dir}/questions.md`) as string;
+  const questionsBody = raw.slice(raw.indexOf("### Q1"));
+  await store.saveCompiled({ title: "Motion", fm: { subject: "none" }, topicBody: CARD(NAMES), questionsBody, target: 4, existingDir: dir, keepCards: ["Q1"] });
+  assert.ok((await store.loadState(dir, 4)).cards[mistakeCard], "kept with Q1");
+  await store.saveCompiled({ title: "Motion", fm: { subject: "none" }, topicBody: CARD(NAMES), questionsBody, target: 4, existingDir: dir });
+  assert.ok(!(await store.loadState(dir, 4)).cards[mistakeCard], "a new bank starts its schedule again");
+});
+
+test("question families: a contrasting pair follows the faded examples, is marked by code as helped work, and moves no card", async () => {
+  const { taskOf, pairedFor, markTask, followUp, mistakeUpdates } = await import("../src/bankvariants");
+  const { parseTaskId } = await import("../src/families");
+  const { store, engine, dir, questions, calls } = await motion();
+  const base = questions[0];
+  const s0 = F.newState(F.parseTopic(CARD(NAMES)), 4);
+  const q = pairedFor(base, s0, [])!;
+  assert.match(q.id, /^Q1~1#pair0$/);
+  assert.deepEqual(parseTaskId(q.id), { base: "Q1", seed: 1, kind: "pair", k: 0 });
+  assert.match(q.question, /Case 1, worked:[\s\S]*Answer: \d+[\s\S]*Case 2 is the same question with one value changed \(\w+ goes from \d+ to \d+\)/);
+  const task = taskOf(questions, q.id)!;
+  assert.equal(task.kind, "pair");
+  assert.equal(task.question.id, q.id, "rebuilt from its seed");
+  assert.equal(markTask(task, task.inst!.answerText)?.grade, "good", "Case 2's answer is the one marked");
+  assert.equal(markTask(task, "-999")?.grade, "again");
+  assert.equal(followUp(task, { result: "incorrect", errorType: "subtracted the change in speed" } as any, s0, []), null, "no repair on a pair: its ids name the first case");
+  assert.deepEqual(mistakeUpdates(task, { result: "correct", errorType: "", assisted: true, answerExposed: false }, s0), [], "helped work moves no mistake card");
+  // At most two answered right per question.
+  const done = (id: string) => ({ ...(F.newState(F.parseTopic(CARD(NAMES)), 4)), attempts: [id, "Q1~2#pair0"].map((qid, i) => attempt({ id: `p${i}`, skill: 1, questionId: qid, result: "correct" })) });
+  assert.equal(pairedFor(base, done("Q1~1#pair0"), []), null);
+
+  // In Adaptive mode, once the faded example has been answered, guided practice is a pair.
+  const st = await store.loadState(dir, 4);
+  st.levels[1] = 2;
+  st.taught[1] = "2026-11-16";
+  st.focus = 1;
+  await store.saveState(dir, st);
+  const chat = await store.newChat(dir, "Motion", "auto", new Date(2026, 10, 17, 9, 0));
+  const cardOf = async () => F.fmStr((await store.loadChat(chat)).fm, "card");
+  await engine.study(dir, chat, "");
+  assert.equal(await cardOf(), "Q1~1#fade1");
+  await engine.study(dir, chat, taskOf(questions, "Q1~1#fade1")!.inst!.answerText);
+  // The learner stays at the same level, so guided practice comes up again, and the faded examples have run out.
+  const again = await store.loadState(dir, 4);
+  for (const n of Object.keys(again.names).map(Number)) again.levels[n] = n === 1 ? 2 : 4;
+  again.focus = 1;
+  await store.saveState(dir, again);
+  const second = await store.newChat(dir, "Motion", "auto", new Date(2026, 10, 17, 9, 30));
+  const paired = await engine.study(dir, second, "");
+  assert.deepEqual([paired.decision?.action, paired.decision?.local], ["guided-practice", "bank"]);
+  const card = F.fmStr((await store.loadChat(second)).fm, "card");
+  assert.equal(card, "Q1~2#pair0");
+  const before = (await store.loadState(dir, 4)).cards;
+  const a = await engine.study(dir, second, taskOf(questions, card)!.inst!.answerText);
+  assert.match(a.reply, /\*\*Correct\.\*\*/);
+  assert.deepEqual([a.attempt!.assisted, a.attempt!.grading], [true, "deterministic"]);
+  assert.match(a.attempt!.assistance.join(" "), /contrasting pair/);
+  assert.deepEqual((await store.loadState(dir, 4)).cards, before, "helped work moves no card");
   assert.equal(calls(), 0);
 });
 

@@ -3,10 +3,12 @@
 // code, so a new instance costs no model call. Task ids keep the ancestry (parseTaskId): "Q3~17"
 // is question Q3 with seed 17, "Q3~17#fix0" is the repair task for that instance's first expected
 // mistake, and "Q3~17#fade2" is that instance as a worked example with its last two steps left to
-// the learner. No Obsidian imports.
+// the learner, and "Q3~17#pair0" is a contrasting pair on that seed: the first case worked in full,
+// then the same question with one value changed, whose answer the learner gives. "Q3#m-sign-error"
+// is not a task but the card of a known mistake (families.ts). No Obsidian imports.
 
 import type { Attempt } from "./evidence";
-import { FamilySpec, Instance, TaskKind, baseQuestionId, fade, flawedSolution, instantiate, markNumeric, parseTaskId, taskId } from "./families";
+import { FamilySpec, Instance, TaskKind, baseQuestionId, fade, flawedSolution, instantiate, markNumeric, mistakeCardId, mistakeSlug, pairedCases, parseMistakeCard, parseTaskId, taskId } from "./families";
 import type { Grade, LearnerState, Question } from "./formats";
 
 /** A bank question as asked: the original, an instance with new numbers, or a repair task or faded example on one. */
@@ -49,6 +51,29 @@ function repairQuestion(base: Question, inst: Instance, k: number): Question | n
   };
 }
 
+/** Two cases that differ in one value: the first worked in full, the second asked. `pair` is the base question's instance on the seed and its contrast. */
+function pairQuestion(base: Question, pair: [Instance, Instance]): Question {
+  const [a, b] = pair;
+  const changed = Object.keys(a.params).filter((n) => a.params[n] !== b.params[n]).map((n) => `${n} goes from ${a.params[n]} to ${b.params[n]}`).join(", ");
+  return {
+    ...variantQuestion(base, b),
+    id: taskId(base.id, b.seed, "pair"),
+    question: `Case 1, worked:
+
+${a.question}
+
+${numbered(a.steps)}
+
+Answer: ${a.answerText}
+
+Case 2 is the same question with one value changed (${changed}):
+
+${b.question}
+
+*Think about how the change moves the answer, then reply with Case 2's answer.*`,
+  };
+}
+
 function fadedQuestion(base: Question, inst: Instance, hidden: number): Question | null {
   const f = fade(inst, hidden);
   if (!f.blanks || f.blanks >= inst.steps.length) return null;
@@ -67,6 +92,11 @@ export function taskOf(questions: Question[], id: string): BankTask | null {
   if (ref.seed === null) return { base, question: base, inst: null, kind: "question", k: 0 };
   const inst = base.generator ? instantiate(base.generator, ref.seed) : null;
   if (!inst) return null;
+  if (ref.kind === "pair") {
+    // The answered case is the contrast: marking and the card use it, and the first case is only shown.
+    const pair = pairedCases(base.generator!, ref.seed);
+    return pair && { base, question: pairQuestion(base, pair), inst: pair[1], kind: "pair", k: 0 };
+  }
   const question = ref.kind === "fix" ? repairQuestion(base, inst, ref.k) : ref.kind === "fade" ? fadedQuestion(base, inst, ref.k) : variantQuestion(base, inst);
   return question && { base, question, inst, kind: ref.kind, k: ref.k };
 }
@@ -114,7 +144,20 @@ export function fadedFor(base: Question, s: LearnerState, asked: string[]): Ques
   return inst && fadedQuestion(base, inst, done + 1);
 }
 
+/**
+ * A contrasting pair on new numbers: the first case worked, then the same question with one value
+ * changed. At most two answered right per question, and only for a family with a value that can
+ * change; after that plain practice takes over.
+ */
+export function pairedFor(base: Question, s: LearnerState, asked: string[]): Question | null {
+  const done = s.attempts.filter((a) => a.result === "correct" && parseTaskId(a.questionId)?.kind === "pair" && baseQuestionId(a.questionId) === base.id).length;
+  const inst = done < 2 ? freshInstance(base, s, asked) : null;
+  const pair = inst && base.generator ? pairedCases(base.generator, inst.seed) : null;
+  return pair && pairQuestion(base, pair);
+}
+
 const HELP: Partial<Record<TaskKind, string>> = {
+  pair: "a contrasting pair: the first case was worked in full before this one was asked",
   fix: "a repair task set straight after a mistake on the same kind of question, with a worked solution in view",
   fade: "a faded worked example: the first steps of the solution were shown",
 };
@@ -134,7 +177,7 @@ export interface FollowUp {
  * (helped work); after that repair, new numbers check the fix without help. Null otherwise.
  */
 export function followUp(task: BankTask, a: Attempt, s: LearnerState, asked: string[]): FollowUp | null {
-  if (!task.inst) return null;
+  if (!task.inst || task.kind === "pair") return null;
   if (task.kind === "fix") {
     const question = freshVariant(task.base, s, asked);
     return question && { question, action: "fresh-check", reason: "After the repair, new numbers check the fix without help." };
@@ -186,4 +229,44 @@ export function markTask(task: BankTask, reply: string): TaskMark | null {
   const spec = task.base.generator;
   if (!task.inst || !spec) return null;
   return task.kind === "fix" ? markRepair(task.inst, spec, task.k, reply) : markInstance(task.inst, spec, reply);
+}
+
+/** A change to one mistake card after an attempt: which card, and the grade it is scheduled with. */
+export interface MistakeUpdate {
+  id: string;
+  grade: Grade;
+}
+
+/**
+ * How an attempt moves the cards of known mistakes. A mistake the answer matches starts or
+ * restarts its card ("again"). An unaided right answer on new numbers is the check that the
+ * mistake is fixed, so every mistake card on that question is scheduled "good". Helped work
+ * (a repair, a faded example, a pair) moves nothing: the solution was in view. Pure.
+ */
+export function mistakeUpdates(task: BankTask | null, a: Pick<Attempt, "result" | "errorType" | "assisted" | "answerExposed">, s: LearnerState): MistakeUpdate[] {
+  if (!task?.inst || taskHelp(task) || a.assisted || a.answerExposed) return [];
+  if (a.result === "incorrect") {
+    const m = a.errorType ? task.inst.mistakes.find((x) => x.label === a.errorType) : undefined;
+    return m ? [{ id: mistakeCardId(task.base.id, m.label), grade: "again" }] : [];
+  }
+  if (a.result !== "correct") return [];
+  return Object.keys(s.cards).filter((id) => parseMistakeCard(id)?.base === task.base.id).map((id) => ({ id, grade: "good" as const }));
+}
+
+/**
+ * A fresh check on new numbers for a mistake whose card is due, most overdue first. Skipped for a
+ * question already asked in this chat, so a check and a repair do not pile up, and when the
+ * question or its family is no longer in the bank.
+ */
+export function dueMistake(questions: Question[], s: LearnerState, today: string, asked: string[]): FollowUp | null {
+  const due = Object.entries(s.cards).filter(([id, c]) => c.due <= today && parseMistakeCard(id)).sort(([a, x], [b, y]) => (x.due < y.due ? -1 : x.due > y.due ? 1 : a < b ? -1 : a > b ? 1 : 0));
+  for (const [id] of due) {
+    const ref = parseMistakeCard(id)!;
+    const base = questions.find((q) => q.id === ref.base && q.generator);
+    if (!base || asked.some((x) => baseQuestionId(x) === base.id)) continue;
+    const question = freshVariant(base, s, asked);
+    const label = base.generator?.mistakes?.find((m) => mistakeSlug(m.label) === ref.slug)?.label;
+    if (question && label) return { question, action: "mistake-check", reason: `A mistake you made before (${label}) is due for a check on new numbers, without help.` };
+  }
+  return null;
 }

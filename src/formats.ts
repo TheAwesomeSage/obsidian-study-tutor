@@ -3,7 +3,7 @@ import { Attempt, LevelChange, normaliseAttempt, skillEvidence, supportedLevel }
 import type { Relation } from "./course";
 import type { Misconception } from "./misconceptions";
 import { reservedQuestions } from "./coursepkg";
-import { FamilySpec, parseFamilySpec } from "./families";
+import { FamilySpec, isMistakeCard, parseFamilySpec } from "./families";
 import type { CodeTask } from "./codetask";
 import { decodeSolution, parseCodeTask, renderCodeTask } from "./codequestions";
 import { examDay, readObjectiveLine, type ObjectiveExam } from "./objective-meta";
@@ -553,7 +553,9 @@ export function progress(s: LearnerState): number {
   return Math.round((100 * sum) / (ns.length * s.target));
 }
 
-export const dueCount = (s: LearnerState, today: string): number => Object.values(s.cards).filter((c) => c.due <= today).length;
+/** The flashcards of a state: the bank's questions. A known mistake's card is checked inside quizzes and adaptive sessions, not in review, so it is left out of every count of cards to review. */
+export const reviewCards = (s: LearnerState): CardSched[] => Object.entries(s.cards).filter(([id]) => !isMistakeCard(id)).map(([, c]) => c);
+export const dueCount = (s: LearnerState, today: string): number => reviewCards(s).filter((c) => c.due <= today).length;
 
 export function serializeState(s: LearnerState, today: string): string {
   const fm: Frontmatter = {

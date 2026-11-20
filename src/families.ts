@@ -650,7 +650,7 @@ export function parseVariantId(id: string): { base: string; seed: number } | nul
 }
 
 /** What a task id asks: the question as written, new numbers, a repair task or a faded worked example. */
-export type TaskKind = "question" | "variant" | "fix" | "fade";
+export type TaskKind = "question" | "variant" | "fix" | "fade" | "pair";
 
 /** A task id read back: the question it comes from, the seed (null for the question as written), the kind and its index. */
 export interface TaskRef {
@@ -660,19 +660,32 @@ export interface TaskRef {
   k: number;
 }
 
-/** The one reader of task ids: "Q3", "Q3~17", "Q3~17#fix0" or "Q3~17#fade2". Null for anything else. */
+/** The one reader of task ids: "Q3", "Q3~17", "Q3~17#fix0", "Q3~17#fade2" or "Q3~17#pair0". Null for anything else. */
 export function parseTaskId(id: string): TaskRef | null {
   const [vid, suffix, ...rest] = id.split("#");
   if (rest.length) return null;
   if (!vid.includes("~")) return suffix === undefined && vid ? { base: vid, seed: null, kind: "question", k: 0 } : null;
   const v = parseVariantId(vid);
-  const m = suffix === undefined ? null : /^(fix|fade)(\d)$/.exec(suffix);
+  const m = suffix === undefined ? null : /^(fix|fade|pair)(\d)$/.exec(suffix);
   if (!v || (suffix !== undefined && !m)) return null;
   return { base: v.base, seed: v.seed, kind: m ? (m[1] as TaskKind) : "variant", k: m ? Number(m[2]) : 0 };
 }
 
 /** The id of a task on new numbers, the inverse of parseTaskId. */
-export const taskId = (base: string, seed: number, kind: "variant" | "fix" | "fade" = "variant", k = 0): string => (kind === "variant" ? variantId(base, seed) : `${variantId(base, seed)}#${kind}${k}`);
+export const taskId = (base: string, seed: number, kind: "variant" | "fix" | "fade" | "pair" = "variant", k = 0): string => (kind === "variant" ? variantId(base, seed) : `${variantId(base, seed)}#${kind}${k}`);
+
+/**
+ * The card of a known mistake on a question: "Q3#m-sign-error". It is scheduled like any card but
+ * is not a question and not a task id (parseTaskId reads it as null), so nothing asks it as written.
+ */
+export const mistakeSlug = (label: string): string => label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "mistake";
+export const mistakeCardId = (base: string, label: string): string => `${base}#m-${mistakeSlug(label)}`;
+/** The question and mistake slug a mistake card id names, or null for any other id. */
+export const parseMistakeCard = (id: string): { base: string; slug: string } | null => {
+  const m = /^(Q\d+)#m-([a-z0-9-]+)$/.exec(id);
+  return m ? { base: m[1], slug: m[2] } : null;
+};
+export const isMistakeCard = (id: string): boolean => parseMistakeCard(id) !== null;
 
 /** The question a task id comes from: "Q3~17#fix0" and "Q3~17" both come from Q3. Any other id is itself. */
 export const baseQuestionId = (id: string): string => (id.includes("~") ? parseTaskId(id)?.base ?? id : id);

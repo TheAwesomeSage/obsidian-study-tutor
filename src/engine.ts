@@ -6,7 +6,7 @@ import { CallResult, ModelCliError, Usage, addUsage } from "./claude";
 import { callModel, modelFor, type ModelRequest } from "./model-provider";
 import { dependentCounts } from "./course";
 import { Attempt, EVIDENCE_RULES, Grading, Outcome, checkDue, recordAttempt } from "./evidence";
-import { Chat, LearnerState, Mode, NextStep, Prereqs, Question, Topic, objectiveStamp, applyStateUpdate, chatWords, extractStateTrailer, fmList, fmStr, mastery, placementQuestions, prereqGaps, setLevel, ymd } from "./formats";
+import { Chat, LearnerState, Mode, NextStep, Prereqs, Question, Topic, dueCount, objectiveStamp, applyStateUpdate, chatWords, extractStateTrailer, fmList, fmStr, mastery, placementQuestions, prereqGaps, setLevel, ymd } from "./formats";
 import { ACTION_GUIDE, DEFAULT_WEIGHTS, Decision, POLICY_VERSION, PolicyInput, decide, examSignals, homeStep } from "./policy";
 import { bktShadow, mcqOptions } from "./bkt";
 import type { ResearchProvider } from "./compile-research";
@@ -25,7 +25,7 @@ import { activeDescriptions, applyObservation, courseMisconceptions, onConcept }
 import { ATTEMPT_REASONING, parseReasoning } from "./reasoning";
 import { normaliseMark, withNote } from "./grading";
 import { reservedQuestions } from "./coursepkg";
-import { fadedFor, isBankId, taskOf } from "./bankvariants";
+import { fadedFor, isBankId, pairedFor, taskOf } from "./bankvariants";
 import { baseQuestionId } from "./families";
 import { MoveDecision, REASON_TEXT, afterMark, chooseMove, moveBrief } from "./tutormove";
 import { CourseMaterial, lessonDepth } from "./lessondepth";
@@ -204,7 +204,7 @@ export class Engine {
         // Retention is measured from unaided work; helped answers do not renew it.
         daysSince: e.lastIndependent ? daysBetween(e.lastIndependent, today) : null,
         bankLeft: s.bankQuiz === false ? 0 : p.questions.filter((q) => q.subskill === n && q.type !== "open" && !kept.has(q.id) && (q.generator ? asked.filter((id) => baseQuestionId(id) === q.id).length < 3 : !asked.includes(q.id) && !seenToday.has(q.id))).length,
-        faded: s.bankQuiz !== false && p.questions.some((q) => q.subskill === n && !kept.has(q.id) && !!fadedFor(q, state, asked)),
+        faded: s.bankQuiz !== false && p.questions.some((q) => q.subskill === n && !kept.has(q.id) && !!(fadedFor(q, state, asked) ?? pairedFor(q, state, asked))),
         checkDue: (m.level ?? 0) >= 3 && checkDue(e, today),
         nextCheck: e.nextCheck,
         ...(e.recheck ? { recheck: e.recheck.why } : {}),
@@ -244,7 +244,7 @@ export class Engine {
     const decision = decide(input);
     const ns = Object.keys(state.names).map(Number);
     const atTarget = ns.length > 0 && input.skills.every((k) => (k.level ?? 0) >= state.target && (k.level ?? 0) <= k.supported && !k.checkDue);
-    return { step: homeStep(decision, { due: due ?? Object.values(state.cards).filter((c) => c.due <= this.today()).length, atTarget }), decision };
+    return { step: homeStep(decision, { due: due ?? dueCount(state, this.today()), atTarget }), decision };
   }
 
   /**
