@@ -116,7 +116,7 @@ export function compareValue(actualJson: string, expectedJson: string, mode: Cod
   return sameValue(a.value, e.value, mode === "float");
 }
 
-const clip = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, Math.max(0, n - 1))}…`);
+const clip =(s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, Math.max(0, n - 1))}…`);
 const quote = (s: string): string => JSON.stringify(clip(s, 120));
 
 /** Says where an output first differs from the expected one, briefly. */
@@ -150,10 +150,13 @@ export function testHead(t: CodeTestCase, index: number): { name: string; hidden
 
 /** A result that is not a pass or a fail: an error, a timeout or a test that never ran. */
 export function testOutcome(t: CodeTestCase, index: number, status: CodeTestStatus, detail: string, ms: number): CodeTestResult {
-  return { ...testHead(t, index), status, detail: clip(detail.trim(), CODE_LIMITS.detailChars), ms };
+  return { ...testHead(t, index), status, detail: boundDetail(detail), ms };
 }
 
-export const boundDetail = (s: string): string => clip(s.trim(), CODE_LIMITS.detailChars);
+/** Field names an object has beyond the allowed ones, up to five, comma-separated; "" when none. */
+const unknownKeys = (o: Record<string, unknown>, allowed: ReadonlySet<string>): string => Object.keys(o).filter((k) => !allowed.has(k)).slice(0, 5).join(", ");
+
+export const boundDetail =(s: string): string => clip(s.trim(), CODE_LIMITS.detailChars);
 export const boundMessage = (s: string): string => clip(s.trim(), CODE_LIMITS.messageChars);
 
 /** The time limit a task asks for, or the default. */
@@ -190,10 +193,8 @@ const TEST_KEYS = new Set(["name", "stdin", "args", "expected", "hidden", "compa
 export function validateCodeTask(task: unknown, source: unknown, opts: { strict?: boolean } = {}): string | null {
   if (!task || typeof task !== "object" || Array.isArray(task)) return "the task must be an object";
   const t = task as Record<string, unknown>;
-  if (opts.strict) {
-    const extra = Object.keys(t).filter((k) => !TASK_KEYS.has(k));
-    if (extra.length) return `the task has unknown fields: ${extra.slice(0, 5).join(", ")}`;
-  }
+  const taskExtra = opts.strict ? unknownKeys(t, TASK_KEYS) : "";
+  if (taskExtra) return `the task has unknown fields: ${taskExtra}`;
   if (!isCodeLanguage(t.language)) return "the language must be python, cpp or c";
   if (typeof source !== "string" || !source.trim()) return "there is no code to run";
   if (bytes(source) > CODE_LIMITS.sourceBytes) return `the code is longer than ${CODE_LIMITS.sourceBytes / 1024} KB`;
@@ -212,15 +213,14 @@ export function validateCodeTask(task: unknown, source: unknown, opts: { strict?
     const at = `test ${i + 1}`;
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return `${at} must be an object`;
     const c = raw as Record<string, unknown>;
-    if (opts.strict) {
-      const extra = Object.keys(c).filter((k) => !TEST_KEYS.has(k));
-      if (extra.length) return `${at} has unknown fields: ${extra.slice(0, 5).join(", ")}`;
-    }
+    const testExtra = opts.strict ? unknownKeys(c, TEST_KEYS) : "";
+    if (testExtra) return `${at} has unknown fields: ${testExtra}`;
     if (typeof c.name !== "string" || c.name.length > 200) return `${at} needs a name of at most 200 characters`;
     if (typeof c.expected !== "string") return `${at} needs the expected output as text`;
     if (c.hidden !== undefined && typeof c.hidden !== "boolean") return `${at}: hidden must be true or false`;
     if (c.compare !== undefined && !(COMPARES as readonly unknown[]).includes(c.compare)) return `${at}: compare must be exact, trim, tokens or float`;
-    let size = bytes(c.expected);
+    const expectedBytes = bytes(c.expected);
+    let size = expectedBytes;
     if (t.entry !== undefined) {
       if (c.stdin !== undefined) return `${at} calls a function, so it takes args, not stdin`;
       if (c.args !== undefined && !Array.isArray(c.args)) return `${at}: args must be a list`;
@@ -240,7 +240,7 @@ export function validateCodeTask(task: unknown, source: unknown, opts: { strict?
       if (inBytes > CODE_LIMITS.ioBytes) return `${at}: stdin is larger than 64 KB`;
       size += inBytes;
     }
-    if (bytes(c.expected) > CODE_LIMITS.ioBytes) return `${at}: the expected output is larger than 64 KB`;
+    if (expectedBytes > CODE_LIMITS.ioBytes) return `${at}: the expected output is larger than 64 KB`;
     total += size;
     if (total > CODE_LIMITS.totalIoBytes) return "the tests' inputs and expected outputs are larger than 1 MB together";
   }

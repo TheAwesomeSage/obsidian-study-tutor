@@ -12,6 +12,7 @@
 
 import type { CodeCompare, CodeLanguage, CodeRunReport, CodeTask, CodeTestCase, CodeTestResult, CodeTestStatus } from "./codetask";
 import type { Question } from "./formats";
+import { isObj as isObject } from "./jsonschema";
 import { ReasoningAssessment, resultOnly } from "./reasoning";
 import { neutraliseRemote } from "./safemd";
 
@@ -38,7 +39,6 @@ const PY_RESERVED = new Set(
 export type CodeTaskCheck = { task: CodeTask } | { error: string };
 
 const fail = (error: string): CodeTaskCheck => ({ error });
-const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
 /** A test's label, safe to show anywhere: no control characters and nothing Markdown or HTML would act on. */
 export const cleanName = (s: string): string => s.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/[`<>[\]!*|\\#~$]/g, "").replace(/\s+/g, " ").trim().slice(0, CODE_LIMITS.name);

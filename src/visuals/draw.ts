@@ -76,17 +76,17 @@ export function drawDiagram(host: HTMLElement, b: DiagramBlueprint, o: DrawOptio
     svgEl(svg, "text", { x, y: y + 3, "text-anchor": "middle", class: cls }, t);
   };
   const boxes = new Map<string, Box>();
-  const drawBox = (n: DiagramNode, bx: Box, base: string, sub = "") => {
+  const drawBox = (n: DiagramNode, bx: Box, base: string) => {
     boxes.set(n.id, bx);
     const g = svgEl(svg, "g", { class: nodeClass(n, base) });
     svgEl(g, "rect", { x: bx.x, y: bx.y, width: bx.w, height: bx.h, rx: base === "stv-sys-row" ? 4 : 10, class: "stv-sys-box" });
-    const two = !!(n.note || sub);
+    const two = !!n.note;
     if (base === "stv-sys-row") {
       svgEl(g, "text", { x: bx.x + 10, y: bx.y + bx.h / 2 + 4, class: "stv-sys-label" }, n.label);
       if (n.note) svgEl(g, "text", { x: bx.x + bx.w - 10, y: bx.y + bx.h / 2 + 4, "text-anchor": "end", class: "stv-sys-note" }, n.note);
     } else {
       svgEl(g, "text", { x: bx.x + bx.w / 2, y: bx.y + bx.h / 2 + (two ? -3 : 5), "text-anchor": "middle", class: "stv-sys-label" }, n.label);
-      if (two) svgEl(g, "text", { x: bx.x + bx.w / 2, y: bx.y + bx.h / 2 + 14, "text-anchor": "middle", class: "stv-sys-note" }, n.note || sub);
+      if (two) svgEl(g, "text", { x: bx.x + bx.w / 2, y: bx.y + bx.h / 2 + 14, "text-anchor": "middle", class: "stv-sys-note" }, n.note);
     }
   };
   let width = 0, height = 0;
@@ -112,7 +112,7 @@ export function drawDiagram(host: HTMLElement, b: DiagramBlueprint, o: DrawOptio
     }
     width = left * 2 + extra * (w + gapX) - gapX;
     height = top + Math.max(...rows.values()) * (h + gapY) - gapY + 70;
-    const col = (nodeId: string) => depth.get(nodeId) as number;
+    const col = (nodeId: string) => depth.get(nodeId) as number; // every node was given a column above
     for (const e of b.edges) {
       const A = boxes.get(e.from) as Box, B = boxes.get(e.to) as Box;
       const hot = active(e);

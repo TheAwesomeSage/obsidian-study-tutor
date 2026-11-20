@@ -15,7 +15,7 @@
 // refused, and so is any string src/safemd.ts would change. Renderers set text with
 // textContent only. Pure, no DOM, no Obsidian imports.
 
-import { validateJson, type Schema } from "../jsonschema";
+import { stringsIn, validateJson, type Schema } from "../jsonschema";
 import { neutraliseRemote } from "../safemd";
 import type { ValidationError } from "./contracts";
 import { runDescriptors, runProcesses, runRace } from "./systems";
@@ -178,13 +178,11 @@ function structural(value: unknown, schema: Schema): ValidationError[] {
   });
 }
 /** Every string in the value, checked for safety. */
-function textErrors(value: unknown, path = "$", out: ValidationError[] = []): ValidationError[] {
-  if (typeof value === "string") {
-    const why = unsafeText(value);
-    if (why) out.push({ path, message: why });
-  } else if (Array.isArray(value)) value.forEach((v, i) => textErrors(v, `${path}[${i}]`, out));
-  else if (value && typeof value === "object") for (const [k, v] of Object.entries(value)) textErrors(v, `${path}.${k}`, out);
-  return out;
+function textErrors(value: unknown): ValidationError[] {
+  return stringsIn(value).flatMap(({ path, text }) => {
+    const why = unsafeText(text);
+    return why ? [{ path, message: why }] : [];
+  });
 }
 const clone = <T>(v: unknown): T => JSON.parse(JSON.stringify(v)) as T;
 const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();

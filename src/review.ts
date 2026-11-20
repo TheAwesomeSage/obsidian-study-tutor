@@ -72,10 +72,9 @@ export class ReviewScreen implements Screen {
     const minutes = v.plugin.opts.minutes;
     const per = secondsPerItem(v.overview.flatMap((t) => t.state.attempts));
     const pool: (Item & MixItem)[] = [];
-    for (const t of v.overview) {
-      const s = this.stateFor(t.dir);
+    const loaded = await Promise.all(v.overview.map(async (t) => ({ t, s: this.stateFor(t.dir), qs: await v.plugin.store.loadQuestions(t.dir).catch(() => [] as Question[]) })));
+    for (const { t, s, qs } of loaded) {
       if (!s) continue;
-      const qs = await v.plugin.store.loadQuestions(t.dir).catch(() => [] as Question[]);
       for (const q of qs) {
         const c = s.cards[q.id];
         if (c && c.due <= v.today) pool.push({ q, dir: t.dir, id: `${t.dir}::${q.id}`, group: `${t.dir}#${q.subskill}`, due: c.due, last: lastReview(c), seconds: per.seconds });
