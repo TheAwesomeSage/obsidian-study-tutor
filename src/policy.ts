@@ -22,7 +22,7 @@ import { BKT_DEFAULTS, BktParams, BrierComparison, bktAll, bktTrace, brierCompar
  *      minutes. Without exam metadata every decision is unchanged, so logs stay comparable; BKT is
  *      logged in shadow and never read. Bump to 4 if exam-weighted logs must be told apart.
  */
-export const POLICY_VERSION = 3;
+export const POLICY_VERSION = 4;
 
 export interface PolicyWeights {
   /** Exam relevance: the study priority set per concept. */
@@ -131,6 +131,12 @@ export interface SkillInput {
   daysSince: number | null;
   /** Bank questions on this subskill that practice may use, that code can mark and that this chat has not asked (one with a generator can come back twice with new numbers). */
   bankLeft: number;
+  /**
+   * Ideas in this subskill that its bank can ask and that no answer has touched yet (coverage.ts),
+   * and the first two by name. Absent when there are none, so older logged inputs read the same.
+   */
+  uncovered?: number;
+  uncoveredNames?: string[];
   /** A bank question on this subskill has worked steps code can fade, so supported practice needs no model. */
   faded?: boolean;
   /** A delayed independent check on this concept falls due today or earlier. */
@@ -461,6 +467,9 @@ export function decide(p: PolicyInput): Decision {
     ? out("retrieval", s.n, `${why}The course changed what ${s.name} asks for (${s.recheck}). One question without help checks that your understanding covers the new version; your earlier answers stay on record.`, "a material change to an objective is rechecked before the level is relied on", bank)
     : out("retrieval", s.n, `${why}A delayed check on ${s.name} is due${s.nextCheck ? ` (from ${s.nextCheck})` : ""}. One question without help shows whether it has held.`, "a delayed independent check is taken when it falls due", bank);
   if (level >= p.target && backed) {
+    // At target, but a subskill is not done while an idea in it the bank can ask has never been asked.
+    const unasked = s.uncovered ?? 0;
+    if (unasked > 0) return out("independent-practice", s.n, `${why}${s.name} is at target, but ${unasked === 1 ? "one idea in it has" : `${unasked} ideas in it have`} not been asked yet${s.uncoveredNames?.length ? `: ${s.uncoveredNames.join("; ")}` : ""}. Those come next.`, "every idea in a subskill is asked at least once before it counts as covered", bank);
     if (s.checkDue) return delayed();
     return out("retrieval", s.n, `${why}${s.name} is at target. A recall question checks that it has held.`, "", bank);
   }

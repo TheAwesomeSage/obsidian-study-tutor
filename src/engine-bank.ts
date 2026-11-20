@@ -11,8 +11,9 @@ import { sessionFor } from "./session";
 import { ToolResult } from "./tools";
 import { ReasoningAssessment, finalExpression, withCheck } from "./reasoning";
 import { gradeOfOutcome, normaliseMark, outcomeOfGrade, withNote } from "./grading";
-import { tutorSchedules } from "./scheduler";
-import { TurnResult, TurnOpts, MAX_ANSWER_SECONDS, applyAttempt, pickQuizQuestion } from "./engine-common";
+import { secondsPerItem, tutorSchedules } from "./scheduler";
+import { IdeaStatus, coverageOf, ideaLabel, ideaOfQuestion, nextMove } from "./coverage";
+import { BankPurpose, TurnResult, TurnOpts, MAX_ANSWER_SECONDS, applyAttempt, pickQuizQuestion } from "./engine-common";
 import { dueMistake, fadedFor, followUp, freshVariant, markTask, metBefore, mistakeUpdates, pairedFor, taskHelp, taskOf } from "./bankvariants";
 import { baseQuestionId } from "./families";
 import { CodeRunRecord, codeGradingQuestion, codeRunMarkdown, codeRunRecord, codeSource, looksLikeCode, markCodeRun, notRun, sentAsCode, solutionMarkdown } from "./codequestions";
@@ -434,6 +435,28 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
   // After a known mistake comes a repair task, and after a repair a fresh check (bankvariants.ts).
   // A mistake whose check is due comes next when there is no repair to set (bankvariants.ts).
   const follow = (task && attempt && verdict ? followUp(task, attempt, state, asked) : null) ?? (tutorSchedules(s) ? dueMistake(questions, state, today, asked) : null);
+  // Which idea of the subskill the last answer was on, and whether the next question builds on it
+  // (the same idea from another angle) or moves to an idea not yet asked (coverage.ts).
+  const topic = await eng.store.loadTopic(dir);
+  const cover = new Map<number, IdeaStatus[]>();
+  const coverage = (n: number): IdeaStatus[] => cover.get(n) ?? cover.set(n, coverageOf(topic, questions, state, n)).get(n)!;
+  const ideaOfBank = (q: Question | undefined): IdeaStatus | null => (q ? coverage(q.subskill).find((i) => i.id === ideaOfQuestion(coverage(q.subskill), q)) ?? null : null);
+  const lastIdea = !follow && task && attempt && verdict ? ideaOfBank(task.base) : null;
+  const typical = secondsPerItem(state.attempts);
+  const [builtIdea, builtCount] = fmStr(chat.fm, "built").split(":");
+  const builds = lastIdea && builtIdea === lastIdea.id ? Number(builtCount) || 0 : 0;
+  const move = lastIdea && attempt ? nextMove({ attempt, idea: lastIdea, typicalSeconds: typical.fallback ? null : typical.seconds, buildsInARow: builds }) : null;
+  const rank = (q: Question): number => {
+    const i = ideaOfBank(q);
+    return !i ? 1 : i.asked === 0 ? 0 : i.secured ? 2 : 1;
+  };
+  const pick = (purpose: BankPurpose | undefined, only?: (q: Question) => boolean): Question | null => {
+    if (move?.kind === "build-on" && lastIdea && attempt) {
+      const same = pickQuizQuestion(questions, state, asked, today, { purpose, only: (q) => q.subskill === attempt.skill && ideaOfBank(q)?.id === lastIdea.id && (!only || only(q)), rank });
+      if (same) return same;
+    }
+    return pickQuizQuestion(questions, state, asked, today, { purpose, only, rank });
+  };
   if (follow) next = follow.question;
   else if (opts.adaptive) {
     if (!decision || verdict) decision = await eng.planFrom(dir, chat, state, mode, attempt && attempt.result === "correct" && attempt.skill ? attempt.skill : null);
@@ -450,14 +473,26 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
         }
         if (next) break;
       }
-    } else if (decision.local === "bank" && focus !== null) next = pickQuizQuestion(questions, state, asked, today, { purpose, only: (q) => q.subskill === focus && q.type !== "open" });
-  } else next = pickQuizQuestion(questions, state, asked, today);
+    } else if (decision.local === "bank" && focus !== null) next = pick(purpose, (q) => q.subskill === focus && q.type !== "open");
+  } else next = pick(undefined);
   // A question met before comes back with new numbers when code can make them.
   if (next && !follow && next.generator && metBefore(next, state, asked)) next = freshVariant(next, state, asked) ?? (asked.includes(next.id) ? null : next);
   if (!next && !verdict) return eng.turn(dir, chatPath, message, opts);
 
+  // One line in the learner's view saying how this question follows the last: code-written, no model call.
+  let bridge = "";
+  chat.fm.built = "";
+  if (next && move && lastIdea && !follow) {
+    const nextIdea = ideaOfBank(questions.find((q) => q.id === baseQuestionId(next!.id)));
+    if (move.kind === "build-on" && nextIdea?.id === lastIdea.id) {
+      bridge = `*Builds on the last question (${ideaLabel(lastIdea)}). ${move.reason}*`;
+      chat.fm.built = `${lastIdea.id}:${builds + 1}`;
+    } else if (move.kind === "build-on") bridge = nextIdea ? "*No other question on that idea is left, so on to a new one.*" : "";
+    else if (nextIdea && nextIdea.id !== lastIdea.id && nextIdea.asked === 0) bridge = `*A new idea: ${ideaLabel(nextIdea)}.*${move.reason ? ` ${move.reason}` : ""}`;
+    else if (move.reason) bridge = `*${move.reason}*`;
+  }
   let reply: string;
-  if (next) reply = [verdict, formatQuizQuestion(next, state)].filter(Boolean).join("\n\n---\n\n");
+  if (next) reply = [verdict, bridge ? `${bridge}\n\n${formatQuizQuestion(next, state)}` : formatQuizQuestion(next, state)].filter(Boolean).join("\n\n---\n\n");
   else if (opts.adaptive) reply = `${verdict}\n\n---\n\n*Next: ${decision ? decision.reason : "the guide chooses the next step."}* Press **Continue** when you are ready.`;
   else reply = `${verdict}\n\n---\n\nThat was the last question in the bank (${fmNum(chat.fm, "right", 0)}/${fmNum(chat.fm, "total", 0)}). Send any message and the quizzer will write fresh questions with the model.`;
   if (next) {

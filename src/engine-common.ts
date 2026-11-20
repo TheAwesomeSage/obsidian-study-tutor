@@ -261,9 +261,10 @@ export type BankPurpose = "practice" | "retrieval" | "transfer";
  * for assessment (questionFamilies). A retrieval check may, but only when nothing else is left.
  * A transfer check takes a kept family the learner has not met first, then any family they have
  * not met, since only an unmet family can show transfer. A question with a generator may come
- * back up to three times in a chat, each time with new numbers (bankvariants.ts).
+ * back up to three times in a chat, each time with new numbers (bankvariants.ts). `rank` orders
+ * questions after the weakest subskill: lower first.
  */
-export function pickQuizQuestion(questions: Question[], s: LearnerState, asked: string[], today: string, opts: { purpose?: BankPurpose; only?: (q: Question) => boolean } = {}): Question | null {
+export function pickQuizQuestion(questions: Question[], s: LearnerState, asked: string[], today: string, opts: { purpose?: BankPurpose; only?: (q: Question) => boolean; rank?: (q: Question) => number } = {}): Question | null {
   const purpose = opts.purpose ?? "practice";
   const met = new Set(s.attempts.map((a) => baseQuestionId(a.questionId)));
   const kept = new Set<string>();
@@ -279,7 +280,9 @@ export function pickQuizQuestion(questions: Question[], s: LearnerState, asked: 
   const level = (q: Question) => s.levels[q.subskill] ?? 0;
   const fresh = (q: Question) => (purpose === "transfer" ? (unmet.has(q.id) ? (kept.has(q.id) ? 0 : 1) : 2) : kept.has(q.id) ? 1 : 0);
   const order = (q: Question) => (seenToday.has(q.id) ? 3 : s.cards[q.id] ? (s.cards[q.id].due <= today ? 0 : 2) : 1);
-  return [...left].sort((a, b) => level(a) - level(b) || fresh(a) - fresh(b) || order(a) - order(b))[0];
+  // `rank` puts questions on ideas not yet asked first (coverage.ts); without it only level, freshness and due date decide.
+  const rank = opts.rank ?? (() => 0);
+  return [...left].sort((a, b) => level(a) - level(b) || rank(a) - rank(b) || fresh(a) - fresh(b) || order(a) - order(b))[0];
 }
 
 /** Picks the texts that share the most words with the query, in their original order, within a word budget. */

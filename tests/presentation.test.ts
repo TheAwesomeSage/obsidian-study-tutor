@@ -873,3 +873,12 @@ test("blueprints are planned only under the main strategy, and the setting turns
     assert.deepEqual([planned.planned, t.calls.length], [0, 0], JSON.stringify(settings));
   }
 });
+
+test("a subskill at target is not done while an idea in it the bank can ask has never been asked", () => {
+  const done = sk({ n: 1, level: 4, supported: 4, independent: 3, independentCorrect: 3, bankLeft: 2 });
+  assert.equal(decide(pin({ skills: [done] })).action, "retrieval", "nothing unasked: the usual recall check");
+  const gap = decide(pin({ skills: [{ ...done, uncovered: 2, uncoveredNames: ["Integrate polynomials", "Chain rule"] }] }));
+  assert.deepEqual([gap.action, gap.focus, gap.local], ["independent-practice", 1, "bank"]);
+  assert.match(gap.reason, /at target, but 2 ideas in it have not been asked yet: Integrate polynomials; Chain rule\. Those come next\./);
+  assert.match(gap.constraint, /every idea in a subskill is asked at least once/);
+});

@@ -18,6 +18,7 @@ import { moveLine } from "./tutormove";
 import { reasoningLines } from "./reasoning";
 import { conclusive, markLine } from "./grading";
 import { isBankId } from "./bankvariants";
+import { coverageOf, coverageSummary } from "./coverage";
 import { codeRunSummary, codeTestRows } from "./codequestions";
 import { expansionLine } from "./expansion";
 import type { Screen, TutorView } from "./view";
@@ -322,6 +323,15 @@ export class StudyScreen implements Screen {
     const box = el.createDiv({ cls: "st-why-detail" });
     const label = ACTION_LABEL[record!.action as Action];
     box.createDiv({ cls: "st-why-reason", text: label ? `${label}: ${reason}` : reason });
+    // How many of this concept's ideas have been asked and secured (coverage.ts), once the bank is read.
+    const { dir, topic, state } = v;
+    const focus = record!.skill;
+    if (dir && topic && state && focus !== null) {
+      void v.plugin.store.loadQuestions(dir).then((qs) => {
+        const sum = coverageSummary(coverageOf(topic, qs, state, focus));
+        if (sum.total > 1 && box.isConnected) box.createDiv({ cls: "st-meta", text: `Ideas in this concept: ${sum.asked} of ${sum.total} asked, ${sum.secured} secured.` });
+      }).catch(() => undefined);
+    }
     if (!decision) {
       box.createDiv({ cls: "st-meta", text: `Policy version ${POLICY_VERSION}. The scores behind this step are shown after the next turn.` });
       return;

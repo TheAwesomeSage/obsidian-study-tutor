@@ -6,6 +6,8 @@ import { CallResult, ModelCliError, Usage, addUsage } from "./claude";
 import { callModel, modelFor, type ModelRequest } from "./model-provider";
 import { dependentCounts } from "./course";
 import { Attempt, EVIDENCE_RULES, Grading, Outcome, checkDue, recordAttempt } from "./evidence";
+import { Move, coverageBrief, coverageOf, ideaLabel, ideaOf, nextMove } from "./coverage";
+import { secondsPerItem } from "./scheduler";
 import { Chat, LearnerState, Mode, NextStep, Prereqs, Question, Topic, dueCount, objectiveStamp, applyStateUpdate, chatWords, extractStateTrailer, fmList, fmStr, mastery, placementQuestions, prereqGaps, setLevel, ymd } from "./formats";
 import { ACTION_GUIDE, DEFAULT_WEIGHTS, Decision, POLICY_VERSION, PolicyInput, decide, examSignals, homeStep } from "./policy";
 import { bktShadow, mcqOptions } from "./bkt";
@@ -188,6 +190,8 @@ export class Engine {
       const m = mastery(state, n);
       const e = m.evidence;
       const shadow = bktShadow(state.attempts, n, options);
+      // Ideas the bank can ask (not only in a family kept for assessment) that no answer has touched.
+      const unasked = p.topic ? coverageOf(p.topic, p.questions, state, n).filter((i) => i.asked === 0 && i.questions.some((id) => !kept.has(id))) : [];
       return {
         n,
         name: state.names[n],
@@ -211,6 +215,7 @@ export class Engine {
         transferReady: !e.firstIndependentDay || e.firstIndependentDay < today,
         needsTeachBack: !e.teachBack,
         needsEdgeCase: !e.edgeCase,
+        ...(unasked.length ? { uncovered: unasked.length, uncoveredNames: unasked.slice(0, 2).map((i) => ideaLabel(i, 60)) } : {}),
         ...(exam[n] ? { exam: exam[n] } : {}),
         ...(shadow ? { shadow } : {}),
       };
@@ -243,7 +248,7 @@ export class Engine {
     const input = this.policyInput({ mode: "auto", state, pre: await this.store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions, external: await this.store.externalPrereqs(dir, state.target), topic });
     const decision = decide(input);
     const ns = Object.keys(state.names).map(Number);
-    const atTarget = ns.length > 0 && input.skills.every((k) => (k.level ?? 0) >= state.target && (k.level ?? 0) <= k.supported && !k.checkDue);
+    const atTarget = ns.length > 0 && input.skills.every((k) => (k.level ?? 0) >= state.target && (k.level ?? 0) <= k.supported && !k.checkDue && !k.uncovered);
     return { step: homeStep(decision, { due: due ?? dueCount(state, this.today()), atTarget }), decision };
   }
 
@@ -526,6 +531,18 @@ export class Engine {
     if (said && focusSkill && mode !== "quiz" && GO_FURTHER.test(said)) expansion = await this.requestExpansion(dir, expansionRequest({ kind: "extension", topicDir: dir, conceptId: focusConcept, conceptName: focusSkill.name, application: said, evidence: [], at: now }));
     const told = await this.expansionsToTell(dir, expansion);
     for (const rec of told) extras.push(expansionNote(rec));
+    // What the subskill asks, idea by idea, and whether the last answer says to build on its idea or move on (coverage.ts).
+    if (focusSkill && mode !== "expert") {
+      const bank = await this.store.loadQuestions(dir);
+      const cover = coverageOf(topic, bank, state, focusSkill.n);
+      const lastAttempt = [...state.attempts].reverse().find((a) => a.skill === focusSkill.n && a.result !== "ungraded");
+      const lastIdea = lastAttempt ? cover.find((i) => i.id === ideaOf({ question: lastAttempt.question }, cover)) ?? null : null;
+      const typical = secondsPerItem(state.attempts);
+      const [builtId, builtN] = fmStr(chat.fm, "built").split(":");
+      const move: Move | null = lastAttempt && lastIdea ? nextMove({ attempt: lastAttempt, idea: lastIdea, typicalSeconds: typical.fallback ? null : typical.seconds, buildsInARow: builtId === lastIdea.id ? Number(builtN) || 0 : 0 }) : null;
+      const brief = coverageBrief(focusSkill.name, cover, lastIdea && move ? { idea: lastIdea, move } : null);
+      if (brief) extras.push(brief);
+    }
     extras.push(`# Session record\n${JSON.stringify(session)}`);
     if (decision) extras.push(`Instructional action: ${decision.action}. ${ACTION_GUIDE[decision.action]}\nWhy: ${decision.reason}${decision.suggestIndependent ? "\nThe learner looks ready to practise this unaided. Say so in one line and let them choose; stay in guided practice unless they switch." : ""}`);
     if (move) extras.push(moveBrief(move));

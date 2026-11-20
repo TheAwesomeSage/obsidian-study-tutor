@@ -1328,6 +1328,119 @@ test("question families: a contrasting pair follows the faded examples, is marke
   assert.equal(calls(), 0);
 });
 
+// ---------- coverage of a subskill's ideas, and building on the last question ----------
+
+const IDEAS_CARD = [
+  "# Maths", "", "## Overview", "Calculus.", "", "## Objectives",
+  "- O1: Differentiate polynomials with the power rule (Spec 1.1)",
+  "- O2: Integrate polynomials with the reverse power rule (Spec 1.2)",
+  "", "## Subskills", "",
+  "### 1. Calculus basics", "prerequisites: none", "objectives: O1, O2",
+  "- Differentiate polynomials with the power rule ([[Notes]]).",
+  "- Integrate polynomials with the reverse power rule ([[Notes]]).",
+  "worked example:", "d/dx x^3 = 3x^2.", "",
+].join("\n");
+const IDEAS_BANK = [
+  ["Q1", "Differentiate x^3 at x = 2 with the power rule: what is the value of the derivative?", "12"],
+  ["Q2", "Differentiate x^4 at x = 1 with the power rule: what is the value of the derivative?", "4"],
+  ["Q3", "Integrate 2x from 0 to 3 with the reverse power rule: what is the value?", "9"],
+  ["Q4", "Integrate 3x^2 from 0 to 2 with the reverse power rule: what is the value?", "8"],
+].map(([id, q, a]) => `### ${id}\nsubskill: 1\ntype: short\ntask: application\nfamily: ${id.toLowerCase()}\nquestion: ${q}\nanswer: ${a}\nexplanation: Worked by the rule.\n`).join("\n");
+
+async function ideas() {
+  const fs = new MemFS();
+  const store = new Store(fs, "Tutor", () => "2026-11-17");
+  const settings: any = { claudePath: "", chatModel: "sonnet", compileModel: "sonnet", utilityModel: "haiku", effort: "low", targetLevel: 4, maxChatWords: 600, maxTopicWords: 2000, singlePassWords: 6000, smartRouting: false, hardEffort: "high", bankQuiz: true, codePlacement: false };
+  const engine = new Engine(store, () => settings, () => "2026-11-17");
+  let calls = 0;
+  (engine as any).call = async () => { calls++; throw new Error("no model call expected"); };
+  const dir = await store.saveCompiled({ title: "Maths", fm: { subject: "none" }, topicBody: IDEAS_CARD, questionsBody: IDEAS_BANK, target: 4 });
+  return { store, engine, dir, calls: () => calls };
+}
+
+test("coverage: a subskill's ideas, which idea a question tests, and what counts as secured", async () => {
+  const { ideasOf, ideaOf, coverageOf, coverageSummary } = await import("../src/coverage");
+  const topic = F.parseTopic(IDEAS_CARD);
+  const list = ideasOf(topic, 1);
+  assert.deepEqual(list.map((i) => i.id), ["O1", "O2"], "two objectives: those are the ideas");
+  assert.equal(ideasOf(F.parseTopic(CARD(NAMES)), 2).length, 1, "one claim: one idea");
+  const claims = ideasOf(F.parseTopic(IDEAS_CARD.replace("objectives: O1, O2\n", "")), 1);
+  assert.deepEqual(claims.map((i) => i.id), ["c1", "c2"], "no objectives: one idea per claim, none from the worked example");
+  const qs = F.parseQuestions(IDEAS_BANK);
+  assert.deepEqual(qs.map((q) => ideaOf(q, list)), ["O1", "O1", "O2", "O2"]);
+  assert.equal(ideaOf({ question: "What is a limit?" }, list), null, "nothing shared: no guess");
+
+  const at = (id: string, questionId: string, over: Record<string, unknown> = {}) => attempt({ id, skill: 1, questionId, question: qs.find((q) => q.id === questionId.replace(/~\d+$/, ""))!.question, ...over });
+  const state = F.newState(topic, 4);
+  state.attempts = [at("a1", "Q1"), at("a2", "Q2", { assisted: true }), at("a3", "Q3", { result: "incorrect" })];
+  let status = coverageOf(topic, qs, state, 1);
+  assert.deepEqual(status.map((i) => [i.id, i.asked, i.unaidedCorrect, i.secured]), [["O1", 2, 1, false], ["O2", 1, 0, false]], "helped and wrong answers are asked but not secured");
+  state.attempts.push(at("a4", "Q2~2"));
+  status = coverageOf(topic, qs, state, 1);
+  assert.deepEqual([status[0].unaidedCorrect, status[0].secured, status[1].secured], [2, true, false]);
+  const sum = coverageSummary(status);
+  assert.deepEqual([sum.total, sum.asked, sum.secured, sum.unasked.length], [2, 2, 1, 0]);
+});
+
+test("build on the last question when the mark, confidence or time say the idea is shaky; otherwise move to an idea not yet asked", async () => {
+  const { nextMove, MAX_BUILDS } = await import("../src/coverage");
+  const idea = (secured = false) => ({ id: "O1", text: "t", asked: 1, unaidedCorrect: secured ? 2 : 1, secured, questions: ["Q1"] });
+  const right = { result: "correct" as const, confidence: null, assisted: false, answerExposed: false, seconds: 20 };
+  const move = (over: Record<string, unknown>, i: Record<string, unknown> = {}) => nextMove({ attempt: { ...right, ...over } as any, idea: idea(), typicalSeconds: 20, buildsInARow: 0, ...i });
+  assert.equal(move({}).kind, "advance", "right, no signal of doubt");
+  assert.equal(move({ confidence: 0.9 }).kind, "advance", "right and sure");
+  assert.equal(move({ confidence: 0.3 }).kind, "build-on", "right but unsure: see that it holds");
+  assert.match(move({ confidence: 0.3 }).reason, /weren't sure/);
+  assert.equal(move({ confidence: 0.3 }, { idea: idea(true) }).kind, "advance", "an idea already secured twice is not asked again for a wobble");
+  assert.equal(move({ seconds: 70 }).kind, "build-on", "right but much slower than usual, and not sure");
+  assert.equal(move({ seconds: 70, confidence: 0.9 }).kind, "advance", "slow but sure: no");
+  assert.equal(move({ seconds: 70 }, { typicalSeconds: null }).kind, "advance", "no usual time known: time says nothing");
+  assert.equal(move({ result: "incorrect", confidence: 0.9 }).kind, "build-on");
+  assert.match(move({ result: "incorrect", confidence: 0.9 }).reason, /sure and it didn't hold/);
+  assert.match(move({ result: "incorrect", confidence: 0.2 }).reason, /smaller step/);
+  assert.equal(move({ result: "partial" }).kind, "build-on");
+  assert.equal(move({ assisted: true }).kind, "build-on", "a helped right answer is asked again without help");
+  assert.equal(move({ answerExposed: true, result: "incorrect" }).kind, "build-on");
+  assert.equal(move({ result: "skipped" }).kind, "advance");
+  assert.equal(move({ result: "incorrect" }, { buildsInARow: MAX_BUILDS }).kind, "advance", "two follow-ups at most");
+  assert.equal(nextMove({ attempt: right as any, idea: null, typicalSeconds: null, buildsInARow: 0 }).kind, "advance", "no idea to build on");
+});
+
+test("a bank quiz builds on the last question when you were unsure, moves to a new idea when you were sure, and says which", async () => {
+  let calls = () => 0;
+  const run = async (answers: [string, number][]) => {
+    const { store, engine, dir, calls: used } = await ideas();
+    calls = used;
+    const chat = await store.newChat(dir, "Maths", "quiz", new Date(2026, 10, 17, 9, 0));
+    const seen: { card: string; reply: string }[] = [];
+    let r = await engine.quizTurn(dir, chat, "");
+    seen.push({ card: F.fmStr((await store.loadChat(chat)).fm, "card"), reply: r.reply });
+    for (const [text, confidence] of answers) {
+      r = await engine.quizTurn(dir, chat, text, { confidence });
+      seen.push({ card: F.fmStr((await store.loadChat(chat)).fm, "card").replace(/~\d+$/, ""), reply: r.reply });
+    }
+    return seen;
+  };
+  // Wrong and unsure on the first differentiation question: the next is the other differentiation question.
+  let seen = await run([["7", 0.2]]);
+  assert.equal(seen[0].card, "Q1");
+  assert.equal(seen[1].card, "Q2", "same idea, from another question");
+  assert.match(seen[1].reply, /Builds on the last question \(Differentiate polynomials with the power rule\)\. You weren't sure, so a smaller step on the same idea\./);
+  // Right and sure: on to the integration idea, which has not been asked.
+  seen = await run([["12", 0.9]]);
+  assert.equal(seen[1].card, "Q3", "a new idea");
+  assert.match(seen[1].reply, /A new idea: Integrate polynomials with the reverse power rule\./);
+  // Right but unsure: the same idea once more.
+  seen = await run([["12", 0.3]]);
+  assert.equal(seen[1].card, "Q2");
+  assert.match(seen[1].reply, /Right, but you weren't sure/);
+  // Wrong again on the last question of an idea: nothing left on it, so on to the other idea, and it says so.
+  seen = await run([["7", 0.2], ["7", 0.2]]);
+  assert.equal(seen[2].card, "Q3");
+  assert.match(seen[2].reply, /No other question on that idea is left, so on to a new one\./);
+  assert.equal(calls(), 0, "no model call anywhere");
+});
+
 // ---------- exam metadata on objectives, BKT in shadow, and the measurement summary ----------
 
 const EXAM_CARD = (fm = "") => [
@@ -1559,4 +1672,24 @@ test("the measurement summary reads saved records without a model, and says call
   const report = M.metricsReport(s);
   assert.ok(report.includes(M.CALL_COUNT_CAVEAT));
   assert.match(report, /Token use and cost per study turn: shown in Details for the current sitting only, not saved\./);
+});
+
+test("model-led turns are told which ideas are not yet asked, and whether to build on the last answer", async () => {
+  const { store, engine, dir } = await ideas();
+  const seen: string[] = [];
+  (engine as any).call = async (o: any) => { seen.push(o.input); return { text: "Which comes first?", usage }; };
+  const st = await store.loadState(dir, 4);
+  st.focus = 1;
+  await store.saveState(dir, st);
+  const chat = await store.newChat(dir, "Maths", "teach", new Date(2026, 10, 17, 9, 0));
+  await engine.turn(dir, chat, "");
+  assert.match(seen[0], /# Coverage of Calculus basics\nEvery idea below must be asked at least once[\s\S]*- O1: Differentiate polynomials with the power rule — not asked yet\n- O2: Integrate polynomials with the reverse power rule — not asked yet\nChoose the next question on an idea not yet asked\./);
+  // A wrong answer given with low confidence: the brief says to stay on that idea.
+  const q1 = F.parseQuestions(IDEAS_BANK)[0];
+  const again = await store.loadState(dir, 4);
+  again.attempts.push(attempt({ id: "w1", skill: 1, questionId: "Q1", question: q1.question, result: "incorrect", confidence: 0.2 }));
+  await store.saveState(dir, again);
+  await engine.turn(dir, chat, "go on");
+  assert.match(seen[1], /- O1: .* — asked 1, not secured/);
+  assert.match(seen[1], /Build on the last question: stay on O1[\s\S]*You weren't sure, so a smaller step on the same idea\./);
 });

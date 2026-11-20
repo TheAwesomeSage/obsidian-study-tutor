@@ -71,6 +71,12 @@ Further rules:
 
 "At target" is only said when every level at target is backed by this evidence. A level carried over from an older version, or set by a single placement question, is shown as not yet backed and is checked before it is trusted.
 
+## Covering every idea (policy version 4)
+
+A subskill is made of ideas: the objectives it teaches when the card gives it two or more, otherwise the claims on its card. Code keeps which of them the learner's answers have touched. At target, a subskill that has an idea its bank can ask and that no answer has touched is not done: the next step is practice on that idea. This never changes a level. Within a subskill, the next question prefers an idea not yet asked.
+
+After each answer the next question either builds on it or moves on. It builds on it, staying on the same idea from another angle, when the answer had help or showed the answer, was wrong or partly right, or was right but the learner said they were unsure, or right but much slower than their usual and not sure. It moves on when the answer was right and sure, when the idea has two unaided right answers, or after two follow-ups on one idea in a row. Confidence is self-reported, so it never decides against the mark, and it never moves a level.
+
 ## Estimates and confidence
 
 The estimate shown for a concept is the chance that **the next unaided first answer on that concept is fully correct**. It is the smoothed share of unaided answers that were correct, it is labelled provisional, and it is not shown at all with fewer than three unaided answers.

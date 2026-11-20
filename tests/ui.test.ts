@@ -198,7 +198,7 @@ test("home, study, review, topic page and graph work together from the normal en
   // The reasoning behind the action is one click away.
   $(root, ".st-why-btn").click();
   assert.equal($(root, ".st-why-btn").getAttribute("aria-expanded"), "true");
-  assert.match($(root, ".st-why-detail").textContent, /^Diagnosis: Chosen because other concepts rest on it\. There is no evidence on Definition of a linear map yet[\s\S]*Policy version 3\./);
+  assert.match($(root, ".st-why-detail").textContent, /^Diagnosis: Chosen because other concepts rest on it\. There is no evidence on Definition of a linear map yet[\s\S]*Policy version 4\./);
   $(root, ".st-why-btn").click();
   assert.equal(root.querySelector(".st-why-detail"), null);
 
