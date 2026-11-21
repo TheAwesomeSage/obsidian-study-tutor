@@ -9,7 +9,7 @@ import * as F from "../src/formats";
 import { Attempt, checkDue, missingFor, normaliseAttempt, recordAttempt, skillEvidence, supportedLevel } from "../src/evidence";
 import { classifyChange, conceptRevisions, materialText, traceAttempt, versionObjectives } from "../src/objective-version";
 import { digest } from "../src/compile-sources";
-import { sealedId, splitSealed } from "../src/sealed";
+import { bankCount, sealedId, splitSealed } from "../src/sealed";
 import { effectivePrereqs, parseTopicGraph, syncTopicGraph, wouldCycle } from "../src/course";
 import { DEFAULT_WEIGHTS, LEARN_ACTIONS, PolicyInput, SkillInput, V1_WEIGHTS, decide, replay, scoreSkills } from "../src/policy";
 import { openQuestion, readIntent, readSessionReply, sessionFor } from "../src/session";
@@ -1809,4 +1809,10 @@ test("cold probes: a recompile keeps sealed questions with their concept, a new 
   // Retiring every concept empties the file instead of leaving old questions behind.
   await store.saveCompiled({ title: "Calculus", fm: { subject: "none" }, topicBody: CARD([["Brand new", "none"]]), target: 4, existingDir: dir, questionsBody: sealedSec("Q1", 1, "application", "Find it.") });
   assert.deepEqual(await store.loadSealed(dir), []);
+});
+
+test("cold probes: the compile notice counts bank questions only, not the sealed probe", () => {
+  const body = sealedSec("Q1", 1, "application", "Find the slope of the line.") + sealedSec("Q2", 1, "probe", "Why does a wider base make a pyramid more stable?") + sealedSec("Q3", 2, "application", "A ball is thrown up at 5 m/s. How high?") + sealedSec("Q4", 2, "transfer", "Describe a river's flow as a rate of change.");
+  assert.equal(F.parseQuestions(body).length, 4);
+  assert.equal(bankCount(body), 3);
 });

@@ -45,3 +45,8 @@ export function splitSealed(questionsBody: string): { bank: string; sealed: Seal
   });
   return { bank: kept.join(""), sealed, dropped };
 }
+
+/** How many questions a compiled body leaves in the bank: probes are sealed away and not counted. */
+export function bankCount(questionsBody: string): number {
+  return parseQuestions(splitSealed(questionsBody).bank).length;
+}

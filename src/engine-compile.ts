@@ -9,6 +9,7 @@ import { CoursePackage, linkName, buildPackage, coverageLine, mergeRefresh, sour
 import { checkCompilation, compileCourse, CompileCancelled, type ExpansionRequest as CompileExpansionRequest, type StagedCourse } from "./compiler";
 import { buildRefreshInput } from "./prompts";
 import { digest, type SourceRevision } from "./compile-sources";
+import { bankCount } from "./sealed";
 import { MAX_MATERIAL, conceptRevisions, materialText, versionObjectives, type CurrentObjective } from "./objective-version";
 import { Material, CompileRequest, CompileResult } from "./engine-common";
 import type { Engine } from "./engine";
@@ -45,7 +46,7 @@ export async function compile(eng: Engine, req: CompileRequest, onProgress: (msg
   const pkg = await eng.writePackage(dir, req, preserve ? null : existing, undefined, candidate.staged);
   // The course is written, so a blueprint that cannot be planned costs the learner nothing but the offer.
   const blueprints = preserve ? null : await eng.planBlueprints(dir, { signal: req.signal, progress: onProgress }).catch(() => null);
-  return { dir, subskills: pkg.lessons.length, questions: parseQuestions(candidate.questionsBody).length, usage: blueprints ? addUsage(candidate.usage, blueprints.usage) : candidate.usage, agents: candidate.calls + (blueprints?.calls ?? 0),
+  return { dir, subskills: pkg.lessons.length, questions: bankCount(candidate.questionsBody), usage: blueprints ? addUsage(candidate.usage, blueprints.usage) : candidate.usage, agents: candidate.calls + (blueprints?.calls ?? 0),
     status: candidate.staged.status, coverage: coverageLine(pkg), complete: pkg.coverage.complete, metrics: candidate.staged.metrics, preservedCourse: preserve ? req.existingDir : undefined };
 }
 
@@ -192,5 +193,5 @@ export async function refresh(eng: Engine, req: CompileRequest & { existingDir: 
   onProgress("Saving the refreshed course…");
   await eng.store.saveCompiled({ title: topic.title, fm, topicBody: merged.topicBody, questionsBody: merged.questionsBody, target: s.targetLevel, existingDir: dir, keepCards: kept });
   const next = await eng.writePackage(dir, req, pkg, { subskills: merged.replaced, notes: [...ch.changed, ...ch.removed] });
-  return { dir, subskills: check.subskills.length, questions: parseQuestions(merged.questionsBody).length, usage: res.usage, agents: 1, coverage: coverageLine(next), complete: next.coverage.complete, refresh: "partial", subskillsRefreshed: merged.replaced, why: `${[...ch.changed, ...ch.removed].join(", ")} changed` };
+  return { dir, subskills: check.subskills.length, questions: bankCount(merged.questionsBody), usage: res.usage, agents: 1, coverage: coverageLine(next), complete: next.coverage.complete, refresh: "partial", subskillsRefreshed: merged.replaced, why: `${[...ch.changed, ...ch.removed].join(", ")} changed` };
 }
