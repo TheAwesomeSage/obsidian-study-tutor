@@ -4,10 +4,11 @@
 
 import { zeroUsage } from "./claude";
 import { recordAttempt, type Outcome } from "./evidence";
-import { Question, fmList, fmStr, formatQuizQuestion, givesUp, looksLikeQuestion } from "./formats";
+import { Question, fmList, fmStr, formatQuizQuestion, givesUp } from "./formats";
 import { normaliseMark, outcomeOfGrade, withNote } from "./grading";
 import { readPresentationRequest } from "./presentation";
 import { currentSealed, probeQueue, spentSealed } from "./probe";
+import { baseQuestionId } from "./families";
 import { sentAsCode } from "./codequestions";
 import { markBankAnswer, verdictText } from "./engine-bank";
 import type { TurnOpts, TurnResult } from "./engine-common";
@@ -67,8 +68,9 @@ export async function probeTurn(eng: Engine, dir: string, chatPath: string, mess
 
   const answer = text || (last?.role === "you" ? last.text : "");
   if (!answer) return say(formatQuizQuestion(pending, state));
-  // A question or a request for a visual is help, and a cold probe gives none. A block of code for a code question is an answer.
-  if ((looksLikeQuestion(answer) || readPresentationRequest(answer) || (answer.length < 60 && HELP_WORDS.test(answer))) && !givesUp(answer) && !(pending.code && sentAsCode(answer))) {
+  // A question or a request for a visual is help, and a cold probe gives none. Only a closing "?" makes a
+  // question here: an answer may well start with "when" or "how". A block of code for a code question is an answer.
+  if ((/\?$/.test(answer.trim()) || readPresentationRequest(answer) || (answer.length < 60 && HELP_WORDS.test(answer))) && !givesUp(answer) && !(pending.code && sentAsCode(answer))) {
     if (text) chat.messages.push({ role: "you", text });
     return say(PROBE_NO_HELP);
   }
@@ -108,9 +110,16 @@ export async function probeTurn(eng: Engine, dir: string, chatPath: string, mess
       return say(`${head}${formatQuizQuestion(next, state)}`, { usage, tools, attempt });
     }
     const mine = state.attempts.filter((a) => a.probe && queue.includes(a.questionId));
+    // A queued question that is no longer sealed and was never answered was retired by a recompile.
+    const answered = new Set(state.attempts.filter((a) => a.probe).map((a) => baseQuestionId(a.questionId)));
+    const retired = queue.some((id) => !sealed.some((q) => q.id === id) && !answered.has(id));
     chat.fm.card = "";
     chat.fm.probe_done = eng.today();
-    return say(`${head}**Cold probe finished:** ${mine.filter((a) => a.result === "correct").length}/${mine.length} right. These questions were sealed when the topic was compiled, so this shows what transfers. Levels are unchanged.`, { usage, tools, attempt });
+    const why = retired ? "The topic was recompiled, so this probe's remaining questions were retired.\n\n" : "";
+    const summary = mine.length
+      ? `**Cold probe finished:** ${mine.filter((a) => a.result === "correct").length}/${mine.length} right. These questions were sealed when the topic was compiled, so this shows what transfers. Levels are unchanged.`
+      : "Cold probe finished. Levels are unchanged.";
+    return say(`${head}${why}${summary}`, { usage, tools, attempt });
   }
 }
 

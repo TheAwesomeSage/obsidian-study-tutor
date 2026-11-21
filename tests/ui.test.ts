@@ -717,13 +717,15 @@ test("cold probes: the topic page shows the unseen-task score and starts a probe
   await plugin.onload();
   await tick();
   const out = parseCompileOutput(COMPILED);
-  await plugin.store.saveCompiled({ title: "Linear maps", fm: { source: "notes", subject: out.subject, kind: "subject" }, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
+  const dir = await plugin.store.saveCompiled({ title: "Linear maps", fm: { source: "notes", subject: out.subject, kind: "subject" }, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
   const status = (o: object) => ({ count: 0, due: false, why: "", asked: 0, correct: 0, lastProbe: null, notTransferring: [], sealedTotal: 0, ...o });
   let now: any = status({});
   let started = 0;
+  const startedFor: string[] = [];
   plugin.engine.probeStatus = async () => now;
   plugin.engine.startProbe = async (d: string) => {
     started++;
+    startedFor.push(d);
     const chatPath = await plugin.store.newChat(d, "Linear maps", "quiz");
     const chat = await plugin.store.loadChat(chatPath);
     chat.fm.probe = "yes";
@@ -777,24 +779,42 @@ test("cold probes: the topic page shows the unseen-task score and starts a probe
   }
   assert.equal(quick().Skip.disabled, false, "Skip stays on");
 
-  // Home: a card when due, whose Start begins a probe; nothing when nothing is due.
+  // Home: a card when due, naming its topic, whose Start begins a probe; nothing when nothing is due.
+  const dueTitle = () => $(root, ".st-probe-due .st-card-title")?.textContent ?? null;
   view.go("home");
   await tick();
-  assert.equal($(root, ".st-probe-due .st-card-title").textContent, "Cold probe due · 2 questions · no probe yet");
+  assert.equal(dueTitle(), "Linear maps: Cold probe due · 2 questions · no probe yet");
   now = status({ sealedTotal: 4, count: 1, due: true, why: "14 days since the last probe" });
   view.go("topic");
   view.go("home");
   await tick();
-  assert.equal($(root, ".st-probe-due .st-card-title").textContent, "Cold probe due · 1 question · 14 days since the last probe");
+  assert.equal(dueTitle(), "Linear maps: Cold probe due · 1 question · 14 days since the last probe");
   button($(root, ".st-probe-due"), "Start").click();
   await tick(60);
   assert.equal(started, 2);
+  assert.deepEqual(startedFor, [dir, dir]);
   assert.equal(root.getAttribute("data-screen"), "study");
   assert.equal(view.chat.fm.probe, "yes");
   now = status({ sealedTotal: 4, count: 0 });
   view.go("home");
   await tick();
   assert.equal($(root, ".st-probe-due"), null, "no card when nothing is due");
+
+  // With two topics, the card is for the topic with a probe due even when another one is open, and Start begins that topic's probe.
+  const other = await plugin.store.saveCompiled({ title: "Eigenvalues", fm: { source: "notes", subject: out.subject, kind: "subject" }, topicBody: out.topicBody.replace("# Linear maps", "# Eigenvalues"), questionsBody: out.questionsBody, target: 4 });
+  await view.reload();
+  view.go("home");
+  assert.equal(view.dir, dir, "Linear maps is still the open topic");
+  plugin.engine.probeStatus = async (d: string) => (d === other ? status({ sealedTotal: 2, count: 1, due: true, why: "14 days since the last probe" }) : status({ sealedTotal: 4 }));
+  view.go("topic");
+  view.go("home");
+  await tick();
+  assert.equal(dueTitle(), "Eigenvalues: Cold probe due · 1 question · 14 days since the last probe");
+  button($(root, ".st-probe-due"), "Start").click();
+  await tick(60);
+  assert.deepEqual(startedFor.slice(-1), [other]);
+  assert.equal(view.dir, other);
+  assert.equal(root.getAttribute("data-screen"), "study");
 });
 
 /** A topic with a sealed probe on each of its two concepts, both at level 3 with unaided successes before today. */

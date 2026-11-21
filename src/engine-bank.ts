@@ -471,7 +471,8 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
   const coverage = (n: number): IdeaStatus[] => cover.get(n) ?? cover.set(n, coverageOf(topic, questions, state, n)).get(n)!;
   const ideaOfBank = (q: Question | undefined): IdeaStatus | null => (q ? coverage(q.subskill).find((i) => i.id === ideaOfQuestion(coverage(q.subskill), q)) ?? null : null);
   const lastIdea = !follow && task && attempt && verdict ? ideaOfBank(task.base) : null;
-  const typical = secondsPerItem(state.attempts);
+  // Probe timings are a ruler, not a lever: they never set what counts as a slow answer.
+  const typical = secondsPerItem(state.attempts.filter((a) => !a.probe));
   const [builtIdea, builtCount] = fmStr(chat.fm, "built").split(":");
   const builds = lastIdea && builtIdea === lastIdea.id ? Number(builtCount) || 0 : 0;
   const move = lastIdea && attempt ? nextMove({ attempt, idea: lastIdea, typicalSeconds: typical.fallback ? null : typical.seconds, buildsInARow: builds }) : null;

@@ -540,7 +540,8 @@ export class Engine {
       const cover = coverageOf(topic, bank, state, focusSkill.n);
       const lastAttempt = [...state.attempts].reverse().find((a) => a.skill === focusSkill.n && !a.probe && a.result !== "ungraded");
       const lastIdea = lastAttempt ? cover.find((i) => i.id === ideaOf({ question: lastAttempt.question }, cover)) ?? null : null;
-      const typical = secondsPerItem(state.attempts);
+      // Probe timings are a ruler, not a lever: they never set what counts as a slow answer.
+      const typical = secondsPerItem(state.attempts.filter((a) => !a.probe));
       const [builtId, builtN] = fmStr(chat.fm, "built").split(":");
       const move: Move | null = lastAttempt && lastIdea ? nextMove({ attempt: lastAttempt, idea: lastIdea, typicalSeconds: typical.fallback ? null : typical.seconds, buildsInARow: builtId === lastIdea.id ? Number(builtN) || 0 : 0 }) : null;
       const brief = coverageBrief(focusSkill.name, cover, lastIdea && move ? { idea: lastIdea, move } : null);

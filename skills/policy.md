@@ -116,8 +116,8 @@ A cold probe asks sealed questions: ones the compile wrote and kept out of the q
 3. A probe is due when there has been none yet, or 14 days have passed since the last one, or the exam is within 7 days and 7 days have passed since the last one.
 4. The unseen-task score is shown after 3 answers.
 5. "Not transferring" means level 4 or higher with the latest probe answer wrong.
-6. Probe answers move no level, estimate, BKT value, card or misconception. They are recorded with `probe: true`.
-7. Help requests (hints, explanations, visuals) are refused locally during a probe. Skip is allowed.
+6. Probe answers move no level, estimate, BKT value, card or misconception, and their timings do not set what counts as a slow answer. They are recorded with `probe: true`.
+7. Help requests (a message ending in "?", hints, explanations, visuals) are refused locally during a probe. Skip is allowed.
 
 ## Diagrams, simulations and games
 

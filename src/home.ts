@@ -29,19 +29,23 @@ export class HomeScreen implements Screen {
     this.render();
   }
 
-  /** A card under Suggested next when a cold probe is due on the open topic. It appears once the status is read. */
-  private async showProbeDue(now: HTMLElement, dir: string): Promise<void> {
+  /** A card under Suggested next for the first topic with a cold probe due. It appears once the statuses are read. */
+  private async showProbeDue(now: HTMLElement): Promise<void> {
     const v = this.view;
-    let st;
-    try {
-      st = await v.plugin.engine.probeStatus(dir);
-    } catch {
+    for (const t of v.overview) {
+      let st;
+      try {
+        st = await v.plugin.engine.probeStatus(t.dir);
+      } catch {
+        continue;
+      }
+      if (this.el === null || !now.isConnected) return;
+      if (!st.due) continue;
+      const card = now.createEl("section", { cls: "st-card st-probe-due", attr: { "aria-label": `Cold probe due: ${t.title}` } });
+      card.createEl("h2", { cls: "st-card-title", text: `${t.title}: Cold probe due · ${st.count} question${st.count === 1 ? "" : "s"} · ${st.why}` });
+      button(card.createDiv({ cls: "st-actions" }), { label: "Start", icon: "arrow-right", onClick: () => void v.startProbe(t.dir) });
       return;
     }
-    if (this.el === null || !now.isConnected || v.dir !== dir || !st.due) return;
-    const card = now.createEl("section", { cls: "st-card st-probe-due", attr: { "aria-label": "Cold probe due" } });
-    card.createEl("h2", { cls: "st-card-title", text: `Cold probe due · ${st.count} question${st.count === 1 ? "" : "s"} · ${st.why}` });
-    button(card.createDiv({ cls: "st-actions" }), { label: "Start", icon: "arrow-right", onClick: () => void v.startProbe(dir) });
   }
 
   private render(): void {
@@ -100,7 +104,7 @@ export class HomeScreen implements Screen {
       };
     }
 
-    if (v.dir) void this.showProbeDue(now, v.dir);
+    void this.showProbeDue(now);
 
     // ----- ways in -----
     const ways = page.createEl("section", { cls: "st-ways", attr: { "aria-label": "Study modes" } });

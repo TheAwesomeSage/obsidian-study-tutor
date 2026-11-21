@@ -1452,6 +1452,44 @@ test("a bank quiz builds on the last question when you were unsure, moves to a n
   assert.equal(calls(), 0, "no model call anywhere");
 });
 
+test("cold probes: fast probe answers never make a practice answer look slow, in a bank quiz or a model-led turn", async () => {
+  // Five practice answers at 40 s and seven probe answers at 5 s: the usual time is 40 s, not 5 s.
+  const timed = (probe: boolean, i: number) => attempt({ id: `${probe ? "p" : "t"}${i}`, skill: 1, questionId: `x${i}`, question: "Name a colour.", seconds: probe ? 5 : 40, probe: probe || undefined, timestamp: `2026-11-1${probe ? 5 : 4}T10:0${i}:00.000Z` });
+  const history = [...[0, 1, 2, 3, 4].map((i) => timed(false, i)), ...[0, 1, 2, 3, 4, 5, 6].map((i) => timed(true, i))];
+  // A bank quiz: right in 50 s, with no confidence set, moves on to the other idea.
+  {
+    const { store, engine, dir, calls } = await ideas();
+    const st = await store.loadState(dir, 4);
+    st.attempts.push(...history);
+    await store.saveState(dir, st);
+    const chat = await store.newChat(dir, "Maths", "quiz", new Date(2026, 10, 17, 9, 0));
+    await engine.quizTurn(dir, chat, "");
+    const c = await store.loadChat(chat);
+    assert.equal(F.fmStr(c.fm, "card"), "Q1");
+    c.fm.asked_at = new Date(Date.now() - 50_000).toISOString();
+    await store.saveChat(chat, c);
+    const r = await engine.quizTurn(dir, chat, "12");
+    assert.doesNotMatch(r.reply, /took a while/);
+    assert.equal(F.fmStr((await store.loadChat(chat)).fm, "card").replace(/~\d+$/, ""), "Q3", "on to a new idea");
+    assert.equal(calls(), 0);
+  }
+  // A model-led turn: the same answer recorded, and the brief does not say to build on it.
+  {
+    const { store, engine, dir } = await ideas();
+    const seen: string[] = [];
+    (engine as any).call = async (o: any) => { seen.push(o.input); return { text: "Which comes first?", usage }; };
+    const q1 = F.parseQuestions(IDEAS_BANK)[0];
+    const st = await store.loadState(dir, 4);
+    st.focus = 1;
+    st.attempts.push(...history, attempt({ id: "r1", skill: 1, questionId: "Q1", question: q1.question, seconds: 50, timestamp: "2026-11-16T10:00:00.000Z" }));
+    await store.saveState(dir, st);
+    const chat = await store.newChat(dir, "Maths", "teach", new Date(2026, 10, 17, 9, 0));
+    await engine.turn(dir, chat, "go on");
+    assert.match(seen[0], /- O1: .* — asked 1/);
+    assert.doesNotMatch(seen[0], /took a while/);
+  }
+});
+
 // ---------- exam metadata on objectives, BKT in shadow, and the measurement summary ----------
 
 const EXAM_CARD = (fm = "") => [
@@ -1811,6 +1849,34 @@ test("cold probes: a recompile keeps sealed questions with their concept, a new 
   assert.deepEqual(await store.loadSealed(dir), []);
 });
 
+test("cold probes: a recompile keeps an old sealed question over a reworded copy of it, and drops one the new bank now nearly copies", async () => {
+  const names: [string, string][] = [["Slopes", "none"], ["Projectiles", "none"], ["Stability", "none"]];
+  const practice = (sub: number) => sealedSec(`Q${sub}`, sub, "application", `Practice item number ${sub} about something else entirely.`);
+  const p1 = "Why does a wider base make a pyramid more stable?";
+  const p2 = "How would a bridge engineer decide where to put the supports?";
+  const p3 = "Explain why a spinning top stays upright for a while.";
+  const store = new Store(new MemFS(), "Tutor");
+  const fs = (store as any).fs as MemFS;
+  const dir = await store.saveCompiled({ title: "Calculus", fm: { subject: "none" }, topicBody: CARD(names), target: 4,
+    questionsBody: practice(1) + sealedSec("Q11", 1, "probe", p1) + practice(2) + sealedSec("Q12", 2, "probe", p2) + practice(3) + sealedSec("Q13", 3, "probe", p3) });
+  const first = await store.loadSealed(dir);
+  const st = await store.loadState(dir, 4);
+  const idOf = (n: number) => first.find((q) => q.concept === st.concepts[n])!.id;
+  const dropped = async () => Number(/^dropped: (\d+)$/m.exec(await fs.read(`${dir}/sealed.md`))?.[1]);
+  assert.equal(await dropped(), 0);
+  // Subskill 1 gets a lightly reworded copy of its old probe; subskill 2's new bank has a question close to its old probe.
+  const p1b = "Why does a wider base make a pyramid much more stable?";
+  await store.saveCompiled({ title: "Calculus", fm: { subject: "none" }, topicBody: CARD(names), target: 4, existingDir: dir,
+    questionsBody: practice(1) + sealedSec("Q11", 1, "probe", p1b) + sealedSec("Q2", 2, "application", "How would a bridge engineer decide where to put the supports first?") + practice(3) });
+  const after = await store.loadSealed(dir);
+  const text = await fs.read(`${dir}/sealed.md`);
+  assert.deepEqual(after.filter((q) => q.concept === st.concepts[1]).map((q) => [q.id, q.question]), [[idOf(1), p1]], "the old question and its id are kept");
+  assert.ok(!text.includes(p1b), "the reworded copy is not sealed as unseen work");
+  assert.equal(after.filter((q) => q.concept === st.concepts[2]).length, 0, "an old probe the bank now nearly copies is dropped");
+  assert.deepEqual(after.filter((q) => q.concept === st.concepts[3]).map((q) => q.id), [idOf(3)], "an unrelated old probe stays");
+  assert.equal(await dropped(), 2);
+});
+
 test("cold probes: the compile notice counts bank questions only, not the sealed probe", () => {
   const body = sealedSec("Q1", 1, "application", "Find the slope of the line.") + sealedSec("Q2", 1, "probe", "Why does a wider base make a pyramid more stable?") + sealedSec("Q3", 2, "application", "A ball is thrown up at 5 m/s. How high?") + sealedSec("Q4", 2, "transfer", "Describe a river's flow as a rate of change.");
   assert.equal(F.parseQuestions(body).length, 4);
@@ -2001,7 +2067,7 @@ test("bank marking: verdictText gives one verdict for bank and sealed answers", 
 // ---------- cold probes: running one ----------
 
 /** A topic with two level-3 concepts, a bank question for each, and a short sealed probe for each: 7 and 6. */
-async function probeRun(only = 2) {
+async function probeRun(only = 2, first: [string, string] = ["Evaluate six plus one, written as a digit.", "7"]) {
   const { PROBE_NO_HELP } = await import("../src/engine-probe");
   const fs = new MemFS();
   const store = new Store(fs, "Tutor", () => "2026-11-17");
@@ -2012,7 +2078,7 @@ async function probeRun(only = 2) {
   const sec = (id: string, sub: number, task: string, q: string, a: string) => `### ${id}\nsubskill: ${sub}\ntype: short\ntask: ${task}\nquestion: ${q}\nanswer: ${a}\nexplanation: Add them.\n\n`;
   const body = sec("Q1", 1, "application", "A cart starts at 3 m/s and speeds up at 2 m/s² for 4 s. What is its final speed in m/s?", "11")
     + sec("Q2", 2, "application", "A lamp uses 60 W for 5 hours. How many watt-hours does it use?", "300")
-    + sec("Q3", 1, "probe", "Evaluate six plus one, written as a digit.", "7")
+    + sec("Q3", 1, "probe", ...first)
     + (only > 1 ? sec("Q4", 2, "probe", "Evaluate ten minus four, written as a digit.", "6") : "");
   const dir = await store.saveCompiled({ title: "Motion", fm: { subject: "none" }, topicBody: CARD(NAMES), questionsBody: body, target: 4 });
   const state = await store.loadState(dir, 4);
@@ -2136,6 +2202,18 @@ test("cold probes: plain help requests are refused locally while a bare answer i
   assert.match((await engine.study(dir, chatPath, "7")).reply, /1\/1 right/);
 });
 
+test("cold probes: an answer that starts with a question word is marked, while a question or a request for help is still refused", async () => {
+  const { store, engine, dir, PROBE_NO_HELP, calls } = await probeRun(1, ["In words, when does a moving body keep a constant velocity?", "When the net force is zero"]);
+  const { chatPath } = (await engine.startProbe(dir))!;
+  for (const help of ["can I have a hint?", "show me a diagram", "When does it hold?"]) assert.equal((await engine.study(dir, chatPath, help)).reply, PROBE_NO_HELP, help);
+  assert.equal((await store.loadState(dir, 4)).attempts.filter((x) => x.probe).length, 0);
+  const r = await engine.study(dir, chatPath, "When the net force is zero");
+  assert.notEqual(r.reply, PROBE_NO_HELP);
+  assert.match(r.reply, /1\/1 right/);
+  assert.deepEqual((await store.loadState(dir, 4)).attempts.filter((x) => x.probe).map((x) => x.result), ["correct"]);
+  assert.equal(calls(), 0);
+});
+
 test("cold probes: skip while a question is open records a skipped attempt and moves on", async () => {
   const { store, engine, dir, calls } = await probeRun(2);
   const { chatPath } = (await engine.startProbe(dir))!;
@@ -2149,6 +2227,35 @@ test("cold probes: skip while a question is open records a skipped attempt and m
   probes = (await store.loadState(dir, 4)).attempts.filter((x) => x.probe);
   assert.deepEqual(probes.map((x) => x.result), ["skipped", "skipped"]);
   assert.equal(calls(), 0);
+});
+
+test("cold probes: a probe whose remaining questions a recompile retired says so when it closes, and never reports 0/0", async () => {
+  const RETIRED = "The topic was recompiled, so this probe's remaining questions were retired.";
+  const retire = async (store: Store, dir: string, id: string) => {
+    const concept = (await store.loadSealed(dir)).find((q) => q.id === id)!.concept!;
+    const fs = (store as any).fs as MemFS;
+    await fs.write(`${dir}/sealed.md`, (await fs.read(`${dir}/sealed.md`)).split(concept).join("retired-concept"));
+  };
+  // The only question is retired before it is answered: nothing was asked, so there is no score.
+  let t = await probeRun(1);
+  let chatPath = (await t.engine.startProbe(t.dir))!.chatPath;
+  await retire(t.store, t.dir, F.fmStr((await t.store.loadChat(chatPath)).fm, "card"));
+  let r = await t.engine.study(t.dir, chatPath, "7");
+  assert.equal(r.reply, `${RETIRED}\n\nCold probe finished. Levels are unchanged.`);
+  assert.doesNotMatch(r.reply, /0\/0/);
+  // One answered, the next retired: the line comes before the summary of what was answered.
+  t = await probeRun(2);
+  chatPath = (await t.engine.startProbe(t.dir))!.chatPath;
+  await t.engine.study(t.dir, chatPath, "99");
+  await retire(t.store, t.dir, F.fmStr((await t.store.loadChat(chatPath)).fm, "card"));
+  r = await t.engine.study(t.dir, chatPath, "6");
+  assert.ok(r.reply.startsWith(`${RETIRED}\n\n**Cold probe finished:** 0/1 right.`), r.reply);
+  // A probe that ends with every question answered says nothing about a recompile.
+  t = await probeRun(1);
+  chatPath = (await t.engine.startProbe(t.dir))!.chatPath;
+  r = await t.engine.study(t.dir, chatPath, "7");
+  assert.ok(!r.reply.includes(RETIRED));
+  assert.equal(t.calls(), 0);
 });
 
 test("cold probes: a recompile that retires the open question's concept moves the probe on and records nothing for it", async () => {

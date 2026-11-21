@@ -2,13 +2,13 @@
 // interface (Obsidian's DataAdapter satisfies it), so it can be tested outside Obsidian.
 
 import { BUNDLED } from "./prompts";
-import { Course, CourseEdge, EdgeStatus, Relation, TopicGraph, effectivePrereqs, joinCourse, parseTopicGraph, serializeTopicGraph, syncTopicGraph, wouldCycle } from "./course";
+import { Course, CourseEdge, EdgeStatus, Relation, TopicGraph, effectivePrereqs, joinCourse, parseTopicGraph, serializeTopicGraph, similarity, syncTopicGraph, wouldCycle } from "./course";
 import { Attempt, LevelChange, normaliseAttempt } from "./evidence";
 import { SrStats, buildSrNote, srStats } from "./formats";
 import { parseMistakeCard } from "./families";
 import { Chat, Frontmatter, LearnerState, Mode, Prereqs, Question, Topic, fmNum, fmStr, newState, parseChat, parseQuestions, parseState, parseTopic, serializeChat, serializeState, textHash, withFrontmatter, ymd } from "./formats";
 import type { PolicyCase } from "./policy";
-import { splitSealed, type SealedSection } from "./sealed";
+import { SEAL_SIMILARITY, splitSealed, type SealedSection } from "./sealed";
 import { SessionRecord, sessionMarkdown } from "./session";
 import type { ActivityRecord } from "./configure";
 import type { CoursePackage } from "./coursepkg";
@@ -424,8 +424,11 @@ export class Store {
   /**
    * The sealed sections after a compile: the new body's, then the old ones whose concept is still
    * live and got no new probe, moved to that concept's new subskill number. Each carries its concept.
+   * A new probe that nearly copies an old sealed question of its concept is dropped and the old one
+   * kept, id and all: a reworded question the learner may have answered is not unseen work. An old
+   * one that a new bank question on its subskill nearly copies is dropped too. `dropped` counts both.
    */
-  private async mergeSealed(dir: string, fresh: SealedSection[], graph: TopicGraph): Promise<string[]> {
+  private async mergeSealed(dir: string, fresh: SealedSection[], graph: TopicGraph, bank: Question[]): Promise<{ sections: string[]; dropped: number }> {
     const live = new Map(graph.concepts.filter((c) => !c.retired).map((c) => [c.n, c.id]));
     const byId = new Map([...live].map(([n, id]) => [id, n]));
     const out = new Map<string, string>();
@@ -435,20 +438,36 @@ export class Store {
       lines.splice(1, 0, `subskill: ${sub}`, `concept: ${concept}`);
       out.set(id, lines.join("\n").replace(/\s*$/, "\n"));
     };
-    const withNew = new Set<string>();
+    const file = this.sealedPath(dir);
+    const old = ((await this.fs.exists(file)) ? (await this.fs.read(file)).split(/^(?=### P[0-9a-f]+[ \t]*\r?$)/m) : [])
+      .map((part) => ({ part, q: parseQuestions(part)[0] }))
+      .filter((o): o is { part: string; q: Question & { concept: string } } => !!o.q?.concept && byId.has(o.q.concept));
+    const near = (a: string, b: string) => similarity(a, b) >= SEAL_SIMILARITY;
+    let dropped = 0;
+    const withNew = new Set<string>(), copied = new Set<string>();
     for (const f of fresh) {
       const concept = live.get(f.subskill);
       if (!concept) continue;
+      const text = parseQuestions(f.section)[0]?.question ?? "";
+      const earlier = old.filter((o) => o.q.concept === concept && near(text, o.q.question));
+      if (earlier.length) {
+        for (const o of earlier) copied.add(o.q.id);
+        dropped++;
+        continue;
+      }
       withNew.add(concept);
       put(f.id, concept, f.subskill, f.section);
     }
-    const file = this.sealedPath(dir);
-    const old = (await this.fs.exists(file)) ? (await this.fs.read(file)).split(/^(?=### P[0-9a-f]+[ \t]*\r?$)/m) : [];
-    for (const part of old) {
-      const q = parseQuestions(part)[0];
-      if (q?.concept && !withNew.has(q.concept) && byId.has(q.concept)) put(q.id, q.concept, byId.get(q.concept)!, part);
+    for (const { part, q } of old) {
+      if (withNew.has(q.concept) && !copied.has(q.id)) continue;
+      const sub = byId.get(q.concept)!;
+      if (bank.some((b) => b.subskill === sub && near(q.question, b.question))) {
+        dropped++;
+        continue;
+      }
+      put(q.id, q.concept, sub, part);
     }
-    return [...out.values()];
+    return { sections: [...out.values()], dropped };
   }
 
   // ----- learner state: levels in state.md, the evidence behind them in evidence.md -----
@@ -572,9 +591,9 @@ export class Store {
     await this.writeFile(`${dir}/topic.md`, topicMd);
     // Probe questions leave the bank here, the one place compile and refresh both write it, so no reader of questions.md sees them.
     const split = splitSealed(p.questionsBody);
-    const sealed = await this.mergeSealed(dir, split.sealed, graph);
+    const sealed = await this.mergeSealed(dir, split.sealed, graph, parseQuestions(split.bank));
     await this.writeFile(`${dir}/questions.md`, withFrontmatter({ tutor: "questions", topic: p.title }, split.bank + "\n"));
-    if (sealed.length || (await this.fs.exists(this.sealedPath(dir)))) await this.writeFile(this.sealedPath(dir), withFrontmatter({ tutor: "sealed", topic: p.title, dropped: split.dropped }, sealed.join("\n")));
+    if (sealed.sections.length || (await this.fs.exists(this.sealedPath(dir)))) await this.writeFile(this.sealedPath(dir), withFrontmatter({ tutor: "sealed", topic: p.title, dropped: split.dropped + sealed.dropped }, sealed.sections.join("\n")));
     await this.writeFile(this.graphPath(dir), serializeTopicGraph(topic.title, graph));
     const next = newState(topic, p.target, previous, previous && oldGraph ? remap : undefined);
     for (const c of graph.concepts) if (!c.retired) next.concepts[c.n] = c.id;
