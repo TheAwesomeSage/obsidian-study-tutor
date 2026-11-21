@@ -1728,3 +1728,14 @@ test("cold probes: a probe family is split out of the bank, and a near-copy of p
   assert.deepEqual({ sealed: none.sealed, dropped: none.dropped }, { sealed: [], dropped: 0 });
   assert.equal(none.bank, plain);
 });
+
+test("cold probes: a probe is sealed under any heading the question parser accepts, with CRLF too", () => {
+  const body = "### Q1\nsubskill: 1\ntype: short\ntask: application\nquestion: Find the slope.\nanswer: 1\n\n#### **Q5**\nsubskill: 1\ntype: short\ntask: probe\nquestion: Why is a wider base more stable?\nanswer: 1\n";
+  for (const text of [body, body.replace(/\n/g, "\r\n")]) {
+    const r = splitSealed(text);
+    assert.deepEqual(F.parseQuestions(r.bank).map((x) => x.id), ["Q1"]);
+    assert.equal(r.sealed.length, 1);
+    assert.match(r.sealed[0].section, /^### P[0-9a-f]{10}\r?\n/);
+    assert.equal(F.parseQuestions(r.sealed[0].section)[0].task, "probe");
+  }
+});

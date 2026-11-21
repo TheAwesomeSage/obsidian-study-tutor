@@ -344,9 +344,12 @@ function normaliseMcq(options: string[], answer: string): { options: string[]; a
   return { options: texts.map((t, i) => `${letter(i)}. ${t}`), answer: letter(idx) };
 }
 
+/** A question heading as parseQuestions reads it: ##-####, an optional bold id, Q<n> or a sealed P<hex>. */
+export const Q_HEADING = /^#{2,4}\s+\**(Q\d+|P[0-9a-f]+)\**[.:]?[ \t]*$/m;
+
 export function parseQuestions(md: string): Question[] {
   const { body } = splitFrontmatter(md);
-  const parts = body.split(/^#{2,4}\s+\**(Q\d+|P[0-9a-f]+)\**[.:]?[ \t]*$/m);
+  const parts = body.split(Q_HEADING);
   const out: Question[] = [];
   for (let i = 1; i + 1 < parts.length; i += 2) {
     const f: Record<string, string[]> = {};

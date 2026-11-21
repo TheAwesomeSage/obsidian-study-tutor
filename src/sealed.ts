@@ -1,6 +1,6 @@
 import { digest } from "./compile-sources";
 import { similarity } from "./course";
-import { parseQuestions } from "./formats";
+import { Q_HEADING, parseQuestions } from "./formats";
 
 /** A probe this similar to a practice question on the same subskill is not unseen work, so it is dropped. */
 export const SEAL_SIMILARITY = 0.5;
@@ -23,8 +23,9 @@ export function sealedId(questionText: string): string {
  * practice question on its subskill is dropped, not sealed.
  */
 export function splitSealed(questionsBody: string): { bank: string; sealed: SealedSection[]; dropped: number } {
-  const parts = questionsBody.split(/^(?=### )/m);
-  const parsed = parts.map((p) => (/^### /.test(p) ? parseQuestions(p)[0] : undefined));
+  // Cut at the parser's own heading; the id group is made non-capturing so split() adds no extra items.
+  const parts = questionsBody.split(new RegExp(`^(?=${Q_HEADING.source.replace("(Q", "(?:Q")})`, "m"));
+  const parsed = parts.map((p) => parseQuestions(p)[0]);
   const practice = parsed.filter((q) => q && q.task !== "probe");
   const kept: string[] = [];
   const sealed: SealedSection[] = [];
@@ -40,7 +41,7 @@ export function splitSealed(questionsBody: string): { bank: string; sealed: Seal
       return;
     }
     const id = sealedId(q.question);
-    sealed.push({ id, subskill: q.subskill, section: part.replace(/^### .*$/m, `### ${id}`) });
+    sealed.push({ id, subskill: q.subskill, section: part.replace(Q_HEADING, `### ${id}`) });
   });
   return { bank: kept.join(""), sealed, dropped };
 }
