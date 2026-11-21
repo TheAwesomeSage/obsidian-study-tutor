@@ -143,11 +143,11 @@ const integer = { type: "integer" };
 const bool = { type: "boolean" };
 const arr = (items: Schema, maxItems: number): Schema => ({ type: "array", items, maxItems });
 const obj = (properties: Record<string, Schema>): Schema => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
-const PLAN = obj({ outcome: obj({ task: str, criteria: arr(str, 6) }), objectives: arr(obj({ text: str, references: arr(str, 24), search: str }), 150) });
+const PLAN = obj({ outcome: obj({ task: str, criteria: arr(str, 12) }), objectives: arr(obj({ text: str, references: arr(str, 24), search: str }), 150) });
 /** Bumped when the planning prompt changes, so a saved plan from before is asked again. */
 const PLAN_VERSION = "backward-1";
 /** The prompt's backward-design half: the outcome first, then what it needs, in teaching order. */
-const BACKWARD_RULE = "Plan backwards from the goal. First state the outcome: one task, in the goal's own setting, that the learner should be able to do unaided at the end, and up to six observable success criteria for it. Then list the objectives that task needs, in teaching order: prerequisites first; if the goal says where to start, that first; the abilities the task itself uses last. Every objective must serve the outcome; leave out what it does not need unless the sources or specification require it. For expansion, the outcome is the gap itself. Later batches of the same course may repeat the outcome or leave it empty.";
+const BACKWARD_RULE = "Plan backwards from the goal. First state the outcome: one task, in the goal's own setting, that the learner should be able to do unaided at the end, and up to six observable success criteria for it. Then list the objectives that task needs, in teaching order: prerequisites first; if the goal says where to start, that first; the abilities the task itself uses last. With no notes (subject mode), list only what the outcome needs. With notes or a specification, still map every testable clause; only the order follows the outcome. For expansion, the outcome is the gap itself. If an outcome is supplied, it was stated by an earlier batch of the same course: repeat it or leave it empty, and plan against it.";
 const REVIEW = obj({ fetch: arr(obj({ objective: str, url: str }), 6), searches: arr(obj({ objective: str, query: str }), 4), inspect: arr(obj({ passage: str, offset: integer }), 5) });
 const DRAFT_QUESTION = obj({ type: { ...str, enum: ["short", "mcq", "open", "code"] }, question: str, options: arr(str, 4), answer: str, explanation: str, rubric: str, task: str, family: str, difficulty: integer, generator: str });
 // `code` is optional, so a reply written before coding exercises existed still passes.
@@ -186,7 +186,7 @@ const unique = <T>(xs: T[]) => [...new Set(xs)];
 const groups = <T>(xs: T[], n: number) => Array.from({ length: Math.ceil(xs.length / n) }, (_, i) => xs.slice(i * n, (i + 1) * n));
 
 /** The checkpoint version of each model stage, as the checkpoint keys use them. */
-export const STAGE_VERSIONS = { plan: VERSION, select: LOCAL_VERSION, synth: SYNTHESIS_VERSION, audit: AUDIT_VERSION } as const;
+export const STAGE_VERSIONS = { plan: `${VERSION}/${PLAN_VERSION}`, select: LOCAL_VERSION, synth: SYNTHESIS_VERSION, audit: AUDIT_VERSION } as const;
 /**
  * The key of a lesson-stage checkpoint: a digest of the stage version, the model alias, the exact
  * prompt and schema, and the exact input. The concrete model is checked separately (see `Saved`).
@@ -398,7 +398,7 @@ export async function compileCourse(p: {
   };
   for (const [i, batch] of batches.entries()) {
     notify(`Reading scope and objectives (${i + 1}/${batches.length})…`);
-    const input = { ...target, passages: batch, materialInFull: short && i === 0 ? full : undefined, research: !!p.research };
+    const input = { ...target, ...(outcome ? { outcome } : {}), passages: batch, materialInFull: short && i === 0 ? full : undefined, research: !!p.research };
     const key = `plan-${digest(JSON.stringify([VERSION, PLAN_VERSION, stageAlias, input]))}`;
     type Plan = { outcome: CourseOutcome; objectives: Omit<CompileObjective, "id">[] };
     const cached = localRefused ? null : await checkpoint<Plan>(key, PLAN);
@@ -417,8 +417,8 @@ export async function compileCourse(p: {
     if (plan && !reused) await keep(key, plan);
     if (!plan && !localRefused) issues.push(`Objective inventory batch ${i + 1} could not be read.`);
     // The first batch that states an outcome sets it: it is planned from the goal, which every batch shares.
-    const task = inline(plan?.outcome?.task ?? "", 400);
-    if (!outcome && task) outcome = { task, criteria: (plan?.outcome?.criteria ?? []).map(c => inline(c, 200)).filter(Boolean).slice(0, 6) };
+    const task = inline(plan?.outcome?.task ?? "", 400).replace(/^[#>\s-]+/, "");
+    if (!outcome && task) outcome = { task, criteria: (plan?.outcome?.criteria ?? []).map(c => inline(c, 200).replace(/^[#>\s-]+/, "")).filter(Boolean).slice(0, 6) };
     const allowed = new Set(batch.map(k => k.id));
     const mappedHere = new Set<string>();
     for (const row of plan?.objectives ?? []) {
@@ -652,6 +652,8 @@ export async function compileCourse(p: {
   const cohorts = groups(teachable, OBJECTIVES_PER_SYNTHESIS);
   const prerequisites = new Map<number, number[]>();
   const synthPrompt = `Write structured teaching units, one per supplied objective that you can teach. Use the exact supplied objective ID in each unit. Keep claims and the compact worked example concise; use details for the full lesson, including definitions, assumptions, and a worked example with reasoning. Reference only verified passage IDs from that objective's packet. If a source is insufficient, leave it uncited. Write 2–3 aligned questions with an answer and explanation; use a rubric for open questions, an empty options array for other than multiple choice, and one fresh application when useful. Then write exactly one more question per unit with task "probe": a fresh problem in a setting unlike every other question of the unit, the transfer one included, still answerable from the lesson. The app seals it away for cold probes, so the learner never practises it. Any other task is a short label such as "application" or "transfer"; difficulty is 1–5. ${GENERATOR_RULE} ${CODE_RULE} Choose visualKind only if an existing diagram, simulation or game helps; otherwise use the empty string. List prerequisites by objective ID from this group or earlier topics only when required. Omit outside material. ${REFERENCE_RULE}\n\nUse pedagogical guidance from the saved compilation skill where compatible. Its legacy output formatting does not apply:\n${p.skill.split(/^FORMAT[ \t]*$/m)[0].slice(0, 1800)}`;
+  // Told only when there is an outcome, so courses without one keep their synthesis checkpoints.
+  const aimedPrompt = outcome ? `${synthPrompt}\n\nThe supplied outcome is the task the whole course builds to. It is the learner's goal, not a source: write each worked example and the transfer question so they move toward it, and never cite it.` : synthPrompt;
   metrics.groups = lessonGroups.total = cohorts.length;
   // Each group's validated synthesis and audit are checkpoints: a repeated or cancelled compile reuses finished groups.
   for (const [i, cohort] of cohorts.entries()) {
@@ -662,13 +664,14 @@ export async function compileCourse(p: {
     const scopes = new Set(cohort.map(o => o.id));
     const inspectedHere = [...inspected.values()].filter(r => packetIds.has(r.passage)).slice(-3).flatMap(inspect);
     const synthInput = { ...target, outcome, subjects: p.subjects, objectives: cohort, earlier: teachable.slice(Math.max(0, (i - 2) * OBJECTIVES_PER_SYNTHESIS), i * OBJECTIVES_PER_SYNTHESIS).map(o => ({ id: o.id, text: o.text })), packet, inspected: inspectedHere };
-    const synthKey = stageKey("synth", SYNTHESIS_VERSION, synthPrompt, SYNTHESIS, synthInput);
+    // The outcome is left out of the key: replanning rewords it, and that alone should not rebuild every lesson group.
+    const synthKey = stageKey("synth", SYNTHESIS_VERSION, aimedPrompt, SYNTHESIS, { ...synthInput, outcome: undefined });
     let proposed = await reuse<Synthesis>(synthKey, SYNTHESIS);
     const synthReused = !!proposed;
     let saved = synthReused;
     if (!proposed) {
       notify(`Building lessons and assessing coverage (${label})…`);
-      proposed = await tryAsk<Synthesis>(synthPrompt, synthInput, SYNTHESIS, `Lesson synthesis for group ${i + 1} did not finish.`);
+      proposed = await tryAsk<Synthesis>(aimedPrompt, synthInput, SYNTHESIS, `Lesson synthesis for group ${i + 1} did not finish.`);
       if (proposed) saved = await keep(synthKey, proposed);
     }
     if (!proposed) { issues.push(`Teaching output for group ${i + 1} could not be read.`); continue; }

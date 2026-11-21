@@ -467,7 +467,9 @@ test("a stage version bump invalidates that stage's checkpoints", async () => {
   const base = fake();
   await run({ cache, call: o => { sent[stageOf(o.system)] = { system: o.system, schema: o.jsonSchema, input: JSON.parse(o.input) }; return base(o); } });
   for (const stage of ["synth", "audit"] as const) {
-    const { system, schema, input } = sent[stage]!;
+    const { system, schema, input: sentInput } = sent[stage]!;
+    // A synthesis key leaves the outcome out, so a reworded outcome alone rebuilds nothing.
+    const input = stage === "synth" ? { ...(sentInput as object), outcome: undefined } : sentInput;
     const key = checkpointKey(stage, STAGE_VERSIONS[stage], "fixture", system, schema, input);
     assert.ok(cache.data.has(key), `the ${stage} checkpoint is keyed by its stage version`);
     assert.notEqual(checkpointKey(stage, `${STAGE_VERSIONS[stage]}-next`, "fixture", system, schema, input), key);
@@ -722,4 +724,40 @@ test("backward design: planning states the outcome first, it heads the topic car
   assert.equal(none.staged.outcome, undefined);
   assert.doesNotMatch(none.topicBody, /## Outcome/);
   assert.equal(parseTopic(`---\ntitle: x\n---\n${none.topicBody}`).outcome, "");
+});
+
+test("backward design: synthesis is told the outcome only when there is one, a reworded outcome reuses lesson groups, later batches plan against it, and extra criteria do not reject a plan", async () => {
+  const c = counted();
+  await run({ call: c.call });
+  const synthSystems: string[] = [];
+  const seen = counted((o) => { if (stageOf(o.system) === "synth") synthSystems.push(o.system); return fake()(o); });
+  await run({ call: seen.call });
+  assert.match(synthSystems[0], /The supplied outcome is the task the whole course builds to\. It is the learner's goal, not a source/);
+  const plain: string[] = [];
+  await run({ call: (o) => { if (stageOf(o.system) === "synth") plain.push(o.system); return fake({ outcome: { task: "", criteria: [] } })(o); } });
+  assert.doesNotMatch(plain[0], /The supplied outcome/, "a course without an outcome keeps the old synthesis prompt and its checkpoints");
+
+  // Replanning that only rewords the outcome reuses every synthesised group.
+  const cache = memory();
+  await run({ cache });
+  for (const k of [...cache.data.keys()]) if (k.startsWith("plan-")) cache.data.delete(k);
+  const reworded = counted(fake({ outcome: { task: "Work out the kernel of a linear map and say what it means", criteria: ["Solves T(v)=0"] } }));
+  const r = await run({ cache, call: reworded.call });
+  assert.equal(r.staged.outcome?.task, "Work out the kernel of a linear map and say what it means");
+  assert.equal(reworded.n.plan, 1, "the plan was asked again");
+  assert.equal(reworded.n.synth, 0, "no lesson group is rebuilt for a reworded outcome");
+
+  // Seven criteria are kept to six instead of rejecting the plan; a heading-like task cannot add a subskill.
+  const many = await run({ call: fake({ outcome: { task: "### 9. Fake subskill", criteria: ["a", "b", "c", "d", "e", "f", "g"] } }) });
+  assert.equal(many.staged.outcome?.task, "9. Fake subskill");
+  assert.equal(many.staged.outcome?.criteria.length, 6);
+  assert.equal(parseTopic(`---\ntitle: x\n---\n${many.topicBody}`).subskills.length, many.staged.lessons.length);
+
+  // Long material is planned in batches; every batch after the first is given the outcome.
+  const batches = counted();
+  const long = Array.from({ length: 2 }, (_, k) => ({ name: `Long notes ${k}`, path: `Math/Long ${k}.md`, text: Array.from({ length: 40 }, (_, i) => `C${k}.${i}: Compute the kernel of map number ${k * 40 + i}, ${"with a long description of its matrix entries ".repeat(6)}`).join("\n\n") }));
+  await run({ call: batches.call, material: long, singlePassWords: 10 });
+  assert.ok(batches.inputs.plan.length > 1, "long material is planned in more than one batch");
+  for (const input of batches.inputs.plan.slice(1)) assert.ok(input.outcome?.task, "a later batch plans against the stated outcome");
+  assert.equal(batches.inputs.plan[0].outcome, undefined, "the first batch states it");
 });
