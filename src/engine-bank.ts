@@ -43,6 +43,13 @@ export async function placementTurn(eng: Engine, dir: string, chatPath: string, 
     return { reply, changes: [], state, usage, local: true, tools };
   };
 
+  if (phase === "on" && /^skip (pretest|placement)[.!]?$/i.test(text)) {
+    chat.fm.placement = "done";
+    chat.fm.card = "";
+    chat.fm.queue = [];
+    chat.fm.pending_confidence = "";
+    return say("Pretest stopped. Unanswered questions were not marked. Press Continue to learn; you can practise independently later.", null);
+  }
   if (phase !== "on") {
     const fresh = !chat.messages.length && !text && Object.values(state.levels).every((l) => l === null);
     const queue = fresh ? placementQuestions(questions, state) : [];
