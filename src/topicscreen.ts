@@ -89,6 +89,13 @@ export class TopicScreen implements Screen {
     button(modes, { label: "Review", icon: "layers", tone: "ghost", onClick: () => v.go("review") });
     button(modes, { label: "Graph", icon: "git-fork", tone: "ghost", onClick: () => v.go("graph") });
 
+    // ----- the outcome the course was planned back from -----
+    if (topic.outcome) {
+      const goal = panel(page, "What this course builds to");
+      goal.tools.createSpan({ cls: "st-meta", text: "The task you should manage on your own at the end." });
+      v.md(goal.body.createDiv({ cls: "st-outcome" }), topic.outcome);
+    }
+
     // ----- concepts -----
     const concepts = panel(page, "Concepts");
     concepts.tools.createSpan({ cls: "st-meta", text: "Levels move only through marked answers." });

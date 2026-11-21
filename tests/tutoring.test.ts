@@ -1064,7 +1064,7 @@ test("code questions: the compiler keeps a coding exercise whose tests pass the 
     const input = JSON.parse(o.input);
     const props = o.jsonSchema.properties;
     let structured: unknown;
-    if (props.objectives) structured = { objectives: input.passages.filter((p: any) => !p.text.startsWith("#")).map((p: any) => ({ text: p.text.trim().slice(0, 120), references: [p.id], search: "" })) };
+    if (props.objectives) structured = { outcome: { task: "", criteria: [] }, objectives: input.passages.filter((p: any) => !p.text.startsWith("#")).map((p: any) => ({ text: p.text.trim().slice(0, 120), references: [p.id], search: "" })) };
     else if (props.units) {
       structured = { overview: "Functions return values.", subject: "none", units: input.objectives.map((ob: any, i: number) => ({
         objective: ob.id, name: "Writing a function", prerequisites: [], claims: ["A function returns its result."], example: "add(1, 2) returns 3.", misconceptions: [], details: "Define the function with def and return the result.",

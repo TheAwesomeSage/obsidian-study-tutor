@@ -60,8 +60,16 @@ export interface CompileMetrics {
   /** Hybrid only: passage selections sent to the main provider because the local reply failed its checks. */
   localEscalations?: number;
 }
+/** What the course is for: one task the learner should do unaided at the end, and how to tell it is done well. */
+export interface CourseOutcome {
+  task: string;
+  criteria: string[];
+}
+
 export interface StagedCourse {
   status: "complete" | "partial";
+  /** The planned outcome, when planning stated one. Absent on courses planned before backward design. */
+  outcome?: CourseOutcome;
   inventory: CompileObjective[];
   sourceRevisions: string[];
   lessons: DetailedLesson[];
@@ -135,7 +143,11 @@ const integer = { type: "integer" };
 const bool = { type: "boolean" };
 const arr = (items: Schema, maxItems: number): Schema => ({ type: "array", items, maxItems });
 const obj = (properties: Record<string, Schema>): Schema => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
-const PLAN = obj({ objectives: arr(obj({ text: str, references: arr(str, 24), search: str }), 150) });
+const PLAN = obj({ outcome: obj({ task: str, criteria: arr(str, 6) }), objectives: arr(obj({ text: str, references: arr(str, 24), search: str }), 150) });
+/** Bumped when the planning prompt changes, so a saved plan from before is asked again. */
+const PLAN_VERSION = "backward-1";
+/** The prompt's backward-design half: the outcome first, then what it needs, in teaching order. */
+const BACKWARD_RULE = "Plan backwards from the goal. First state the outcome: one task, in the goal's own setting, that the learner should be able to do unaided at the end, and up to six observable success criteria for it. Then list the objectives that task needs, in teaching order: prerequisites first; if the goal says where to start, that first; the abilities the task itself uses last. Every objective must serve the outcome; leave out what it does not need unless the sources or specification require it. For expansion, the outcome is the gap itself. Later batches of the same course may repeat the outcome or leave it empty.";
 const REVIEW = obj({ fetch: arr(obj({ objective: str, url: str }), 6), searches: arr(obj({ objective: str, query: str }), 4), inspect: arr(obj({ passage: str, offset: integer }), 5) });
 const DRAFT_QUESTION = obj({ type: { ...str, enum: ["short", "mcq", "open", "code"] }, question: str, options: arr(str, 4), answer: str, explanation: str, rubric: str, task: str, family: str, difficulty: integer, generator: str });
 // `code` is optional, so a reply written before coding exercises existed still passes.
@@ -372,6 +384,7 @@ export async function compileCourse(p: {
   const batches = short && original.length <= 100 ? [original.map(k => excerpt(k, k.text.length))] : planningBatches(planSource);
   if (!batches.length) batches.push([]);
   const inventory: CompileObjective[] = [];
+  let outcome: CourseOutcome | undefined;
   const indexed = new Map(original.map(x => [x.id, x]));
   const mapped = new Set<string>(), omitted = new Set<string>();
   const ordinals = new Map<string, number>();
@@ -386,15 +399,15 @@ export async function compileCourse(p: {
   for (const [i, batch] of batches.entries()) {
     notify(`Reading scope and objectives (${i + 1}/${batches.length})…`);
     const input = { ...target, passages: batch, materialInFull: short && i === 0 ? full : undefined, research: !!p.research };
-    const key = `plan-${digest(JSON.stringify([VERSION, stageAlias, input]))}`;
-    type Plan = { objectives: Omit<CompileObjective, "id">[] };
+    const key = `plan-${digest(JSON.stringify([VERSION, PLAN_VERSION, stageAlias, input]))}`;
+    type Plan = { outcome: CourseOutcome; objectives: Omit<CompileObjective, "id">[] };
     const cached = localRefused ? null : await checkpoint<Plan>(key, PLAN);
     const reused = !!cached;
     let plan = cached;
     if (!reused && !localRefused) {
       try {
         plan = await askJson<Plan>(
-          `Inventory the learning objectives before any lesson is written. Respect the stated scope and objective count. Map each testable clause to original passage IDs; use several objectives when a clause asks for distinct abilities. Treat steps of one worked example as one objective. Titles and explanatory context without learning requirements can be left unmapped. For research, propose a concise topical web query per objective, with no personal details, paths, or verbatim private note excerpts. For expansion choose at most four objectives within the gap. ${REFERENCE_RULE}`, input, PLAN);
+          `Inventory the learning objectives before any lesson is written. Respect the stated scope and objective count. Map each testable clause to original passage IDs; use several objectives when a clause asks for distinct abilities. Treat steps of one worked example as one objective. Titles and explanatory context without learning requirements can be left unmapped. For research, propose a concise topical web query per objective, with no personal details, paths, or verbatim private note excerpts. For expansion choose at most four objectives within the gap. ${BACKWARD_RULE} ${REFERENCE_RULE}`, input, PLAN);
       } catch (e) {
         stop();
         if (stageRoute !== "local") throw e;
@@ -403,6 +416,9 @@ export async function compileCourse(p: {
     }
     if (plan && !reused) await keep(key, plan);
     if (!plan && !localRefused) issues.push(`Objective inventory batch ${i + 1} could not be read.`);
+    // The first batch that states an outcome sets it: it is planned from the goal, which every batch shares.
+    const task = inline(plan?.outcome?.task ?? "", 400);
+    if (!outcome && task) outcome = { task, criteria: (plan?.outcome?.criteria ?? []).map(c => inline(c, 200)).filter(Boolean).slice(0, 6) };
     const allowed = new Set(batch.map(k => k.id));
     const mappedHere = new Set<string>();
     for (const row of plan?.objectives ?? []) {
@@ -645,7 +661,7 @@ export async function compileCourse(p: {
     const packetIds = new Set(packet.flatMap(x => x.passages.map(k => k.id)));
     const scopes = new Set(cohort.map(o => o.id));
     const inspectedHere = [...inspected.values()].filter(r => packetIds.has(r.passage)).slice(-3).flatMap(inspect);
-    const synthInput = { ...target, subjects: p.subjects, objectives: cohort, earlier: teachable.slice(Math.max(0, (i - 2) * OBJECTIVES_PER_SYNTHESIS), i * OBJECTIVES_PER_SYNTHESIS).map(o => ({ id: o.id, text: o.text })), packet, inspected: inspectedHere };
+    const synthInput = { ...target, outcome, subjects: p.subjects, objectives: cohort, earlier: teachable.slice(Math.max(0, (i - 2) * OBJECTIVES_PER_SYNTHESIS), i * OBJECTIVES_PER_SYNTHESIS).map(o => ({ id: o.id, text: o.text })), packet, inspected: inspectedHere };
     const synthKey = stageKey("synth", SYNTHESIS_VERSION, synthPrompt, SYNTHESIS, synthInput);
     let proposed = await reuse<Synthesis>(synthKey, SYNTHESIS);
     const synthReused = !!proposed;
@@ -754,11 +770,12 @@ export async function compileCourse(p: {
   stop();
   // In the local strategy a stage the local model could not do leaves the course partial, even where no objective records it.
   const status = !inventory.length || p.truncated || localGap || availability.some(a => a.gaps.length) ? "partial" : "complete";
-  const topicBody = [`# ${inline(p.title)}`, "## Overview", overview || "Compilation did not produce a verified overview.", "## Objectives",
+  const outcomeSection = outcome ? ["## Outcome", [outcome.task, ...(outcome.criteria.length ? ["", "Done well when:", ...outcome.criteria.map(c => `- ${c}`)] : [])].join("\n")] : [];
+  const topicBody = [`# ${inline(p.title)}`, "## Overview", overview || "Compilation did not produce a verified overview.", ...outcomeSection, "## Objectives",
     inventory.map(o => `- ${o.id}: ${o.text}`).join("\n"), "## Subskills", ...sections].join("\n\n");
   metrics.elapsedMs = Date.now() - start;
   if (strategy !== "local") metrics.mainModel = mainIdentity();
-  const staged: StagedCourse = { status, inventory, sourceRevisions: [...sourceKeys], lessons, availability, issues, metrics, expansion: p.expansion };
+  const staged: StagedCourse = { status, ...(outcome ? { outcome } : {}), inventory, sourceRevisions: [...sourceKeys], lessons, availability, issues, metrics, expansion: p.expansion };
   const verified = new Set([...availability.flatMap(a => a.questions), ...sealedChecked]);
   return { topicBody, questionsBody: questionSections.filter(s => verified.has(/^### (Q\d+)/.exec(s)?.[1] ?? "")).join("\n\n"), subject, staged, usage, calls };
 }

@@ -62,7 +62,9 @@ export function topicForPrompt(topic: Topic, focus: number | null, maxWords: num
   };
   if (current) include(current.n);
   const relevant = topic.subskills.filter(s => needed.has(s.n)).map(s => s.section).join("\n\n");
-  return [`# ${topic.title}`, "", topic.overview, "", "## Subskills (outline; focus and relevant prerequisites are shown in full)", outline, "", "## Focus subskill", relevant].join("\n");
+  // The outcome stays on a trimmed card: every turn teaches toward it.
+  const outcome = topic.outcome ? ["## Outcome", topic.outcome, ""] : [];
+  return [`# ${topic.title}`, "", topic.overview, "", ...outcome, "## Subskills (outline; focus and relevant prerequisites are shown in full)", outline, "", "## Focus subskill", relevant].join("\n");
 }
 
 /**

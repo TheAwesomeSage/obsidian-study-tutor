@@ -1206,7 +1206,7 @@ test("grow a question into a course: a broad reply offers Make this a course, th
     reqs.push(req);
     if (fail) throw new Error("the model is unavailable");
     const out = parseCompileOutput(COMPILED);
-    const dir = await plugin.store.saveCompiled({ title: req.title, fm: { source: req.mode, subject: out.subject, goal: req.goal, ...req.fm }, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
+    const dir = await plugin.store.saveCompiled({ title: req.title, fm: { source: req.mode, subject: out.subject, goal: req.goal, ...req.fm }, topicBody: out.topicBody.replace("## Subskills", "## Outcome\n\nDefend a lock-free queue design in a mock interview.\n\nDone well when:\n- Names the race each step prevents\n\n## Subskills"), questionsBody: out.questionsBody, target: 4 });
     return { dir, subskills: 1, questions: 1, usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, costUsd: 0, calls: 0 }, agents: 0 };
   };
 
@@ -1258,6 +1258,7 @@ test("grow a question into a course: a broad reply offers Make this a course, th
   await tick(60);
   assert.equal(root.getAttribute("data-screen"), "topic");
   assert.equal(view.dir, dir);
+  assert.match(root.textContent, /What this course builds to[\s\S]*Defend a lock-free queue design in a mock interview\.[\s\S]*Names the race each step prevents/, "the topic screen shows the outcome the course was planned back from");
 
   // A link to a topic that is gone offers to make the course again.
   const chat = await plugin.store.loadChat(chatPath);

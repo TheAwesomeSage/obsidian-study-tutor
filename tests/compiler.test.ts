@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CompileCancelled, STAGE_VERSIONS, checkpointKey, compileCourse, type CompilerCache } from "../src/compiler";
+import { parseTopic } from "../src/formats";
 import { canonicalPage, publicIPv4, readablePage, type ResearchProvider } from "../src/compile-research";
 import { indexSource, passageWindow } from "../src/compile-sources";
 import { Engine, type EngineSettings } from "../src/engine";
@@ -29,6 +30,8 @@ function fake(options: {
   omit?: string; uncovered?: boolean; review?: (input: any) => unknown; seen?: any[];
   /** Replace the synthesis or audit reply; each receives the input and the default reply. */
   synth?: (input: any, reply: any) => unknown; audit?: (input: any, reply: any) => unknown;
+  /** Replace the planned outcome. */
+  outcome?: { task: string; criteria: string[] };
 } = {}): Model {
   return async o => {
     const input = JSON.parse(o.input);
@@ -38,7 +41,7 @@ function fake(options: {
     let structured: unknown;
     if (props.objectives) {
       const lines = input.passages.filter((p: any) => !p.text.startsWith("#") && !p.text.includes(options.omit ?? "_not_omitted_"));
-      structured = { objectives: lines.length ? lines.map((p: any) => ({ text: p.text.trim().slice(0, 120), references: [p.id], search: `linear maps kernel ${p.line}` })) : input.mode === "subject" ? [{ text: "Compute a kernel", references: [], search: "linear maps kernel" }] : [] };
+      structured = { outcome: options.outcome ?? { task: "Find the kernel of a given linear map and explain what it says about the map", criteria: ["Sets T(v)=0 and solves", "States whether T is injective"] }, objectives: lines.length ? lines.map((p: any) => ({ text: p.text.trim().slice(0, 120), references: [p.id], search: `linear maps kernel ${p.line}` })) : input.mode === "subject" ? [{ text: "Compute a kernel", references: [], search: "linear maps kernel" }] : [] };
     } else if (props.fetch) {
       structured = options.review?.(input) ?? { fetch: input.candidates.slice(0, 1).map((h: any) => ({ objective: h.objective, url: h.url })), searches: [], inspect: [] };
     } else if (props.units) {
@@ -695,4 +698,28 @@ test("a question's generator is kept only when trusted code checks it and it giv
   assert.equal(kept.length, 1, "only the spec that reproduces the stated answer is kept");
   assert.equal(kept[0].generator?.answer, "x");
   assert.deepEqual([r.staged.metrics.generators, r.staged.metrics.generatorsRejected], [1, 2]);
+});
+
+test("backward design: planning states the outcome first, it heads the topic card and reaches synthesis, and objectives keep the planned order", async () => {
+  const c = counted();
+  const r = await run({ call: c.call });
+  assert.deepEqual(r.staged.outcome, { task: "Find the kernel of a given linear map and explain what it says about the map", criteria: ["Sets T(v)=0 and solves", "States whether T is injective"] });
+  assert.match(r.topicBody, /## Overview[\s\S]*## Outcome\n\nFind the kernel of a given linear map and explain what it says about the map\n\nDone well when:\n- Sets T\(v\)=0 and solves\n- States whether T is injective\n\n## Objectives/);
+  const topic = parseTopic(`---\ntutor: topic\ntitle: Linear maps\n---\n${r.topicBody}`);
+  assert.match(topic.outcome, /^Find the kernel[\s\S]*- States whether T is injective$/);
+  assert.equal(topic.subskills.length, r.staged.lessons.length, "the outcome section does not disturb the subskills");
+  assert.deepEqual(c.inputs.synth[0].outcome, r.staged.outcome, "lessons are written toward the outcome");
+
+  // The planning prompt asks for backward design.
+  const seen: string[] = [];
+  const call: Model = async (o) => { if (stageOf(o.system) === "plan") seen.push(o.system); return fake()(o); };
+  await run({ call });
+  assert.match(seen[0], /^Inventory the learning objectives[\s\S]*Plan backwards from the goal\. First state the outcome/);
+  assert.match(seen[0], /in teaching order: prerequisites first; if the goal says where to start, that first/);
+
+  // No outcome stated: no section, no field, and the course is otherwise the same.
+  const none = await run({ call: fake({ outcome: { task: "  ", criteria: ["ignored"] } }) });
+  assert.equal(none.staged.outcome, undefined);
+  assert.doesNotMatch(none.topicBody, /## Outcome/);
+  assert.equal(parseTopic(`---\ntitle: x\n---\n${none.topicBody}`).outcome, "");
 });

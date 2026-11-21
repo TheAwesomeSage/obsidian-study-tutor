@@ -196,6 +196,8 @@ export interface Topic {
   title: string;
   fm: Frontmatter;
   overview: string;
+  /** The `## Outcome` section: the task the course builds to and how to tell it is done well. Empty on older topics. */
+  outcome: string;
   subskills: Subskill[];
   body: string;
   /** Objectives listed under "## Objectives". Empty on cards compiled before 0.6. */
@@ -256,7 +258,7 @@ export function parseTopic(md: string): Topic {
     const o = readObjectiveLine(m[2]);
     objectives.push({ id: m[1], text: o.text, source: o.source, ...(o.exam ? { exam: o.exam } : {}) });
   }
-  return { title: fmStr(fm, "title") || (h1 ? h1[1].trim() : "Untitled"), fm, overview: section(body, "Overview"), subskills, body: body.trim(), objectives, ...(examDate ? { examDate } : {}) };
+  return { title: fmStr(fm, "title") || (h1 ? h1[1].trim() : "Untitled"), fm, overview: section(body, "Overview"), outcome: section(body, "Outcome"), subskills, body: body.trim(), objectives, ...(examDate ? { examDate } : {}) };
 }
 
 export interface CompileOutput {
