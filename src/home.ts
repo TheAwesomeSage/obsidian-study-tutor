@@ -3,7 +3,7 @@
 // else is one click further away.
 
 import { Notice, setIcon } from "obsidian";
-import { ago, recommend } from "./overview";
+import { ago, recommend, workloadForecast, workloadLine } from "./overview";
 import { ACTION_LABEL, Action } from "./policy";
 import type { Screen, TutorView } from "./view";
 import { button, chip, confirmAction, emptyState, iconButton, modeInfo, panel, progressBar, stampLabel } from "./ui";
@@ -27,6 +27,25 @@ export class HomeScreen implements Screen {
 
   refresh(): void {
     this.render();
+  }
+
+  /** A card under Suggested next for the first topic with a cold probe due. It appears once the statuses are read. */
+  private async showProbeDue(now: HTMLElement): Promise<void> {
+    const v = this.view;
+    for (const t of v.overview) {
+      let st;
+      try {
+        st = await v.plugin.engine.probeStatus(t.dir);
+      } catch {
+        continue;
+      }
+      if (this.el === null || !now.isConnected) return;
+      if (!st.due) continue;
+      const card = now.createEl("section", { cls: "st-card st-probe-due", attr: { "aria-label": `Cold probe due: ${t.title}` } });
+      card.createEl("h2", { cls: "st-card-title", text: `${t.title}: Cold probe due · ${st.count} question${st.count === 1 ? "" : "s"} · ${st.why}` });
+      button(card.createDiv({ cls: "st-actions" }), { label: "Start", icon: "arrow-right", onClick: () => void v.startProbe(t.dir) });
+      return;
+    }
   }
 
   private render(): void {
@@ -85,6 +104,8 @@ export class HomeScreen implements Screen {
       };
     }
 
+    void this.showProbeDue(now);
+
     // ----- ways in -----
     const ways = page.createEl("section", { cls: "st-ways", attr: { "aria-label": "Study modes" } });
     const head = ways.createDiv({ cls: "st-ways-head" });
@@ -108,6 +129,8 @@ export class HomeScreen implements Screen {
     tile("layers", "Review", due ? "Flashcards are due" : "Flashcards, no tokens", () => v.go("review"), due ? String(due) : "");
     tile("message-circle", "Ask", "Direct answers from your notes", () => void v.startStudy({ mode: "expert" }));
     tile("git-fork", "Knowledge graph", "Concepts and how they connect", () => v.go("graph"));
+    const work = workloadForecast(v.overview.map((t) => t.state), v.today, { countCards: !v.plugin.usesSr() });
+    ways.createDiv({ cls: "st-meta st-forecast", text: workloadLine(work), attr: { title: work.days.map((d) => `${d.day}: ${d.cards + d.checks} (${d.minutes} min)`).join("\n") } });
 
     // ----- topics and recent sessions -----
     const cols = page.createDiv({ cls: "st-cols" });

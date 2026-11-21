@@ -10,17 +10,23 @@
 //   4. the module's own validation passes (its maths, physics, reachability);
 //   5. the objective and question correspond to the source, and the hint does not give the answer.
 // A failure gets one repair attempt with the problems listed. A second failure is an invalid
-// record, saved so the same input is not tried again. Nothing here ever calls Claude.
+// record, saved so the same input is not tried again, and the caller offers the course's worked
+// example instead. A blueprint module (src/visuals/blueprints.ts) goes through the same steps:
+// its settings are the whole blueprint, and step 4 is the blueprint's own validator, which runs
+// it. Study-time configuration uses the local model and never calls Claude, and a model that
+// Ollama runs in the cloud, or that is not proven to run here, is refused before any call.
+// `provider: "main"` lets a caller that already uses the main provider (compilation) plan a
+// blueprint the same way.
 // Pure apart from the injected model and registry; no Obsidian imports.
 
 import { Schema, stringsIn, validateJson } from "./jsonschema";
-import { LocalModel, LocalModelError, LocalTiming } from "./ollama";
+import { LocalModel, LocalModelError, LocalTiming, locateLocal } from "./ollama";
 import { terms } from "./presentation";
 import { AssetDescriptor, GenerationResult, JsonObject, MissingCapability, ModuleDescriptor, ModuleRegistry, PresentationKind, PresentationRequest, SourceRef, VisualLesson, toValidationErrors } from "./visualcontract";
 import { contentHash } from "./formats";
 
 /** Bumped whenever the configuration prompt or output schema changes. Part of every cache key. */
-export const CONFIG_PROMPT_VERSION = "cfg-2";
+export const CONFIG_PROMPT_VERSION = "cfg-3";
 export const LESSON_SCHEMA_VERSION = 1;
 /** One repair attempt after a failed validation, then the record is final. */
 export const MAX_REPAIRS = 1;
@@ -59,8 +65,10 @@ export interface ActivityRecord {
   /** Local model calls made for this record: 0 for a code decision, 1, or 2 with a repair. */
   localCalls: number;
   repairs: number;
-  /** Always 0: configuration never calls Claude. Kept so reports can show it. */
-  claudeCalls: 0;
+  /** Main-provider calls (Claude Code or Codex): 0 for study-time configuration, which is local; 1 or 2 when a blueprint was planned with `provider: "main"`. */
+  claudeCalls: number;
+  /** Which model wrote the settings. Absent on records from before blueprints, which are all local. */
+  provider?: "local" | "main";
   /** The first answer from the local model passed every check. */
   firstPassValid: boolean | null;
   /** Why the presentation was chosen: explicit, difficulty or tutor. */
@@ -137,7 +145,7 @@ export const CONFIG_SYSTEM = [
   "Return one JSON object that matches the schema.",
   "- fits: true only if this module can show the idea in the excerpt as written. Otherwise return only fits: false and a short missingOperation. Leave out all lesson fields.",
   "- objective: what the learner should understand, in the excerpt's terms.",
-  "- settings: values inside the module's limits that make the excerpt's idea visible.",
+  "- settings: values inside the module's limits that make the excerpt's idea visible. For a blueprint module, settings is the whole blueprint: ids, short labels and steps as plain data, which the module's own code draws and runs.",
   "- predictionQuestion: one question the learner answers before running the activity. Do not state its answer.",
   "- hint: one nudge that does not give the answer.",
   "- missingOperation: empty when fits is true.",
@@ -167,6 +175,8 @@ export function configPrompt(req: PresentationRequest, d: ModuleDescriptor, asse
 const CODE = /<\s*script|javascript:|\beval\s*\(|\bfunction\s*\(|=>|\brequire\s*\(|\bimport\s*\(|new\s+Function|\$\{|<\s*iframe|\bon(click|load|error|focus|blur|change|input|submit|mouse\w*|key\w*|pointer\w*)\s*=/i;
 const PATHISH = /(^|\s)([a-z]:\\|\.\.\/|\/(usr|etc|home|var|bin)\/)|https?:\/\/|file:\/\//i;
 const LEAK = /\b(the answer is|answer:|it (will )?(equals?|is exactly)|=\s*-?\d)/i;
+/** Where a descriptor-tables blueprint names a file. */
+const BLUEPRINT_FILE = /^\$\.settings\.(files|steps)\[\d+\]\.path$/;
 
 /**
  * A module-owned question for an assessment, with {setting} placeholders filled from the
@@ -232,15 +242,18 @@ export function checkConfiguration(text: string, req: PresentationRequest, d: Mo
   // 2. ids
   if (!d.assessmentIds.includes(lesson.assessmentId)) errors.push(`$.assessmentId: ${lesson.assessmentId} is not an assessment of ${d.id}`);
   for (const id of lesson.assetIds) if (!assets.some((a) => a.id === id)) errors.push(`$.assetIds: ${id} is not an approved asset for ${d.id}`);
-  // 3. no code, links or paths anywhere
+  // 3. no code, links or paths anywhere. A descriptor blueprint names files as data, never opened;
+  // its validator holds them to short names, so only links are refused there.
   for (const s of stringsIn({ objective: lesson.objective, predictionQuestion: lesson.predictionQuestion, hint: lesson.hint, settings: lesson.settings })) {
+    const fileName = BLUEPRINT_FILE.test(s.path) && !/:\/\//.test(s.text);
     if (CODE.test(s.text)) errors.push(`${s.path}: looks like code, which is never accepted`);
-    else if (PATHISH.test(s.text)) errors.push(`${s.path}: contains a link or file path, which is never accepted`);
+    else if (!fileName && PATHISH.test(s.text)) errors.push(`${s.path}: contains a link or file path, which is never accepted`);
   }
-  // 4. the module's own checks
+  // 4. the module's own checks, then the module's own question when it writes one
   if (!errors.length) {
     const v = registry.validateLesson(lesson);
     if (!v.ok) errors.push(...v.errors.map((e) => `module ${d.id}: ${e}`));
+    else lesson.predictionQuestion = registry.questionFor?.(lesson) ?? lesson.predictionQuestion;
   }
   // 5. correspondence to the source, and no answer in the hint
   const source = terms(`${req.objective} ${req.sourceRefs.map((s) => s.excerpt).join(" ")}`);
@@ -266,16 +279,38 @@ export interface ConfigureInput {
   catalogVersion: string;
   trigger: string;
   now?: () => Date;
+  /** Which model `model` is: the local one (default), or the main provider wrapped by providerModel. */
+  provider?: "local" | "main";
+}
+
+/**
+ * The main provider (Claude Code or Codex) in the shape configuration uses, for a caller that
+ * already runs it, such as compilation planning a blueprint once. `send` returns the reply text;
+ * it is checked here exactly like a local reply. Timing is the wall time only.
+ */
+export function providerModel(model: string, send: (o: { system: string; user: string; schema: Schema; maxTokens: number }) => Promise<string>): LocalModel {
+  return {
+    model,
+    async chatJson(o) {
+      const started = Date.now();
+      const text = await send({ system: o.system, user: o.user, schema: o.schema, maxTokens: o.maxTokens ?? 400 });
+      const wallMs = Date.now() - started;
+      return { text, model, doneReason: "stop", timing: { wallMs, loadMs: 0, promptTokens: 0, promptMs: 0, evalTokens: 0, evalMs: 0, totalMs: wallMs } };
+    },
+  };
 }
 
 /**
  * Produces the activity record for one request: a code decision when nothing matches, or one
- * local model call plus at most one repair. The caller caches records that are not transient.
+ * model call plus at most one repair. The caller caches records that are not transient, and
+ * offers the worked example when a record is not ready.
  */
 export async function configureActivity(p: ConfigureInput): Promise<ActivityRecord> {
   const now = p.now ?? (() => new Date());
   const started = Date.now();
   const d = p.candidates[0];
+  const main = p.provider === "main";
+  const who = main ? "The model" : "The local model";
   const modelName = p.modelName ?? p.model?.model ?? "";
   const base = (over: Partial<ActivityRecord>): ActivityRecord => ({
     id: activityKey({ conceptId: p.conceptId, objective: p.request.objective, kind: p.request.kind, moduleId: d?.id ?? "", moduleVersion: d?.version ?? "", catalogVersion: p.catalogVersion, model: modelName, sourceRefs: p.request.sourceRefs }),
@@ -300,6 +335,7 @@ export async function configureActivity(p: ConfigureInput): Promise<ActivityReco
     localCalls: 0,
     repairs: 0,
     claudeCalls: 0,
+    provider: main ? "main" : "local",
     firstPassValid: null,
     trigger: p.trigger,
     selectionReason: p.request.reason,
@@ -309,7 +345,16 @@ export async function configureActivity(p: ConfigureInput): Promise<ActivityReco
 
   if (!d) return base({ status: "unsupported", reason: `No module can show this as a ${p.request.kind} yet.`, missingCapability: missing("") });
   if (!d.assessmentIds.length) return base({ status: "invalid", reason: `${d.id} declares no assessment, so it cannot be used for a lesson.`, validationErrors: ["descriptor has no assessmentIds"] });
-  if (!p.model) return base({ status: "invalid", reason: "Local configuration is switched off, and there is no saved activity for this.", validationErrors: ["no local model"], transient: true });
+  if (!p.model) return base({ status: "invalid", reason: main ? "No model is available to plan this, and there is no saved activity for it." : "Local configuration is switched off, and there is no saved activity for this.", validationErrors: [main ? "no model" : "no local model"], transient: true });
+  if (!main) {
+    // Local configuration is offered as running on this computer, so a model that is not proven
+    // local is refused: an Ollama cloud model would send the note excerpt to ollama.com.
+    const where = await locateLocal(p.model);
+    if (where.runs !== "local") {
+      const reason = where.runs === "cloud" ? `${where.detail}, so local configuration does not use it. Choose a model that runs on this computer.` : `Local configuration did not run: ${where.detail}.`;
+      return base({ status: "invalid", reason, validationErrors: [`local model: ${where.runs === "cloud" ? "cloud inference" : "not proven local"}`], transient: true });
+    }
+  }
 
   const assets = assetsFor(d, p.assets);
   const schema = generationSchema(d, assets);
@@ -324,28 +369,29 @@ export async function configureActivity(p: ConfigureInput): Promise<ActivityReco
   let calls = 0;
   const ask = async (text: string, temperature: number) => {
     calls++;
-    const r = await p.model!.chatJson({ system: CONFIG_SYSTEM, user: text, schema, temperature, maxTokens: 400, seed: 7 });
+    // A blueprint is longer than a few settings, so its module asks for a larger allowance.
+    const r = await p.model!.chatJson({ system: CONFIG_SYSTEM, user: text, schema, temperature, maxTokens: d.outputTokens ?? 400, seed: 7 });
     add(r.timing);
     return r;
   };
-  const done = (over: Partial<ActivityRecord>) => base({ ...over, localCalls: calls, timing: { wallMs: Date.now() - started, ...t } });
+  const done = (over: Partial<ActivityRecord>) => base({ ...over, localCalls: main ? 0 : calls, claudeCalls: main ? calls : 0, timing: { wallMs: Date.now() - started, ...t } });
 
   try {
     const first = await ask(user, 0.1);
     let c = checkConfiguration(first.text, p.request, d, assets, p.registry);
     const firstPassValid = !!c.lesson;
     let repairs = 0;
-    if (!c.fits) return done({ status: "unsupported", reason: `The local model judged that ${d.id} cannot show this.`, missingCapability: missing(c.missingOperation), firstPassValid: false });
+    if (!c.fits) return done({ status: "unsupported", reason: `${who} judged that ${d.id} cannot show this.`, missingCapability: missing(c.missingOperation), firstPassValid: false });
     for (; !c.lesson && repairs < MAX_REPAIRS; repairs++) {
-      const fix = `${user}\n\nYOUR PREVIOUS REPLY:\n${first.text.slice(0, 1500)}\n\nIT FAILED THESE CHECKS:\n${c.errors.slice(0, 8).map((e) => `- ${e}`).join("\n")}\n\nReturn a corrected JSON object.`;
+      const fix = `${user}\n\nYOUR PREVIOUS REPLY:\n${first.text.slice(0, Math.max(1500, (d.outputTokens ?? 0) * 4))}\n\nIT FAILED THESE CHECKS:\n${c.errors.slice(0, 8).map((e) => `- ${e}`).join("\n")}\n\nReturn a corrected JSON object.`;
       const again = await ask(fix, 0.2);
       c = checkConfiguration(again.text, p.request, d, assets, p.registry);
-      if (!c.fits) return done({ status: "unsupported", reason: `The local model judged that ${d.id} cannot show this.`, missingCapability: missing(c.missingOperation), repairs: repairs + 1, firstPassValid });
+      if (!c.fits) return done({ status: "unsupported", reason: `${who} judged that ${d.id} cannot show this.`, missingCapability: missing(c.missingOperation), repairs: repairs + 1, firstPassValid });
     }
     if (c.lesson) return done({ status: "ready", lesson: c.lesson, reason: p.request.reason, repairs, firstPassValid });
     return done({ status: "invalid", reason: `The configuration failed its checks ${repairs ? "after one repair" : ""}. A simpler explanation is used instead.`.replace(/ +\./, "."), validationErrors: c.errors.slice(0, 12), repairs, firstPassValid });
   } catch (e) {
     const err = e as LocalModelError;
-    return done({ status: "invalid", reason: err.message || "The local model failed.", validationErrors: [`local model: ${err.kind ?? "error"}`], transient: true, firstPassValid: null });
+    return done({ status: "invalid", reason: err.message || `${who} failed.`, validationErrors: [`${main ? "model" : "local model"}: ${err.kind ?? "error"}`], transient: true, firstPassValid: null });
   }
 }

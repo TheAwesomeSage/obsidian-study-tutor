@@ -2,6 +2,7 @@
 // the learner; levels and attempts live in the learner state and are joined to concepts by id.
 // Pure functions, no Obsidian imports.
 
+import { OBJECTIVE_REF } from "./evidence";
 import type { Topic } from "./formats";
 
 /**
@@ -38,6 +39,11 @@ export interface Concept {
   sources: string[];
   /** Dropped by a recompile. Kept so that old evidence still names something. */
   retired?: boolean;
+  /** The objective versions this concept teaches now, as "id@v" (objective-version.ts). */
+  objectives?: string[];
+  /** When an objective it teaches last changed materially, and how. A focused recheck follows. */
+  revisedAt?: string;
+  revisedWhy?: string;
 }
 
 export interface CourseEdge {
@@ -117,7 +123,12 @@ export function syncTopicGraph(prefix: string, topic: Topic, prev: TopicGraph | 
     idFor.set(sk.n, id);
   }
 
-  const concepts: Concept[] = topic.subskills.map((sk) => ({ id: idFor.get(sk.n)!, n: sk.n, name: sk.name, sources: sk.sources ?? [] }));
+  // Objective versions travel with the concept; a compile rewrites them from the course package.
+  const versionOf = (id: string): Partial<Concept> => {
+    const c = old.find((x) => x.id === id);
+    return c ? { ...(c.objectives ? { objectives: c.objectives } : {}), ...(c.revisedAt ? { revisedAt: c.revisedAt, revisedWhy: c.revisedWhy ?? "" } : {}) } : {};
+  };
+  const concepts: Concept[] = topic.subskills.map((sk) => ({ id: idFor.get(sk.n)!, n: sk.n, name: sk.name, sources: sk.sources ?? [], ...versionOf(idFor.get(sk.n)!) }));
   const live = new Set(concepts.map((c) => c.id));
   for (const c of old) if (!live.has(c.id)) concepts.push({ ...c, retired: true });
 
@@ -163,7 +174,11 @@ export function parseTopicGraph(md: string): TopicGraph | null {
     if (!g || !Array.isArray(g.concepts) || !Array.isArray(g.edges)) return null;
     const concepts: Concept[] = g.concepts
       .filter((c: Concept) => c && typeof c.id === "string" && Number.isInteger(c.n) && typeof c.name === "string")
-      .map((c: Concept) => ({ id: c.id, n: c.n, name: c.name, sources: Array.isArray(c.sources) ? c.sources.filter((s) => typeof s === "string") : [], ...(c.retired ? { retired: true } : {}) }));
+      .map((c: Concept) => ({
+        id: c.id, n: c.n, name: c.name, sources: Array.isArray(c.sources) ? c.sources.filter((s) => typeof s === "string") : [], ...(c.retired ? { retired: true } : {}),
+        ...(Array.isArray(c.objectives) ? { objectives: c.objectives.filter((x) => typeof x === "string" && OBJECTIVE_REF.test(x)).slice(0, 24) } : {}),
+        ...(typeof c.revisedAt === "string" && !Number.isNaN(Date.parse(c.revisedAt)) ? { revisedAt: c.revisedAt, revisedWhy: typeof c.revisedWhy === "string" ? c.revisedWhy.slice(0, 240) : "" } : {}),
+      }));
     const edges: CourseEdge[] = g.edges
       .filter((e: CourseEdge) => e && typeof e.from === "string" && typeof e.to === "string" && RELATIONS.includes(e.type))
       .map((e: CourseEdge) => ({ from: e.from, to: e.to, type: e.type, status: e.status === "reviewed" || e.status === "rejected" ? e.status : "inferred", source: typeof e.source === "string" ? e.source : "topic card", ...(typeof e.rationale === "string" ? { rationale: e.rationale.slice(0, 2000) } : {}), ...(typeof e.challenge === "string" ? { challenge: e.challenge.slice(0, 4000) } : {}) }));

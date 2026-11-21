@@ -6,9 +6,13 @@ import { CallResult, ModelCliError, Usage, addUsage } from "./claude";
 import { callModel, modelFor, type ModelRequest } from "./model-provider";
 import { dependentCounts } from "./course";
 import { Attempt, EVIDENCE_RULES, Grading, Outcome, checkDue, recordAttempt } from "./evidence";
-import { Chat, LearnerState, Mode, NextStep, Prereqs, Question, applyStateUpdate, chatWords, extractStateTrailer, fmList, fmStr, mastery, placementQuestions, prereqGaps, setLevel, ymd } from "./formats";
-import { ACTION_GUIDE, DEFAULT_WEIGHTS, Decision, POLICY_VERSION, PolicyInput, decide, homeStep } from "./policy";
+import { Move, coverageBrief, coverageOf, ideaLabel, ideaOf, nextMove } from "./coverage";
+import { secondsPerItem } from "./scheduler";
+import { Chat, LearnerState, Mode, NextStep, Prereqs, Question, Topic, dueCount, objectiveStamp, applyStateUpdate, chatWords, extractStateTrailer, fmList, fmStr, mastery, placementQuestions, prereqGaps, setLevel, ymd } from "./formats";
+import { ACTION_GUIDE, DEFAULT_WEIGHTS, Decision, POLICY_VERSION, PolicyInput, decide, examSignals, homeStep } from "./policy";
+import { bktShadow, mcqOptions } from "./bkt";
 import type { ResearchProvider } from "./compile-research";
+import type { CodeRunner } from "./codetask";
 import { LocalModel } from "./ollama";
 import { PRESENT_RULE, extractPresent, presentationNote, readPresentationRequest } from "./presentation";
 import { ModuleRegistry } from "./visualcontract";
@@ -21,6 +25,10 @@ import { ToolRegistry, ToolResult } from "./tools";
 import { NoteSourceStore, PASSAGE_RULE, Retrieval, SourceStore, extractPassageAsk, gapNote, renderRetrieval } from "./retrieval";
 import { activeDescriptions, applyObservation, courseMisconceptions, onConcept } from "./misconceptions";
 import { ATTEMPT_REASONING, parseReasoning } from "./reasoning";
+import { normaliseMark, withNote } from "./grading";
+import { reservedQuestions } from "./coursepkg";
+import { fadedFor, isBankId, pairedFor, taskOf } from "./bankvariants";
+import { baseQuestionId } from "./families";
 import { MoveDecision, REASON_TEXT, afterMark, chooseMove, moveBrief } from "./tutormove";
 import { CourseMaterial, lessonDepth } from "./lessondepth";
 import { CourseExpander, ExpansionRecord, GO_FURTHER, expansionNote, expansionRequest, inCourse } from "./expansion";
@@ -31,6 +39,8 @@ import * as bankFns from "./engine-bank";
 import * as compileFns from "./engine-compile";
 import * as expansionFns from "./engine-expansion";
 import * as markFns from "./engine-marks";
+import * as probeFns from "./engine-probe";
+import { probeStatus as probeStatusOf, type ProbeStatus } from "./probe";
 
 // The types, helpers and rules that used to sit in this file are still exported from it.
 export * from "./engine-common";
@@ -41,6 +51,11 @@ type Rest<F> = F extends (eng: Engine, ...a: infer A) => unknown ? A : never;
 export class Engine {
   /** The SymPy checker, when the plugin has one. Null in tests and wherever workers are unavailable. */
   maths: MathBackend | null = null;
+  /**
+   * Runs the learner's code for code questions (codetask.ts), when the host has a runner. Absent
+   * or null: a code answer goes to the grading call instead, and the attempt says it was not run.
+   */
+  codeRunner?: CodeRunner | null;
   /** Reads a source note by name, when the host can. Used for short source excerpts. */
   readNote: ((name: string) => Promise<string | null>) | null = null;
   /** Resolves a source note to its vault path and text, for activity provenance. Falls back to readNote. */
@@ -162,16 +177,23 @@ export class Engine {
   // ---------- the study policy ----------
 
   /** Everything the policy looks at, gathered into one plain object that can be logged and replayed. */
-  private policyInput(p: { mode: Mode; state: LearnerState; pre: Prereqs; chat: Chat; session: SessionRecord; intent: Intent; questions: Question[]; external: ExternalPrereq[] }): PolicyInput {
+  private policyInput(p: { mode: Mode; state: LearnerState; pre: Prereqs; chat: Chat; session: SessionRecord; intent: Intent; questions: Question[]; external: ExternalPrereq[]; topic?: Topic }): PolicyInput {
     const s = this.settings();
     const { state } = p;
     const today = this.today();
     const asked = fmList(p.chat.fm, "asked");
     const seenToday = new Set(state.attempts.filter((a) => a.timestamp.slice(0, 10) === today).map((a) => a.questionId));
+    const kept = reservedQuestions(p.questions);
     const dependents = dependentCounts(p.pre);
+    // Exam metadata scales priority (bounded, policy.ts); BKT rides along in shadow and is only logged.
+    const exam = p.topic ? examSignals(p.topic, today) : {};
+    const options = mcqOptions(p.questions);
     const skills = Object.keys(state.names).map(Number).sort((a, b) => a - b).map((n) => {
       const m = mastery(state, n);
       const e = m.evidence;
+      const shadow = bktShadow(state.attempts, n, options);
+      // Ideas the bank can ask (not only in a family kept for assessment) that no answer has touched.
+      const unasked = p.topic ? coverageOf(p.topic, p.questions, state, n).filter((i) => i.asked === 0 && i.questions.some((id) => !kept.has(id))) : [];
       return {
         n,
         name: state.names[n],
@@ -187,12 +209,17 @@ export class Engine {
         lapse: e.lapse,
         // Retention is measured from unaided work; helped answers do not renew it.
         daysSince: e.lastIndependent ? daysBetween(e.lastIndependent, today) : null,
-        bankLeft: s.bankQuiz === false ? 0 : p.questions.filter((q) => q.subskill === n && q.type !== "open" && !asked.includes(q.id) && !seenToday.has(q.id)).length,
+        bankLeft: s.bankQuiz === false ? 0 : p.questions.filter((q) => q.subskill === n && q.type !== "open" && !kept.has(q.id) && (q.generator ? asked.filter((id) => baseQuestionId(id) === q.id).length < 3 : !asked.includes(q.id) && !seenToday.has(q.id))).length,
+        faded: s.bankQuiz !== false && p.questions.some((q) => q.subskill === n && !kept.has(q.id) && !!(fadedFor(q, state, asked) ?? pairedFor(q, state, asked))),
         checkDue: (m.level ?? 0) >= 3 && checkDue(e, today),
         nextCheck: e.nextCheck,
+        ...(e.recheck ? { recheck: e.recheck.why } : {}),
         transferReady: !e.firstIndependentDay || e.firstIndependentDay < today,
         needsTeachBack: !e.teachBack,
         needsEdgeCase: !e.edgeCase,
+        ...(unasked.length ? { uncovered: unasked.length, uncoveredNames: unasked.slice(0, 2).map((i) => ideaLabel(i, 60)) } : {}),
+        ...(exam[n] ? { exam: exam[n] } : {}),
+        ...(shadow ? { shadow } : {}),
       };
     });
     return {
@@ -220,11 +247,11 @@ export class Engine {
     const state = await this.store.loadState(dir, s.targetLevel);
     const chat: Chat = { fm: {}, summary: "", messages: [] };
     const questions = await this.store.loadQuestions(dir);
-    const input = this.policyInput({ mode: "auto", state, pre: await this.store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions, external: await this.store.externalPrereqs(dir, state.target) });
+    const input = this.policyInput({ mode: "auto", state, pre: await this.store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions, external: await this.store.externalPrereqs(dir, state.target), topic });
     const decision = decide(input);
     const ns = Object.keys(state.names).map(Number);
-    const atTarget = ns.length > 0 && input.skills.every((k) => (k.level ?? 0) >= state.target && (k.level ?? 0) <= k.supported && !k.checkDue);
-    return { step: homeStep(decision, { due: due ?? Object.values(state.cards).filter((c) => c.due <= this.today()).length, atTarget }), decision };
+    const atTarget = ns.length > 0 && input.skills.every((k) => (k.level ?? 0) >= state.target && (k.level ?? 0) <= k.supported && !k.checkDue && !k.uncovered);
+    return { step: homeStep(decision, { due: due ?? dueCount(state, this.today()), atTarget }), decision };
   }
 
   /**
@@ -235,6 +262,7 @@ export class Engine {
   async study(dir: string, chatPath: string, message: string, opts: TurnOpts = {}): Promise<TurnResult> {
     const s = this.settings();
     const chat = await this.store.loadChat(chatPath);
+    if (fmStr(chat.fm, "probe") === "yes") return probeFns.probeTurn(this, dir, chatPath, message, opts);
     const mode = (fmStr(chat.fm, "mode", "tutor") as Mode) || "tutor";
     const placing = fmStr(chat.fm, "placement") === "on";
     if (mode === "tutor" && s.codePlacement !== false && (!chat.messages.length || placing)) {
@@ -268,7 +296,7 @@ export class Engine {
     const state = await this.store.loadState(dir, s.targetLevel);
     const session = sessionFor(chat, state, mode);
     return decide(
-      this.policyInput({ mode, state, pre: await this.store.prereqs(dir, topic), chat, session, intent: readIntent(message, !!session.pendingQuestion), questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target) }),
+      this.policyInput({ mode, state, pre: await this.store.prereqs(dir, topic), chat, session, intent: readIntent(message, !!session.pendingQuestion), questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target), topic }),
     );
   }
 
@@ -279,7 +307,7 @@ export class Engine {
     const state = await this.store.loadState(dir, s.targetLevel);
     if (n in state.names) state.focus = n;
     const chat: Chat = { fm: {}, summary: "", messages: [] };
-    const input = this.policyInput({ mode: "auto", state, pre: await this.store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target) });
+    const input = this.policyInput({ mode: "auto", state, pre: await this.store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target), topic });
     input.placementReady = false;
     return decide(input);
   }
@@ -336,6 +364,11 @@ export class Engine {
     return activityFns.recordActivityResult(this, ...a);
   }
 
+  /** See `planBlueprints` in engine-activities.ts. */
+  planBlueprints(...a: Rest<typeof activityFns.planBlueprints>): ReturnType<typeof activityFns.planBlueprints> {
+    return activityFns.planBlueprints(this, ...a);
+  }
+
   /** See `activityReport` in engine-activities.ts. */
   activityReport(...a: Rest<typeof activityFns.activityReport>): ReturnType<typeof activityFns.activityReport> {
     return activityFns.activityReport(this, ...a);
@@ -382,7 +415,7 @@ export class Engine {
     const external = await this.store.externalPrereqs(dir, state.target);
     let decision: Decision | null = null;
     if (mode === "auto" || mode === "teach") {
-      const input = this.policyInput({ mode, state, pre, chat, session, intent, questions: await this.store.loadQuestions(dir), external });
+      const input = this.policyInput({ mode, state, pre, chat, session, intent, questions: await this.store.loadQuestions(dir), external, topic });
       decision = decide(input);
       if (decision.focus !== null && decision.focus in state.names && decision.focus !== state.focus) {
         state.focus = decision.focus;
@@ -501,6 +534,19 @@ export class Engine {
     if (said && focusSkill && mode !== "quiz" && GO_FURTHER.test(said)) expansion = await this.requestExpansion(dir, expansionRequest({ kind: "extension", topicDir: dir, conceptId: focusConcept, conceptName: focusSkill.name, application: said, evidence: [], at: now }));
     const told = await this.expansionsToTell(dir, expansion);
     for (const rec of told) extras.push(expansionNote(rec));
+    // What the subskill asks, idea by idea, and whether the last answer says to build on its idea or move on (coverage.ts).
+    if (focusSkill && mode !== "expert") {
+      const bank = await this.store.loadQuestions(dir);
+      const cover = coverageOf(topic, bank, state, focusSkill.n);
+      const lastAttempt = [...state.attempts].reverse().find((a) => a.skill === focusSkill.n && !a.probe && a.result !== "ungraded");
+      const lastIdea = lastAttempt ? cover.find((i) => i.id === ideaOf({ question: lastAttempt.question }, cover)) ?? null : null;
+      // Probe timings are a ruler, not a lever: they never set what counts as a slow answer.
+      const typical = secondsPerItem(state.attempts.filter((a) => !a.probe));
+      const [builtId, builtN] = fmStr(chat.fm, "built").split(":");
+      const move: Move | null = lastAttempt && lastIdea ? nextMove({ attempt: lastAttempt, idea: lastIdea, typicalSeconds: typical.fallback ? null : typical.seconds, buildsInARow: builtId === lastIdea.id ? Number(builtN) || 0 : 0 }) : null;
+      const brief = coverageBrief(focusSkill.name, cover, lastIdea && move ? { idea: lastIdea, move } : null);
+      if (brief) extras.push(brief);
+    }
     extras.push(`# Session record\n${JSON.stringify(session)}`);
     if (decision) extras.push(`Instructional action: ${decision.action}. ${ACTION_GUIDE[decision.action]}\nWhy: ${decision.reason}${decision.suggestIndependent ? "\nThe learner looks ready to practise this unaided. Say so in one line and let them choose; stay in guided practice unless they switch." : ""}`);
     if (move) extras.push(moveBrief(move));
@@ -663,15 +709,25 @@ export class Engine {
           seconds: Number.isFinite(seconds) && seconds >= 0 && seconds <= MAX_ANSWER_SECONDS ? seconds : null,
           timestamp: answeredAt,
           grading: result === "skipped" ? "deterministic" : "model",
-          verification: result === "skipped" || checkedBySympy ? "verified" : "unverified",
+          // SymPy recomputing the reply's own results does not confirm the mark of the learner's answer.
+          verification: result === "skipped" ? "verified" : "unverified",
           assumptions: result === "skipped" ? "the learner skipped the question" : checkedBySympy ? `SymPy recomputed the results the reply states${report.numeric ? " (some only numerically, at sample points)" : ""}${report.unresolved ? `; ${report.unresolved} could not be checked` : ""}; the judgement of the reasoning is the model's` : "one model judgement, not independently checked",
           taskType: taskTypeFor(askedUnder, mode, tag),
           family: "",
+          ...objectiveStamp(state, skill),
         };
         // The result, the method and the assumptions, judged apart. SymPy's check of the reply is kept
         // beside the judgement: it recomputed the results the reply states, not the learner's method.
         const reasoning = tag && result !== "skipped" ? parseReasoning(tag.reasoning) : null;
         if (reasoning) marked.reasoning = checkedBySympy ? { ...reasoning, checks: [{ evaluated: "the results the tutor's reply states", kind: report.numeric ? "numeric" : "symbolic", outcome: true, assumptions: "SymPy recomputed the reply's results; it does not check the learner's method" }] } : reasoning;
+        // The tutor's mark is held to its own breakdown, as every other mark is (grading.ts).
+        if (marked.reasoning) {
+          const bankQ = isBankId(before.questionId) ? taskOf(await this.store.loadQuestions(dir), before.questionId)?.question : undefined;
+          const mark = normaliseMark({ proposed: marked.result, reasoning: marked.reasoning, rubric: bankQ?.rubric });
+          marked.mark = mark.basis;
+          marked.result = mark.result;
+          marked.note = withNote(marked.note, mark).slice(0, 400);
+        }
         // A check on a prerequisite in another topic is evidence about that concept. It is kept
         // with that topic's evidence, and counts neither for nor against the concept in focus.
         // The app knows when it set the question as such a check; otherwise the tutor's mark may
@@ -872,6 +928,17 @@ export class Engine {
     return compileFns.refresh(this, ...a);
   }
 
+  /** See `startProbe` in engine-probe.ts. */
+  startProbe(...a: Rest<typeof probeFns.startProbe>): ReturnType<typeof probeFns.startProbe> {
+    return probeFns.startProbe(this, ...a);
+  }
+
+  /** Whether a cold probe is due for a topic, and how past probes went. Changes nothing. */
+  async probeStatus(dir: string): Promise<ProbeStatus> {
+    const state = await this.store.loadState(dir, this.settings().targetLevel);
+    return probeStatusOf(await this.store.loadSealed(dir), state, this.today(), (await this.store.loadTopic(dir)).examDate);
+  }
+
   /** See `quizTurn` in engine-bank.ts. */
   quizTurn(...a: Rest<typeof bankFns.quizTurn>): ReturnType<typeof bankFns.quizTurn> {
     return bankFns.quizTurn(this, ...a);
@@ -880,7 +947,7 @@ export class Engine {
   async planFrom(dir: string, chat: Chat, state: LearnerState, mode: Mode, continuing: number | null): Promise<Decision> {
     const topic = await this.store.loadTopic(dir);
     const session = { ...sessionFor(chat, state, mode), pendingQuestion: "", completedStep: true };
-    const input = this.policyInput({ mode, state, pre: await this.store.prereqs(dir, topic), chat, session, intent: "none", questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target) });
+    const input = this.policyInput({ mode, state, pre: await this.store.prereqs(dir, topic), chat, session, intent: "none", questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target), topic });
     input.continuing = continuing;
     const decision = decide(input);
     void this.store.logDecision({ t: new Date().toISOString(), topic: topic.title, input, decision: { version: POLICY_VERSION, action: decision.action, focus: decision.focus, local: decision.local } });

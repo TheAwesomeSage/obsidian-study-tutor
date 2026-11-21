@@ -62,6 +62,11 @@ export interface ModuleRegistry {
   catalogVersion(): string;
   /** A fresh numeric variant made and checked by module code, when the module supports it. */
   createVariant(lesson: VisualLesson, seed: number): VisualLesson | null;
+  /**
+   * The question a module writes itself for a valid lesson, such as a blueprint module's question
+   * about the end of its run. Null when the module leaves the wording to its template or the model.
+   */
+  questionFor?(lesson: VisualLesson): string | null;
 }
 
 const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === "object" && !Array.isArray(x);
@@ -70,7 +75,7 @@ const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 
  * Wraps whatever the module side exports into the backend's registry shape. It accepts:
  *   validateLesson returning a boolean, { ok, errors }, { valid, errors }, or { ok:true, lesson };
  *   assessLesson returning a boolean, { correct, ... } or { ok, ... };
- *   missing listAssets, catalogVersion and createVariant.
+ *   missing listAssets, catalogVersion, createVariant and questionFor.
  * A thrown error inside module code becomes a validation error, never a crash of the turn.
  */
 export function adaptRegistry(raw: Record<string, unknown>): ModuleRegistry {
@@ -130,6 +135,14 @@ export function adaptRegistry(raw: Record<string, unknown>): ModuleRegistry {
       try {
         const v = call<unknown>("createVariant", lesson, seed);
         return isObj(v) ? (v as unknown as VisualLesson) : null;
+      } catch {
+        return null;
+      }
+    },
+    questionFor(lesson: VisualLesson): string | null {
+      try {
+        const q = call<unknown>("questionFor", lesson);
+        return typeof q === "string" && q.trim() ? q : null;
       } catch {
         return null;
       }

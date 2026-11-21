@@ -1,6 +1,14 @@
+import { addDays } from "./dates";
 import { Attempt, LevelChange, normaliseAttempt, skillEvidence, supportedLevel } from "./evidence";
 import type { Relation } from "./course";
 import type { Misconception } from "./misconceptions";
+import { reservedQuestions } from "./coursepkg";
+import { FamilySpec, isMistakeCard, parseFamilySpec } from "./families";
+import type { CodeTask } from "./codetask";
+import { decodeSolution, parseCodeTask, renderCodeTask } from "./codequestions";
+import { examDay, readObjectiveLine, type ObjectiveExam } from "./objective-meta";
+export type { ObjectiveExam } from "./objective-meta";
+import { FsrsMemory, ReviewEntry, SchedulerRecord, Sm2State, formatLog, formatMemory, parseLog, parseMemory, parseSchedulerRecord, reviewCard } from "./scheduler";
 // Parsing and serialising of the plugin's markdown files. Pure functions, no Obsidian imports.
 
 export type Mode = "auto" | "tutor" | "teach" | "quiz" | "expert";
@@ -70,10 +78,7 @@ export function ymd(d: Date = new Date()): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-export function addDays(day: string, n: number): string {
-  const [y, m, d] = day.split("-").map(Number);
-  return ymd(new Date(y, m - 1, d + n));
-}
+export { addDays };
 
 // ---------- frontmatter (a small YAML subset: scalars and string lists) ----------
 
@@ -184,6 +189,8 @@ export interface Objective {
   text: string;
   /** Where the objective comes from: a spec label, a [[note]] or a link. */
   source: string;
+  /** Exam metadata from the line, when it had any that read cleanly. */
+  exam?: ObjectiveExam;
 }
 export interface Topic {
   title: string;
@@ -193,6 +200,8 @@ export interface Topic {
   body: string;
   /** Objectives listed under "## Objectives". Empty on cards compiled before 0.6. */
   objectives?: Objective[];
+  /** The topic's exam date (yyyy-mm-dd), from `exam:` in the properties or an "Exam:" line under Objectives. */
+  examDate?: string;
 }
 
 const VISUAL_KINDS = ["text", "worked-example", "diagram", "simulation", "game", "external", "none"];
@@ -235,13 +244,19 @@ export function parseTopic(md: string): Topic {
     });
   });
   const objectives: Objective[] = [];
+  let examDate = ["exam", "exam-date", "exam_date", "examDate"].map((k) => examDay(fmStr(fm, k))).find((d) => d) ?? "";
   for (const line of section(body, "Objectives").split(/\r?\n/)) {
+    const day = /^\s*(?:[-*]\s+)?\**exam(?:\s+date)?\**\s*[:=]\**\s*(.+?)\s*$/i.exec(line);
+    if (day) {
+      examDate = examDate || (examDay(day[1]) ?? "");
+      continue;
+    }
     const m = /^\s*[-*]\s+\**([A-Za-z]?[\w.]*\d[\w.]*)\**\s*[:.)-]\s*(.+)$/.exec(line);
     if (!m) continue;
-    const src = /\s*\(([^()]*)\)\s*$/.exec(m[2]);
-    objectives.push({ id: m[1], text: (src ? m[2].slice(0, src.index) : m[2]).trim(), source: src ? src[1].trim() : "" });
+    const o = readObjectiveLine(m[2]);
+    objectives.push({ id: m[1], text: o.text, source: o.source, ...(o.exam ? { exam: o.exam } : {}) });
   }
-  return { title: fmStr(fm, "title") || (h1 ? h1[1].trim() : "Untitled"), fm, overview: section(body, "Overview"), subskills, body: body.trim(), objectives };
+  return { title: fmStr(fm, "title") || (h1 ? h1[1].trim() : "Untitled"), fm, overview: section(body, "Overview"), subskills, body: body.trim(), objectives, ...(examDate ? { examDate } : {}) };
 }
 
 export interface CompileOutput {
@@ -287,10 +302,21 @@ export interface Question {
   difficulty?: number;
   /** For open questions: what a full answer must contain, used when the answer is graded. */
   rubric?: string;
+  /** A bounded family spec (families.ts): code makes fresh numbers for this question and marks them. */
+  generator?: FamilySpec;
+  /**
+   * A coding exercise (codequestions.ts): the learner answers with source code, which is run
+   * against these tests when a runner is available. The question's type stays "open", so every
+   * path that does not know about code treats it as an answer for the grader; `answer` holds a
+   * reference solution.
+   */
+  code?: CodeTask;
+  /** Stable concept id; set only on sealed questions. */
+  concept?: string;
 }
 
-const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation", "family", "task", "difficulty", "rubric"] as const;
-const Q_TASKS = ["recall", "application", "transfer", "prediction", "explanation", "error-finding", "teach-back", "edge-case"];
+const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation", "family", "task", "difficulty", "rubric", "generator", "code", "concept"] as const;
+const Q_TASKS = ["recall", "application", "transfer", "prediction", "explanation", "error-finding", "teach-back", "edge-case", "probe"];
 
 const OPTION_LABEL = /^\(?[A-Za-z][.):]\s+/;
 
@@ -318,9 +344,12 @@ function normaliseMcq(options: string[], answer: string): { options: string[]; a
   return { options: texts.map((t, i) => `${letter(i)}. ${t}`), answer: letter(idx) };
 }
 
+/** A question heading as parseQuestions reads it: ##-####, an optional bold id, Q<n> or a sealed P<hex>. */
+export const Q_HEADING = /^#{2,4}\s+\**(Q\d+|P[0-9a-f]+)\**[.:]?[ \t]*$/m;
+
 export function parseQuestions(md: string): Question[] {
   const { body } = splitFrontmatter(md);
-  const parts = body.split(/^#{2,4}\s+\**(Q\d+)\**[.:]?[ \t]*$/m);
+  const parts = body.split(Q_HEADING);
   const out: Question[] = [];
   for (let i = 1; i + 1 < parts.length; i += 2) {
     const f: Record<string, string[]> = {};
@@ -358,7 +387,19 @@ export function parseQuestions(md: string): Question[] {
     if (family) q.family = family;
     if (Q_TASKS.includes(task)) q.task = task;
     if (Number.isInteger(difficulty) && difficulty >= 1 && difficulty <= 5) q.difficulty = difficulty;
+    if (get("concept")) q.concept = get("concept").slice(0, 80);
     if (get("rubric")) q.rubric = get("rubric").slice(0, 800);
+    // A spec that fails its checks is dropped: the question stays, with its own numbers only.
+    const generator = type === "short" && get("generator") ? parseFamilySpec(get("generator")) : null;
+    if (generator && "spec" in generator) q.generator = generator.spec;
+    // "code:" is a one-line JSON task. One that fails its checks is dropped, and the question
+    // stays an open one for the grader, with no tests to run.
+    const code = type !== "mcq" && get("code") ? parseCodeTask(get("code")) : null;
+    if (code && "task" in code) {
+      q.type = "open";
+      q.code = code.task;
+      q.answer = decodeSolution(q.answer);
+    }
     out.push(q);
   }
   return out;
@@ -394,11 +435,19 @@ export const mcqLetter = (s: string): string => (/[A-Za-z]/.exec(s)?.[0] ?? "").
 // ---------- learner state ----------
 
 export interface CardSched {
+  /** The day the card is next due, set by the scheduler the state records (scheduler.ts). */
   due: string;
+  // SM-2's own state, kept up to date whichever scheduler is active, so going back to SM-2 loses nothing.
   interval: number;
   ease: number;
   reps: number;
   lapses: number;
+  /** FSRS memory state, while FSRS schedules the card. */
+  fsrs?: FsrsMemory;
+  /** The latest reviews, oldest first. Absent on cards not reviewed since 0.10. */
+  log?: ReviewEntry[];
+  /** The SM-2 state just before `log[0]`, when the log does not begin at the card's first review. */
+  logFrom?: Sm2State;
 }
 export interface LearnerState {
   /** Every marked answer, with how it was marked. Kept in evidence.md beside the state file. */
@@ -411,6 +460,10 @@ export interface LearnerState {
   taught: Record<number, string>;
   /** Stable concept id of each subskill, filled in by the store from the course graph. */
   concepts: Record<number, string>;
+  /** Per subskill, the objective versions it teaches now ("id@v"), from the course graph. Attempts are stamped with them. */
+  objectiveRefs?: Record<number, string[]>;
+  /** Per subskill, the latest material change to an objective it teaches. Earlier evidence then needs a focused recheck. */
+  revisions?: Record<number, { at: string; why: string }>;
   /** Cross-topic links as 0.5.0 stored them. The store moves them into the course graph on load. */
   links?: { skill: number; topic: string; prerequisite: number }[];
   topic: string;
@@ -427,6 +480,8 @@ export interface LearnerState {
   /** Misconceptions as evidence-backed records, kept in evidence.md. Absent in states built before 0.9. */
   misconceptionRecords?: Misconception[];
   cards: Record<string, CardSched>;
+  /** The scheduler the card dates come from, and every switch. Absent: SM-2, as before 0.10. */
+  scheduler?: SchedulerRecord;
   newDate: string;
   newCount: number;
 }
@@ -481,8 +536,17 @@ export function setLevel(s: LearnerState, n: number, to: number | null, cause: s
 }
 
 /** The evidence for one subskill and the level it can hold. */
+/** What a subskill's evidence is measured against: its latest material objective change, if any. */
+export const revisionOf = (s: LearnerState, n: number): { at: string; why: string; refs?: string[] } | undefined => (s.revisions?.[n] ? { ...s.revisions[n], refs: s.objectiveRefs?.[n] } : undefined);
+
+/** The objective versions an attempt on this subskill assesses now, as a field to spread into it. Empty when the course has none recorded. */
+export const objectiveStamp = (s: LearnerState, n: number): { objectives?: string[] } => (s.objectiveRefs?.[n]?.length ? { objectives: [...s.objectiveRefs[n]] } : {});
+
+/** A subskill's evidence, measured against its latest material objective change. */
+export const evidenceOf = (s: LearnerState, n: number) => skillEvidence(s.attempts, n, revisionOf(s, n));
+
 export function mastery(s: LearnerState, n: number) {
-  const evidence = skillEvidence(s.attempts, n);
+  const evidence = evidenceOf(s, n);
   const supported = supportedLevel(evidence, n in s.taught);
   const level = s.levels[n] ?? null;
   return { level, evidence, supported, backed: level !== null && level <= supported };
@@ -495,7 +559,9 @@ export function progress(s: LearnerState): number {
   return Math.round((100 * sum) / (ns.length * s.target));
 }
 
-export const dueCount = (s: LearnerState, today: string): number => Object.values(s.cards).filter((c) => c.due <= today).length;
+/** The flashcards of a state: the bank's questions. A known mistake's card is checked inside quizzes and adaptive sessions, not in review, so it is left out of every count of cards to review. */
+export const reviewCards = (s: LearnerState): CardSched[] => Object.entries(s.cards).filter(([id]) => !isMistakeCard(id)).map(([, c]) => c);
+export const dueCount = (s: LearnerState, today: string): number => reviewCards(s).filter((c) => c.due <= today).length;
 
 export function serializeState(s: LearnerState, today: string): string {
   const fm: Frontmatter = {
@@ -513,6 +579,11 @@ export function serializeState(s: LearnerState, today: string): string {
   };
   // Links not yet moved into the course graph are written back, so a failed migration loses nothing.
   if (s.links?.length) fm.links = JSON.stringify(s.links);
+  if (s.scheduler) {
+    fm.scheduler = `${s.scheduler.id}@${s.scheduler.version}`;
+    if (s.scheduler.retention !== undefined) fm.retention = s.scheduler.retention;
+    if (s.scheduler.switches.length) fm.scheduler_switches = JSON.stringify(s.scheduler.switches);
+  }
   const cell = (t: string) => t.replace(/\|/g, "/");
   const lines = ["## Skill map", "", "| # | Subskill | Level | Bank |", "| --- | --- | --- | --- |"];
   for (const n of Object.keys(s.names).map(Number).sort((a, b) => a - b)) {
@@ -520,8 +591,8 @@ export function serializeState(s: LearnerState, today: string): string {
     lines.push(`| ${n} | ${cell(s.names[n])} | ${s.levels[n] ?? "-"} | ${b.right}/${b.total} |`);
   }
   lines.push("", "## Misconceptions", "", ...(s.misconceptions.length ? s.misconceptions.map((m) => `- ${m}`) : ["None recorded."]));
-  lines.push("", "## Review schedule", "", "| Card | Due | Interval | Ease | Reps | Lapses |", "| --- | --- | --- | --- | --- | --- |");
-  for (const [id, c] of Object.entries(s.cards)) lines.push(`| ${id} | ${c.due} | ${c.interval} | ${c.ease} | ${c.reps} | ${c.lapses} |`);
+  lines.push("", "## Review schedule", "", "| Card | Due | Interval | Ease | Reps | Lapses | FSRS | Log |", "| --- | --- | --- | --- | --- | --- | --- | --- |");
+  for (const [id, c] of Object.entries(s.cards)) lines.push(`| ${id} | ${c.due} | ${c.interval} | ${c.ease} | ${c.reps} | ${c.lapses} | ${formatMemory(c.fsrs)} | ${formatLog(c)} |`);
   return withFrontmatter(fm, lines.join("\n") + "\n");
 }
 
@@ -565,8 +636,14 @@ export function parseState(md: string): LearnerState {
   }
   for (const r of tableRows(section(body, "Review schedule"))) {
     if (!r[0] || !/^\d{4}-\d{2}-\d{2}$/.test(r[1] ?? "")) continue;
-    s.cards[r[0]] = { due: r[1], interval: Number(r[2]) || 0, ease: Number(r[3]) || 2.5, reps: Number(r[4]) || 0, lapses: Number(r[5]) || 0 };
+    // Files from before 0.10 have the first six columns only.
+    const c: CardSched = { due: r[1], interval: Number(r[2]) || 0, ease: Number(r[3]) || 2.5, reps: Number(r[4]) || 0, lapses: Number(r[5]) || 0 };
+    const mem = parseMemory(r[6] ?? "");
+    if (mem) c.fsrs = mem;
+    s.cards[r[0]] = { ...c, ...parseLog(r[7] ?? "") };
   }
+  const scheduler = parseSchedulerRecord(fmStr(fm, "scheduler"), fmNum(fm, "retention", NaN), fmStr(fm, "scheduler_switches"));
+  if (scheduler) s.scheduler = scheduler;
   return s;
 }
 
@@ -655,39 +732,24 @@ export function applyStateUpdate(s: LearnerState, u: StateUpdate, opts: { levels
   return changes;
 }
 
-// ---------- spaced repetition (SM-2 style) ----------
+// ---------- spaced repetition (scheduler.ts) ----------
 
 export type Grade = "again" | "hard" | "good" | "easy";
 
-export function schedule(prev: CardSched | undefined, grade: Grade, today: string): CardSched {
-  const c: CardSched = prev ? { ...prev } : { due: today, interval: 0, ease: 2.5, reps: 0, lapses: 0 };
-  if (grade === "again") {
-    c.reps = 0;
-    c.lapses += 1;
-    c.interval = 0;
-    c.ease = Math.max(1.3, c.ease - 0.2);
-  } else {
-    if (grade === "hard") {
-      c.interval = Math.max(1, Math.round(c.interval * 1.2));
-      c.ease = Math.max(1.3, c.ease - 0.15);
-    } else if (grade === "good") {
-      c.interval = c.reps === 0 ? 1 : c.reps === 1 ? 3 : Math.max(c.interval + 1, Math.round(c.interval * c.ease));
-    } else {
-      c.interval = c.reps === 0 ? 3 : Math.max(c.interval + 2, Math.round(c.interval * c.ease * 1.3));
-      c.ease = c.ease + 0.15;
-    }
-    c.reps += 1;
-  }
-  c.ease = Math.round(c.ease * 100) / 100;
-  c.due = addDays(today, c.interval);
-  return c;
+/**
+ * One review of a card. `using` is the learner state's scheduler record; without it the card is
+ * scheduled by SM-2, exactly as before 0.10. The review is logged on the card either way.
+ */
+export function schedule(prev: CardSched | undefined, grade: Grade, today: string, using?: SchedulerRecord): CardSched {
+  return reviewCard(prev, grade, today, using);
 }
 
-/** Due cards first, then unseen cards up to today's remaining allowance. */
+/** Due cards first, then unseen cards up to today's remaining allowance. Families kept for assessment are never new cards. */
 export function reviewQueue(questions: Question[], s: LearnerState, today: string, newPerDay: number): Question[] {
   const due = questions.filter((q) => s.cards[q.id] && s.cards[q.id].due <= today);
   const used = s.newDate === today ? s.newCount : 0;
-  const fresh = questions.filter((q) => !s.cards[q.id]).slice(0, Math.max(0, newPerDay - used));
+  const kept = reservedQuestions(questions);
+  const fresh = questions.filter((q) => !s.cards[q.id] && !kept.has(q.id)).slice(0, Math.max(0, newPerDay - used));
   return [...due, ...fresh];
 }
 
@@ -696,6 +758,8 @@ export function reviewQueue(questions: Question[], s: LearnerState, today: strin
 export function formatQuizQuestion(q: Question, s: LearnerState): string {
   const head = `**${s.names[q.subskill] ?? "Question"}**\n\n${q.question}`;
   if (q.type === "mcq") return `${head}\n\n${q.options.map((o) => `- ${o}`).join("\n")}\n\n*Reply with a letter.*`;
+  // A code question shows its visible tests and starting code; hidden tests only after marking.
+  if (q.code) return `${head}\n\n${renderCodeTask(q.code)}`;
   return head;
 }
 
@@ -719,9 +783,12 @@ export const looksLikeQuestion = (reply: string): boolean => /\?\s*$/.test(reply
 /** One code-markable question per subskill, for placing a new learner without a model. */
 export function placementQuestions(questions: Question[], s: LearnerState): Question[] {
   const out: Question[] = [];
+  // Placement leaves the families kept for assessment unseen when the subskill has another.
+  const kept = reservedQuestions(questions);
+  const pick = (qs: Question[]) => qs.find((x) => x.type === "mcq") ?? qs.find((x) => x.type === "short");
   for (const n of Object.keys(s.names).map(Number).sort((a, b) => a - b)) {
     const mine = questions.filter((q) => q.subskill === n);
-    const q = mine.find((x) => x.type === "mcq") ?? mine.find((x) => x.type === "short");
+    const q = pick(mine.filter((x) => !kept.has(x.id))) ?? pick(mine);
     if (q) out.push(q);
   }
   return out;
@@ -797,7 +864,8 @@ function srBlocks(md: string): { front: string; tail: string }[] {
  */
 export function buildSrNote(questions: Question[], tag: string, existing = ""): string {
   const kept = new Map(srBlocks(existing).map((b) => [srKey(b.front), b.tail]));
-  const cards = questions.map((q) => {
+  const held = reservedQuestions(questions);
+  const cards = questions.filter((q) => !held.has(q.id)).map((q) => {
     const front = srSafe(q.question) + (q.options.length ? "\n" + q.options.map((o) => `- ${srSafe(o)}`).join("\n") : "");
     const back = srSafe(answerText(q)) + (q.explanation ? "\n" + srSafe(q.explanation) : "");
     const tail = kept.get(srKey(front));

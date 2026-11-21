@@ -1,4 +1,5 @@
 import { addUsage } from "./claude";
+import { daysBetween } from "./dates";
 import { sessionFor } from "./session";
 import { questionKey } from "./evidence";
 // The knowledge graph screen: every concept from every topic on one map, with search, filters,
@@ -17,6 +18,7 @@ import { GEdge, GGroup, GNode, GraphCanvas, GraphColors } from "./graphcanvas";
 import { layoutGraph } from "./graphlayout";
 import { ago } from "./overview";
 import { ACTION_LABEL, Decision } from "./policy";
+import { bktTrace, brierComparison, comparisonLine, mcqOptions, shadowLine } from "./bkt";
 import type { Screen, TutorView } from "./view";
 import { button, chip, emptyState, iconButton, levelPips, pct } from "./ui";
 
@@ -255,7 +257,7 @@ export class GraphScreen implements Screen {
       } else if (this.mode === "recency") {
         if (!e?.last) n.hollow = true;
         else {
-          const days = Math.max(0, Math.round((Date.parse(v.today) - Date.parse(e.last.slice(0, 10))) / 86400000));
+          const days = Math.max(0, daysBetween(e.last, v.today));
           n.color = seq(days <= 2 ? 6 : days <= 7 ? 5 : days <= 14 ? 4 : days <= 30 ? 3 : 2);
         }
       } else {
@@ -556,15 +558,20 @@ export class GraphScreen implements Screen {
       capability.createDiv({ text: e.independent === 0 ? "Independent application has not been demonstrated yet." : `${e.independentCorrect} of ${e.independent} unaided answers were correct. ${m.backed ? "The recorded level is backed by your evidence." : "More independent evidence is needed before relying on the recorded level."}` });
       if (e.last) capability.createDiv({ cls: "st-meta", text: `Last marked practice: ${ago(e.last, v.today)}. Helped work is counted separately.` });
       // The concept's delayed check comes from unaided work only (evidence.ts, CHECK_INTERVALS).
-      if (e.nextCheck) capability.createDiv({ cls: "st-meta", text: e.nextCheck <= v.today ? `An unaided check is due now (since ${e.nextCheck}).` : `Next unaided check: ${e.nextCheck}.` });
+      if (e.recheck) capability.createDiv({ cls: "st-meta st-warn-text", text: `Recheck due: an objective changed materially on ${e.recheck.since.slice(0, 10)} (${e.recheck.why}). Earlier answers are kept; one unaided answer on the new version is needed.` });
+      else if (e.nextCheck) capability.createDiv({ cls: "st-meta", text: e.nextCheck <= v.today ? `An unaided check is due now (since ${e.nextCheck}).` : `Next unaided check: ${e.nextCheck}.` });
 
       // The suggested activity, with its reason. Asked of the same policy the study screen uses.
       const next = p.createDiv({ cls: "st-graph-next" });
       next.createDiv({ cls: "st-kicker", text: "Suggested next" });
       const adviceEl = next.createDiv({ cls: "st-card-text", text: "…" });
+      const examEl = next.createDiv({ cls: "st-meta" });
       const show = (d: Decision) => {
         const on = d.focus !== null && d.focus !== c.n ? ` on ${s.names[d.focus] ?? "another concept"}` : "";
         adviceEl.setText(`${ACTION_LABEL[d.action]}${on}. ${d.reason}`);
+        // What the exam says about this concept, and how far it moved the ranking (policy.ts, examEffect).
+        const ex = d.scores.find((x) => x.n === c.n)?.exam;
+        examEl.setText(ex ? `Exam: ${ex.about || "metadata given"}. ${ex.note || "It does not change the ranking here."}` : "");
       };
       const cached = this.advice.get(c.id);
       if (cached) show(cached);
@@ -598,6 +605,13 @@ export class GraphScreen implements Screen {
         const errs = Object.entries(e.errors).sort((a, b) => b[1] - a[1]);
         if (errs.length) row("Errors", errs.map(([t, k]) => `${k} ${t}`).join(" · "));
         if (e.ungraded || e.disputed) row("Not counted", [`${e.ungraded} unmarked`, `${e.disputed} disputed`].join(" · "));
+        // Knowledge tracing in shadow (bkt.ts): shown and scored, never used to choose or to set a level.
+        dl.createEl("dt", { text: "BKT (shadow)" });
+        const bktEl = dl.createEl("dd", { text: "…" });
+        void v.plugin.store.loadQuestions(c.topic).then(mcqOptions, () => ({})).then((options) => {
+          const t = bktTrace(s.attempts, c.n, { options });
+          bktEl.setText(`${shadowLine(t)}. ${comparisonLine(brierComparison([t]))}.`);
+        });
         if (e.independent >= MIN_ESTIMATE_N) ev.createDiv({ cls: "st-meta", text: `The estimate is the chance that ${PREDICTION_TARGET}. Your own confidence is kept separate and never changes a level.` });
         if (m.level !== null && m.level < 5 && m.backed) {
           const need = missingFor(e, m.level + 1, c.n in s.taught);

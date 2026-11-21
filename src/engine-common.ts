@@ -3,6 +3,7 @@
 // Obsidian imports.
 
 import { Usage } from "./claude";
+import { daysBetween as dayGap } from "./dates";
 import type { ModelProviderSettings } from "./model-provider";
 import { Attempt, Grading, TASK_TYPES, TaskType } from "./evidence";
 import { Chat, Frontmatter, LearnerState, Mode, Question, SourceMode, Topic, fmStr, mastery, setLevel, words } from "./formats";
@@ -20,6 +21,8 @@ import { REASONING_SCHEMA } from "./reasoning";
 import { MoveDecision } from "./tutormove";
 import { Depth } from "./lessondepth";
 import { ExpansionRecord } from "./expansion";
+import { questionFamilies } from "./coursepkg";
+import { baseQuestionId } from "./families";
 
 /** The grading schema with the reasoning breakdown added. Only the overall mark is required, so a grader that gives no breakdown is read as before. */
 export const GRADE_REASONING_SCHEMA = { ...GRADE_SCHEMA, properties: { ...GRADE_SCHEMA.properties, reasoning: REASONING_SCHEMA } };
@@ -85,6 +88,8 @@ export interface EngineSettings extends ModelProviderSettings {
   minutes?: number;
   /** Configure existing visual modules with the local model when no saved configuration fits. Default on. */
   localActivities?: boolean;
+  /** Plan diagrams and simulations at compile time with the main provider ("main" compile strategy only). Default on. */
+  compileBlueprints?: boolean;
   /** The local model's name (Ollama tag). Part of every activity cache key. */
   localModel?: string;
 }
@@ -208,7 +213,7 @@ export const ERROR_TYPES = ["conceptual", "procedural", "arithmetic", "notation"
 /** The learner is pointing back at something said before this part of the chat. */
 export const LOOKS_BACK = /\b(earlier|before|previous(ly)?|last time|you said|you told|we (did|covered|talked|discussed|went over)|remind me|go back|at the start)\b/i;
 
-export const daysBetween = (from: string, to: string): number => Math.max(0, Math.round((Date.parse(to + "T00:00:00") - Date.parse(from.slice(0, 10) + "T00:00:00")) / 86400000));
+export const daysBetween = (from: string, to: string): number => Math.max(0, dayGap(from, to));
 
 /** What kind of evidence a SymPy comparison is, read from how it reached its verdict. */
 export function equivalenceKind(detail: string): { grading: Grading; assumptions: string } {
@@ -225,7 +230,7 @@ export function equivalenceKind(detail: string): { grading: Grading; assumptions
  */
 export function applyAttempt(s: LearnerState, a: Attempt): string[] {
   const out: string[] = [];
-  if (!(a.skill in s.names) || a.result === "ungraded" || a.verification === "disputed" || a.grading === "self") return out;
+  if (a.probe || !(a.skill in s.names) || a.result === "ungraded" || a.verification === "disputed" || a.grading === "self") return out;
   const m = mastery(s, a.skill);
   const current = s.levels[a.skill] ?? null;
   const push = (line: string | null) => {
@@ -247,14 +252,37 @@ export function applyAttempt(s: LearnerState, a: Attempt): string[] {
   return out;
 }
 
-/** The next bank question: weakest subskill first, due cards before unseen ones, never one asked in this chat or already answered today. */
-export function pickQuizQuestion(questions: Question[], s: LearnerState, asked: string[], today: string): Question | null {
-  const seenToday = new Set(s.attempts.filter((a) => a.timestamp.slice(0, 10) === today).map((a) => a.questionId));
-  const left = questions.filter((q) => !asked.includes(q.id));
+/** What a bank question is for: practice, a delayed check of what was learnt, or a fresh application. */
+export type BankPurpose = "practice" | "retrieval" | "transfer";
+
+/**
+ * The next bank question: weakest subskill first, due cards before unseen ones, never one asked
+ * in this chat or already answered today. Practice never takes a question from a family kept
+ * for assessment (questionFamilies). A retrieval check may, but only when nothing else is left.
+ * A transfer check takes a kept family the learner has not met first, then any family they have
+ * not met, since only an unmet family can show transfer. A question with a generator may come
+ * back up to three times in a chat, each time with new numbers (bankvariants.ts). `rank` orders
+ * questions after the weakest subskill: lower first.
+ */
+export function pickQuizQuestion(questions: Question[], s: LearnerState, asked: string[], today: string, opts: { purpose?: BankPurpose; only?: (q: Question) => boolean; rank?: (q: Question) => number } = {}): Question | null {
+  const purpose = opts.purpose ?? "practice";
+  const met = new Set(s.attempts.map((a) => baseQuestionId(a.questionId)));
+  const kept = new Set<string>();
+  const unmet = new Set<string>();
+  for (const f of questionFamilies(questions)) {
+    if (f.reserved) f.questions.forEach((id) => kept.add(id));
+    if (!f.questions.some((id) => met.has(id))) f.questions.forEach((id) => unmet.add(id));
+  }
+  const seenToday = new Set(s.attempts.filter((a) => a.timestamp.slice(0, 10) === today).map((a) => baseQuestionId(a.questionId)));
+  const times = (q: Question) => asked.filter((id) => baseQuestionId(id) === q.id).length;
+  const left = questions.filter((q) => times(q) < (q.generator ? 3 : 1) && (!opts.only || opts.only(q)) && (purpose !== "practice" || !kept.has(q.id)));
   if (!left.length) return null;
   const level = (q: Question) => s.levels[q.subskill] ?? 0;
+  const fresh = (q: Question) => (purpose === "transfer" ? (unmet.has(q.id) ? (kept.has(q.id) ? 0 : 1) : 2) : kept.has(q.id) ? 1 : 0);
   const order = (q: Question) => (seenToday.has(q.id) ? 3 : s.cards[q.id] ? (s.cards[q.id].due <= today ? 0 : 2) : 1);
-  return [...left].sort((a, b) => level(a) - level(b) || order(a) - order(b))[0];
+  // `rank` puts questions on ideas not yet asked first (coverage.ts); without it only level, freshness and due date decide.
+  const rank = opts.rank ?? (() => 0);
+  return [...left].sort((a, b) => level(a) - level(b) || rank(a) - rank(b) || fresh(a) - fresh(b) || order(a) - order(b))[0];
 }
 
 /** Picks the texts that share the most words with the query, in their original order, within a word budget. */

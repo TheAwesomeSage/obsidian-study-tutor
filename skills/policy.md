@@ -71,11 +71,19 @@ Further rules:
 
 "At target" is only said when every level at target is backed by this evidence. A level carried over from an older version, or set by a single placement question, is shown as not yet backed and is checked before it is trusted.
 
+## Covering every idea (policy version 4)
+
+A subskill is made of ideas: the objectives it teaches when the card gives it two or more, otherwise the claims on its card. Code keeps which of them the learner's answers have touched. At target, a subskill that has an idea its bank can ask and that no answer has touched is not done: the next step is practice on that idea. This never changes a level. Within a subskill, the next question prefers an idea not yet asked.
+
+After each answer the next question either builds on it or moves on. It builds on it, staying on the same idea from another angle, when the answer had help or showed the answer, was wrong or partly right, or was right but the learner said they were unsure, or right but much slower than their usual and not sure. It moves on when the answer was right and sure, when the idea has two unaided right answers, or after two follow-ups on one idea in a row. Confidence is self-reported, so it never decides against the mark, and it never moves a level.
+
 ## Estimates and confidence
 
 The estimate shown for a concept is the chance that **the next unaided first answer on that concept is fully correct**. It is the smoothed share of unaided answers that were correct, it is labelled provisional, and it is not shown at all with fewer than three unaided answers.
 
 Your stated confidence is compared with the same yes-or-no outcome. The Brier score is the mean squared gap between the two, where lower is better, and it is not shown with fewer than three rated answers. Your confidence, the plugin's estimate and the level are three separate things.
+
+A fourth number, labelled **BKT (shadow, not used for decisions)**, is a standard knowledge-tracing model run alongside for comparison. It learns only from the same unaided answers, and its predictions are scored against what happened next, next to the estimate's. Nothing uses it to choose a step or set a level.
 
 ## Choosing what to do next
 
@@ -84,6 +92,8 @@ Adaptive mode and the home screen rank concepts with a score:
 `score = gap × (1 + exam × priority + prerequisite × dependents + errors × recent errors + uncertainty × lack of evidence + recency × time since unaided practice + time × fit to the time you have)`
 
 The weights are in settings. They only rank suggestions; they cannot change a level.
+
+When a topic card's objectives give exam metadata (a share of the marks, a paper, command words, typical marks and minutes, an exam date), a concept's priority is scaled by it, never by more than ×1.5 or less than ×0.75: its share of the marks counts against the topic's average, and an exam within 60 days adds up to a quarter. The reason shown says when this happened and by how much. Unaided practice on a concept with typical minutes suggests answering in that time, as in the exam, when you have that long. The syntax is in the plugin's docs/OBJECTIVE-METADATA.md.
 
 Explicit rules come before the ranking, in this order:
 
@@ -96,6 +106,18 @@ Explicit rules come before the ranking, in this order:
 7. On the way to level 5, Adaptive asks you to teach the idea back and to handle an edge case.
 
 The home screen's suggestion is the decision Adaptive study would make first on that topic, so the two always agree. Flashcards are item recall, kept apart from concept evidence: they come first only when nothing pressing (a lapse, a due delayed check, an unchecked prerequisite) is waiting.
+
+## Cold probes
+
+A cold probe asks sealed questions: ones the compile wrote and kept out of the question bank, so they were never practised. It measures transfer to unseen work and moves nothing.
+
+1. A concept is eligible at level 3 or higher, with a first unaided success before today and an unspent sealed question.
+2. A probe asks at most 6 questions, one per concept, highest level first.
+3. A probe is due when there has been none yet, or 14 days have passed since the last one, or the exam is within 7 days and 7 days have passed since the last one.
+4. The unseen-task score is shown after 3 answers.
+5. "Not transferring" means level 4 or higher with the latest probe answer wrong.
+6. Probe answers move no level, estimate, BKT value, card or misconception, and their timings do not set what counts as a slow answer. They are recorded with `probe: true`.
+7. Help requests (a message ending in "?", hints, explanations, visuals) are refused locally during a probe. Skip is allowed.
 
 ## Diagrams, simulations and games
 

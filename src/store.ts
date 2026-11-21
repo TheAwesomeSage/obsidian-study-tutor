@@ -2,17 +2,20 @@
 // interface (Obsidian's DataAdapter satisfies it), so it can be tested outside Obsidian.
 
 import { BUNDLED } from "./prompts";
-import { Course, CourseEdge, EdgeStatus, Relation, TopicGraph, effectivePrereqs, joinCourse, parseTopicGraph, serializeTopicGraph, syncTopicGraph, wouldCycle } from "./course";
+import { Course, CourseEdge, EdgeStatus, Relation, TopicGraph, effectivePrereqs, joinCourse, parseTopicGraph, serializeTopicGraph, similarity, syncTopicGraph, wouldCycle } from "./course";
 import { Attempt, LevelChange, normaliseAttempt } from "./evidence";
 import { SrStats, buildSrNote, srStats } from "./formats";
+import { parseMistakeCard } from "./families";
 import { Chat, Frontmatter, LearnerState, Mode, Prereqs, Question, Topic, fmNum, fmStr, newState, parseChat, parseQuestions, parseState, parseTopic, serializeChat, serializeState, textHash, withFrontmatter, ymd } from "./formats";
 import type { PolicyCase } from "./policy";
+import { SEAL_SIMILARITY, splitSealed, type SealedSection } from "./sealed";
 import { SessionRecord, sessionMarkdown } from "./session";
 import type { ActivityRecord } from "./configure";
 import type { CoursePackage } from "./coursepkg";
 import { passageWindow, type SourceRevision } from "./compile-sources";
 import { Misconception, parseMisconception, reconcile } from "./misconceptions";
 import { ExpansionRecord, parseExpansion } from "./expansion";
+import { SchedulerChoice, SchedulerRecord, syncScheduler } from "./scheduler";
 
 /** One learner interaction with an activity. Kept apart from evidence.md; only an assessed answer also becomes an attempt there. */
 export interface ActivityEvent {
@@ -89,6 +92,8 @@ export interface ChatRef {
   /** Where it was left: the open question, or the start of the last message. */
   snippet: string;
   action: string;
+  /** A cold probe with a question still open: not finished, and a sealed question asked. */
+  openProbe: boolean;
 }
 
 export interface ExternalPrereq {
@@ -150,6 +155,9 @@ export class Store {
     public root: string,
     private today: () => string = () => ymd(),
   ) {}
+
+  /** The card scheduler the settings choose. Each state is brought onto it as it loads; unset, states load as they are. */
+  scheduler: (() => SchedulerChoice) | null = null;
 
   get skillsDir(): string {
     return `${this.root}/_skills`;
@@ -403,6 +411,65 @@ export class Store {
     return (await this.fs.exists(p)) ? parseQuestions(await this.fs.read(p)) : [];
   }
 
+  sealedPath(dir: string): string {
+    return `${dir}/sealed.md`;
+  }
+
+  /** The sealed (cold probe) questions, each with its concept. Not part of the bank: nothing practises or reviews them. */
+  async loadSealed(dir: string): Promise<Question[]> {
+    const p = this.sealedPath(dir);
+    return (await this.fs.exists(p)) ? parseQuestions(await this.fs.read(p)) : [];
+  }
+
+  /**
+   * The sealed sections after a compile: the new body's, then the old ones whose concept is still
+   * live and got no new probe, moved to that concept's new subskill number. Each carries its concept.
+   * A new probe that nearly copies an old sealed question of its concept is dropped and the old one
+   * kept, id and all: a reworded question the learner may have answered is not unseen work. An old
+   * one that a new bank question on its subskill nearly copies is dropped too. `dropped` counts both.
+   */
+  private async mergeSealed(dir: string, fresh: SealedSection[], graph: TopicGraph, bank: Question[]): Promise<{ sections: string[]; dropped: number }> {
+    const live = new Map(graph.concepts.filter((c) => !c.retired).map((c) => [c.n, c.id]));
+    const byId = new Map([...live].map(([n, id]) => [id, n]));
+    const out = new Map<string, string>();
+    const put = (id: string, concept: string, sub: number, section: string) => {
+      if (out.has(id)) return;
+      const lines = section.replace(/\r\n/g, "\n").split("\n").filter((l) => !/^(concept|subskill):/i.test(l));
+      lines.splice(1, 0, `subskill: ${sub}`, `concept: ${concept}`);
+      out.set(id, lines.join("\n").replace(/\s*$/, "\n"));
+    };
+    const file = this.sealedPath(dir);
+    const old = ((await this.fs.exists(file)) ? (await this.fs.read(file)).split(/^(?=### P[0-9a-f]+[ \t]*\r?$)/m) : [])
+      .map((part) => ({ part, q: parseQuestions(part)[0] }))
+      .filter((o): o is { part: string; q: Question & { concept: string } } => !!o.q?.concept && byId.has(o.q.concept));
+    const near = (a: string, b: string) => similarity(a, b) >= SEAL_SIMILARITY;
+    let dropped = 0;
+    const withNew = new Set<string>(), copied = new Set<string>();
+    for (const f of fresh) {
+      const concept = live.get(f.subskill);
+      if (!concept) continue;
+      const text = parseQuestions(f.section)[0]?.question ?? "";
+      const earlier = old.filter((o) => o.q.concept === concept && near(text, o.q.question));
+      if (earlier.length) {
+        for (const o of earlier) copied.add(o.q.id);
+        dropped++;
+        continue;
+      }
+      withNew.add(concept);
+      put(f.id, concept, f.subskill, f.section);
+    }
+    for (const { part, q } of old) {
+      if (withNew.has(q.concept) && !copied.has(q.id)) continue;
+      const sub = byId.get(q.concept)!;
+      if (bank.some((b) => b.subskill === sub && near(q.question, b.question))) {
+        dropped++;
+        continue;
+      }
+      put(q.id, q.concept, sub, part);
+    }
+    return { sections: [...out.values()], dropped };
+  }
+
   // ----- learner state: levels in state.md, the evidence behind them in evidence.md -----
 
   private evidencePath(dir: string): string {
@@ -420,6 +487,7 @@ export class Store {
     if (!(await this.fs.exists(p))) {
       const s = newState(topic, target);
       s.concepts = concepts;
+      if (this.scheduler) syncScheduler(s, this.scheduler(), this.today());
       await this.saveState(dir, s);
       return s;
     }
@@ -456,11 +524,26 @@ export class Store {
     }
     s.topic = topic.title;
     s.concepts = concepts;
+    s.objectiveRefs = {};
+    s.revisions = {};
+    for (const c of graph.concepts) {
+      if (c.retired) continue;
+      if (c.objectives?.length) s.objectiveRefs[c.n] = [...c.objectives];
+      if (c.revisedAt) s.revisions[c.n] = { at: c.revisedAt, why: c.revisedWhy ?? "" };
+    }
     // Attempts made before concepts had ids take the id of the subskill they were recorded on.
     for (const a of s.attempts) if (!a.concept && a.skill in concepts) a.concept = concepts[a.skill];
     const moved = await this.migrateLinks(dir, s, graph);
-    if (legacy || moved) await this.saveState(dir, s);
+    // A change of scheduler in settings: card dates are rebuilt from their logs and the switch is recorded.
+    const switched = !!this.scheduler && syncScheduler(s, this.scheduler(), this.today());
+    if (legacy || moved || switched) await this.saveState(dir, s);
     return s;
+  }
+
+  /** The scheduler record in a topic's state file, read without loading or migrating anything. */
+  async schedulerRecord(dir: string): Promise<SchedulerRecord | undefined> {
+    const p = `${dir}/state.md`;
+    return (await this.fs.exists(p)) ? parseState(await this.fs.read(p)).scheduler : undefined;
   }
 
   /**
@@ -506,15 +589,47 @@ export class Store {
     const topic = parseTopic(topicMd);
     const { graph, remap } = syncTopicGraph(base(dir), topic, oldGraph);
     await this.writeFile(`${dir}/topic.md`, topicMd);
-    await this.writeFile(`${dir}/questions.md`, withFrontmatter({ tutor: "questions", topic: p.title }, p.questionsBody + "\n"));
+    // Probe questions leave the bank here, the one place compile and refresh both write it, so no reader of questions.md sees them.
+    const split = splitSealed(p.questionsBody);
+    const sealed = await this.mergeSealed(dir, split.sealed, graph, parseQuestions(split.bank));
+    await this.writeFile(`${dir}/questions.md`, withFrontmatter({ tutor: "questions", topic: p.title }, split.bank + "\n"));
+    if (sealed.sections.length || (await this.fs.exists(this.sealedPath(dir)))) await this.writeFile(this.sealedPath(dir), withFrontmatter({ tutor: "sealed", topic: p.title, dropped: split.dropped + sealed.dropped }, sealed.sections.join("\n")));
     await this.writeFile(this.graphPath(dir), serializeTopicGraph(topic.title, graph));
     const next = newState(topic, p.target, previous, previous && oldGraph ? remap : undefined);
     for (const c of graph.concepts) if (!c.retired) next.concepts[c.n] = c.id;
     // A new question bank starts its card schedule again. A partial refresh keeps the schedule
     // of every question it left untouched. Everything else is kept either way.
-    if (previous && p.keepCards) for (const id of p.keepCards) if (previous.cards[id]) next.cards[id] = previous.cards[id];
+    // The cards of known mistakes go with their questions.
+    if (previous && p.keepCards) {
+      const keep = new Set(p.keepCards);
+      for (const id of Object.keys(previous.cards)) if (keep.has(id) || keep.has(parseMistakeCard(id)?.base ?? "")) next.cards[id] = previous.cards[id];
+    }
+    // The kept cards' dates come from the previous scheduler, so its record (and switch history) goes with them.
+    if (previous?.scheduler) next.scheduler = previous.scheduler;
     await this.saveState(dir, next);
     return dir;
+  }
+
+  /**
+   * Records, on each concept of the course graph, the objective versions it teaches and its latest
+   * material change. Written after a compile or refresh, from the course package's versions.
+   */
+  async setConceptRevisions(dir: string, byN: Record<number, { refs: string[]; at?: string; why?: string }>): Promise<void> {
+    const topic = await this.loadTopic(dir);
+    const graph = await this.loadGraph(dir, topic);
+    for (const c of graph.concepts) {
+      delete c.objectives;
+      delete c.revisedAt;
+      delete c.revisedWhy;
+      const r = c.retired ? undefined : byN[c.n];
+      if (!r) continue;
+      if (r.refs.length) c.objectives = [...r.refs];
+      if (r.at) {
+        c.revisedAt = r.at;
+        c.revisedWhy = r.why ?? "";
+      }
+    }
+    await this.writeFile(this.graphPath(dir), serializeTopicGraph(topic.title, graph));
   }
 
   async readQuestionsRaw(dir: string): Promise<string> {
@@ -642,11 +757,12 @@ export class Store {
     return out;
   }
 
-  /** The most recent chats across every topic, newest first. Only the last few files of each topic are read. */
-  async recentChats(limit = 8): Promise<ChatRef[]> {
+  /** The most recent chats across every topic, or only `dir`'s, newest first. Only the last few files of each topic are read. */
+  async recentChats(limit = 8, dir?: string): Promise<ChatRef[]> {
     const out: ChatRef[] = [];
     const flat = (t: string) => t.replace(/```[\s\S]*?(```|$)/g, " [code] ").replace(/[#*_>]+/g, "").replace(/\s+/g, " ").trim();
     for (const ref of await this.listTopics()) {
+      if (dir && ref.dir !== dir) continue;
       let files: string[] = [];
       try {
         files = (await this.listChats(ref.dir)).slice(-(limit + 4));
@@ -678,6 +794,7 @@ export class Store {
             unfinished: !!pending || !!fmStr(chat.fm, "card") || fmStr(chat.fm, "placement") === "on" || last?.role === "you" || (record.completedStep !== true && last?.role === "tutor" && /\?\s*$/.test(last.text.trim())),
             snippet: flat(pending || last?.text || chat.summary).slice(0, 180),
             action: typeof record.action === "string" ? record.action : "",
+            openProbe: fmStr(chat.fm, "probe") === "yes" && !fmStr(chat.fm, "probe_done") && !!fmStr(chat.fm, "card"),
           });
         } catch {
           /* an unreadable chat is skipped */
@@ -844,7 +961,7 @@ export class Store {
   }
 
   private compileCachePath(key: string): string {
-    if (!/^(source|page|search|select|plan)-[a-f\d]{64}$/.test(key)) throw new Error("Invalid compilation cache key.");
+    if (!/^(source|page|search|select|plan|synth|audit|objver)-[a-f\d]{64}$/.test(key)) throw new Error("Invalid compilation cache key.");
     return `${this.root}/_compile-cache/${key}.json`;
   }
 

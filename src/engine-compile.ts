@@ -2,12 +2,15 @@
 // Part of the engine (see engine.ts): each function takes the engine it works for, and the
 // engine has a method of the same name that calls it. No Obsidian imports.
 
-import { ClaudeError, zeroUsage } from "./claude";
-import { modelFor, providerFor } from "./model-provider";
+import { ClaudeError, addUsage, zeroUsage } from "./claude";
+import { compileStrategyFor, modelFor, modelIdentity, reportedModel } from "./model-provider";
 import { Frontmatter, contentHash, fmList, fmStr, parseCompileOutput, parseQuestions, parseTopic, splitFrontmatter } from "./formats";
-import { CoursePackage, buildPackage, coverageLine, mergeRefresh, sourceChanges, subskillSections, withStagedCoverage } from "./coursepkg";
+import { CoursePackage, linkName, buildPackage, coverageLine, mergeRefresh, sourceChanges, subskillSections, withStagedCoverage } from "./coursepkg";
 import { checkCompilation, compileCourse, CompileCancelled, type ExpansionRequest as CompileExpansionRequest, type StagedCourse } from "./compiler";
 import { buildRefreshInput } from "./prompts";
+import { digest, type SourceRevision } from "./compile-sources";
+import { bankCount } from "./sealed";
+import { MAX_MATERIAL, conceptRevisions, materialText, versionObjectives, type CurrentObjective } from "./objective-version";
 import { Material, CompileRequest, CompileResult } from "./engine-common";
 import type { Engine } from "./engine";
 
@@ -17,10 +20,13 @@ export async function compile(eng: Engine, req: CompileRequest, onProgress: (msg
   const model = modelFor(s, "compileModel");
   checkCompilation(req.signal);
   const subjects = await eng.store.subjectNames();
+  const modelKey = modelIdentity(s, "compileModel"), strategy = compileStrategyFor(s);
   const candidate = await compileCourse({
-    ...req, model, planModelKey: providerFor(s) === "codex" ? `codex:${model || "default"}` : undefined,
+    // Checkpoints are keyed by the configured identity and checked against the concrete model the
+    // provider last reported for it, by any call this session (a chat turn included).
+    ...req, model, modelKey, reportedModel: reportedModel(modelKey), strategy,
     subjects, skill: await eng.store.skill("compile.md"), singlePassWords: s.singlePassWords,
-    limits: s.researchLimits, progress: onProgress, provider: eng.researchProvider, local: eng.compilationLocal,
+    limits: s.researchLimits, progress: onProgress, provider: eng.researchProvider, local: strategy === "main" ? null : eng.compilationLocal,
     cache: { read: key => eng.store.readCompileCache(key), write: (key, value) => eng.store.writeCompileCache(key, value) },
     call: o => eng.call(o, s),
   });
@@ -38,7 +44,9 @@ export async function compile(eng: Engine, req: CompileRequest, onProgress: (msg
     existingDir: preserve ? undefined : req.existingDir,
   });
   const pkg = await eng.writePackage(dir, req, preserve ? null : existing, undefined, candidate.staged);
-  return { dir, subskills: pkg.lessons.length, questions: parseQuestions(candidate.questionsBody).length, usage: candidate.usage, agents: candidate.calls,
+  // The course is written, so a blueprint that cannot be planned costs the learner nothing but the offer.
+  const blueprints = preserve ? null : await eng.planBlueprints(dir, { signal: req.signal, progress: onProgress }).catch(() => null);
+  return { dir, subskills: pkg.lessons.length, questions: bankCount(candidate.questionsBody), usage: blueprints ? addUsage(candidate.usage, blueprints.usage) : candidate.usage, agents: candidate.calls + (blueprints?.calls ?? 0),
     status: candidate.staged.status, coverage: coverageLine(pkg), complete: pkg.coverage.complete, metrics: candidate.staged.metrics, preservedCourse: preserve ? req.existingDir : undefined };
 }
 
@@ -91,8 +99,43 @@ export async function writePackage(eng: Engine, dir: string, req: Pick<CompileRe
   const sources = req.mode === "subject" ? {} : Object.fromEntries(req.material.map((m) => [m.name, contentHash(m.text)]));
   let pkg = buildPackage({ topic, questions: await eng.store.loadQuestions(dir), concepts: state.concepts, sources: refreshed && previous ? { ...previous.sources, ...sources } : sources, previous, at: new Date().toISOString(), mode: req.mode, research: !!req.research, refreshed });
   if (staged) pkg = withStagedCoverage(pkg, staged);
+  pkg = await withVersions(eng, dir, pkg, req, previous, staged);
   await eng.store.savePackage(dir, pkg);
+  await eng.store.setConceptRevisions(dir, conceptRevisions(pkg.versions ?? []));
   return pkg;
+}
+
+/**
+ * Versions the package's objectives against the previous package (objective-version.ts). The
+ * material of an objective is its text and the evidence it was compiled from: the source passages
+ * it maps to (staged courses) or the notes its subskills cite. Material text is kept in the
+ * compile cache by digest, so the next compile can tell an editorial edit from a material one.
+ * A cache failure costs only that comparison: the next compile then counts the change as material.
+ */
+async function withVersions(eng: Engine, dir: string, pkg: CoursePackage, req: Pick<CompileRequest, "material">, previous: CoursePackage | null, staged?: StagedCourse): Promise<CoursePackage> {
+  const passages = new Map<string, string>();
+  const revisions = await Promise.all((staged?.sourceRevisions ?? []).map((id) => eng.store.readCompileCache<SourceRevision>(`source-${id}`).catch(() => null)));
+  for (const s of revisions) for (const p of s?.passages ?? []) passages.set(p.id, p.text);
+  const notes = new Map(req.material.map((m) => [m.name.toLowerCase(), m.text]));
+  const current: CurrentObjective[] = pkg.objectives.map((o) => {
+    const inv = staged?.inventory.find((x) => x.id === o.id);
+    const refs = inv ? inv.references : [];
+    const cited = inv ? [] : [...new Set(pkg.lessons.filter((l) => o.subskills.includes(l.n)).flatMap((l) => l.citations))];
+    const evidence = inv ? refs.map((r) => passages.get(r) ?? `missing passage ${r}`) : cited.map((c) => notes.get(linkName(c).toLowerCase()) ?? "");
+    const material = materialText([o.text, ...evidence]);
+    return { id: o.id, subskills: o.subskills, sources: inv ? refs : cited, material, fingerprint: digest(material) };
+  });
+  const texts = new Map<string, string>();
+  const prevTexts = await Promise.all((previous?.versions ?? []).map((v) => eng.store.readCompileCache<{ text?: unknown }>(`objver-${v.fingerprint}`).catch(() => null)));
+  (previous?.versions ?? []).forEach((v, i) => {
+    const t = prevTexts[i];
+    if (t && typeof t.text === "string") texts.set(v.fingerprint, t.text);
+  });
+  // A package from before versions has no baseline: this compile sets it, and flags nothing.
+  const versions = versionObjectives({ previous: previous?.versions ?? null, current, at: new Date().toISOString(), previousText: (fp) => texts.get(fp) ?? null });
+  // Written one at a time: the store creates the cache folder on first write. Texts already saved are skipped.
+  for (const c of current) if (c.material.length <= MAX_MATERIAL && !texts.has(c.fingerprint)) await eng.store.writeCompileCache(`objver-${c.fingerprint}`, { text: c.material }).catch(() => undefined);
+  return { ...pkg, versions };
 }
 
 /**
@@ -116,6 +159,8 @@ export async function refresh(eng: Engine, req: CompileRequest & { existingDir: 
   const sameScope = pkg.mode === req.mode && pkg.research === !!req.research && fmStr(topic.fm, "goal") === req.goal.trim();
   if (sameScope && !ch.changed.length && !ch.removed.length && !ch.added.length && (!pkg.staged || pkg.staged.status === "complete")) return { dir, subskills: topic.subskills.length, questions: questions.length, usage: zeroUsage(), agents: 0, coverage: coverageLine(pkg), complete: pkg.coverage.complete, status: pkg.staged?.status, refresh: "unchanged", subskillsRefreshed: [], why: "no source note has changed since the last compile" };
   if (!sameScope) return full("the compilation scope changed");
+  // The partial refresh is one main-provider call, which the local strategy never makes.
+  if (compileStrategyFor(s) === "local") return full("the local compile strategy rebuilds the topic on the local model");
   if (pkg.staged || req.research || req.mode === "spec") return full("the objective inventory and source references need to be checked together");
   if (ch.added.length) return full(`new notes (${ch.added.slice(0, 3).join(", ")}) need a full compile to place them`);
   if (!ch.subskills.length) return full("the changed notes are not cited by any subskill");
@@ -148,5 +193,5 @@ export async function refresh(eng: Engine, req: CompileRequest & { existingDir: 
   onProgress("Saving the refreshed course…");
   await eng.store.saveCompiled({ title: topic.title, fm, topicBody: merged.topicBody, questionsBody: merged.questionsBody, target: s.targetLevel, existingDir: dir, keepCards: kept });
   const next = await eng.writePackage(dir, req, pkg, { subskills: merged.replaced, notes: [...ch.changed, ...ch.removed] });
-  return { dir, subskills: check.subskills.length, questions: parseQuestions(merged.questionsBody).length, usage: res.usage, agents: 1, coverage: coverageLine(next), complete: next.coverage.complete, refresh: "partial", subskillsRefreshed: merged.replaced, why: `${[...ch.changed, ...ch.removed].join(", ")} changed` };
+  return { dir, subskills: check.subskills.length, questions: bankCount(merged.questionsBody), usage: res.usage, agents: 1, coverage: coverageLine(next), complete: next.coverage.complete, refresh: "partial", subskillsRefreshed: merged.replaced, why: `${[...ch.changed, ...ch.removed].join(", ")} changed` };
 }

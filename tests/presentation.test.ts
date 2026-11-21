@@ -14,8 +14,10 @@ import { DEFAULT_WEIGHTS, PolicyInput, SkillInput, decide, homeStep } from "../s
 import { choosePresentation, extractPresent, matchModules, readPresentationRequest, GateInput } from "../src/presentation";
 import { CONFIG_PROMPT_VERSION, activityKey, checkConfiguration, configureActivity, outputSchema } from "../src/configure";
 import { ollamaSchema, validateJson } from "../src/jsonschema";
-import { LocalModelError, OllamaClient, isLoopback } from "../src/ollama";
+import { LocalModelError, OllamaClient, cloudModelName, isLoopback, locateLocal } from "../src/ollama";
 import { adaptRegistry } from "../src/visualcontract";
+import * as registryModule from "../src/visuals/registry";
+import { FIXTURES } from "../src/visuals/fixtures";
 import { buildPackage, mergeRefresh, sourceChanges } from "../src/coursepkg";
 import { ARRAY_TRACE, ASSETS, PROJECTILE, arrayReply, makeFixtureRegistry, scriptedModel, trace } from "./fixtures/visual-modules";
 import { MemFS } from "./memfs";
@@ -348,6 +350,64 @@ test("the Ollama client sends a bounded structured request to loopback only and 
   await assert.rejects(new OllamaClient({ baseUrl: "http://192.168.1.4:11434", transport }).chatJson({ system: "", user: "", schema: {} }), /local Ollama/);
   const missing = new OllamaClient({ transport: async () => ({ status: 404, body: JSON.stringify({ error: "model 'qwen2.5:3b' not found, try pulling it first" }) }) });
   await assert.rejects(missing.chatJson({ system: "", user: "", schema: {} }), (e: any) => e instanceof LocalModelError && e.kind === "model-missing" && /ollama pull qwen2\.5:3b/.test(e.message));
+  await c.chatJson({ system: "s", user: "u", schema: {}, numCtx: 16384 });
+  assert.deepEqual([sent[0].body.options.num_ctx, sent[1].body.options.num_ctx], [2048, 16384], "a request can ask for a larger context");
+});
+
+test("a loopback Ollama can serve a cloud model: detected from the name and from /api/show, and unknown is not local", async () => {
+  for (const name of ["gpt-oss:120b-cloud", "glm-4.6:cloud", "qwen3-coder:480b-cloud", "deepseek-v3.1:671b-CLOUD"]) assert.equal(cloudModelName(name), true, name);
+  for (const name of ["qwen2.5:3b", "cloudy:7b", "mycloud", "llama3.1:8b-instruct"]) assert.equal(cloudModelName(name), false, name);
+  const server = (show: { status: number; body: unknown }, models: unknown[] = []) => {
+    const sent: { method: string; url: string; body: any }[] = [];
+    const transport = async (method: string, url: string, body: string | null) => {
+      sent.push({ method, url, body: body ? JSON.parse(body) : null });
+      if (url.endsWith("/api/show")) return { status: show.status, body: JSON.stringify(show.body) };
+      if (url.endsWith("/api/tags")) return { status: 200, body: JSON.stringify({ models }) };
+      throw new Error(`unexpected ${url}`);
+    };
+    return { sent, transport };
+  };
+  // Installed and run here: the digest from /api/tags is its identity, matched with or without ":latest".
+  const here = server({ status: 200, body: { details: { family: "qwen2" }, capabilities: ["completion"] } }, [{ name: "qwen2.5:latest", model: "qwen2.5:latest", digest: "sha256:845dbda0ea48" }]);
+  const local = await locateLocal(new OllamaClient({ model: "qwen2.5", transport: here.transport }));
+  assert.deepEqual([local.runs, local.digest], ["local", "sha256:845dbda0ea48"]);
+  assert.deepEqual([here.sent[0].method, here.sent[0].url, here.sent[0].body.model], ["POST", "http://127.0.0.1:11434/api/show", "qwen2.5"]);
+  // Not named as cloud, but Ollama says it is: by /api/show, or by its /api/tags entry.
+  const shown = server({ status: 200, body: { remote_model: "gpt-oss:120b", remote_host: "https://ollama.com:443" } });
+  const fromShow = await locateLocal(new OllamaClient({ model: "team-model", transport: shown.transport }));
+  assert.deepEqual([fromShow.runs, fromShow.detail], ["cloud", "Ollama reports that team-model runs on https://ollama.com:443"]);
+  const listed = server({ status: 200, body: {} }, [{ name: "team-model", digest: "sha256:1", remote_model: "kimi-k2:1t" }]);
+  assert.equal((await locateLocal(new OllamaClient({ model: "team-model", transport: listed.transport }))).runs, "cloud");
+  // A cloud name settles it without a request; a remote server is not this computer.
+  const asked = server({ status: 200, body: {} });
+  assert.equal((await locateLocal(new OllamaClient({ model: "gpt-oss:20b-cloud", transport: asked.transport }))).runs, "cloud");
+  assert.equal(asked.sent.length, 0);
+  assert.equal((await locateLocal(new OllamaClient({ baseUrl: "http://192.168.1.4:11434", transport: asked.transport }))).runs, "cloud");
+  // Ollama down, the model missing, or a reply that is not a description: not proven local.
+  const down = await locateLocal(new OllamaClient({ transport: async () => { throw new LocalModelError("unreachable", "Ollama is not reachable"); } }));
+  assert.deepEqual([down.runs, down.detail], ["unknown", "could not ask Ollama where qwen2.5:3b runs: Ollama is not reachable"]);
+  const gone = server({ status: 404, body: { error: "model 'qwen2.5:3b' not found" } });
+  assert.equal((await locateLocal(new OllamaClient({ transport: gone.transport }))).runs, "unknown");
+  assert.equal((await locateLocal(new OllamaClient({ transport: async () => ({ status: 200, body: "<html>" }) }))).runs, "unknown");
+});
+
+test("local activity configuration refuses a model that is not proven to run on this computer", async () => {
+  const cloud = configure([arrayReply()]);
+  const named = await configureActivity({ request: req(), conceptId: "c/binary", candidates: [ARRAY_TRACE], assets: ASSETS, registry: adaptRegistry(makeFixtureRegistry() as any), model: scriptedModel([arrayReply()], "gpt-oss:20b-cloud"), catalogVersion: "c", trigger: "explicit" });
+  assert.deepEqual([named.status, named.transient, named.localCalls, named.claudeCalls], ["invalid", true, 0, 0]);
+  assert.match(named.reason, /gpt-oss:20b-cloud is an Ollama cloud model, which Ollama runs on ollama\.com, so local configuration does not use it/);
+  assert.deepEqual(named.validationErrors, ["local model: cloud inference"]);
+  const remote = Object.assign(scriptedModel([arrayReply()], "team-model"), { describe: async () => ({ model: "team-model", runs: "cloud" as const, digest: "", detail: "Ollama reports that team-model runs on https://ollama.com:443" }) });
+  const reported = await configureActivity({ request: req(), conceptId: "c/binary", candidates: [ARRAY_TRACE], assets: ASSETS, registry: adaptRegistry(makeFixtureRegistry() as any), model: remote, catalogVersion: "c", trigger: "explicit" });
+  assert.deepEqual([reported.status, reported.localCalls, remote.requests.length], ["invalid", 0, 0]);
+  const unsure = Object.assign(scriptedModel([arrayReply()]), { describe: async () => { throw new LocalModelError("http", "Ollama did not describe qwen2.5:3b: HTTP 500"); } });
+  const notProven = await configureActivity({ request: req(), conceptId: "c/binary", candidates: [ARRAY_TRACE], assets: ASSETS, registry: adaptRegistry(makeFixtureRegistry() as any), model: unsure, catalogVersion: "c", trigger: "explicit" });
+  assert.deepEqual([notProven.status, notProven.transient, notProven.localCalls, notProven.validationErrors[0]], ["invalid", true, 0, "local model: not proven local"]);
+  assert.match(notProven.reason, /^Local configuration did not run: could not ask Ollama where qwen2\.5:3b runs/);
+  const proven = Object.assign(scriptedModel([arrayReply()]), { describe: async () => ({ model: "qwen2.5:3b", runs: "local" as const, digest: "sha256:1", detail: "here" }) });
+  const ok = await configureActivity({ request: req(), conceptId: "c/binary", candidates: [ARRAY_TRACE], assets: ASSETS, registry: adaptRegistry(makeFixtureRegistry() as any), model: proven, catalogVersion: "c", trigger: "explicit" });
+  assert.equal(ok.status, "ready");
+  assert.equal((await cloud.run).status, "ready", "a model with no description is judged by its name");
 });
 
 // ---------- the engine: presentation in real study turns, Claude stubbed and counted ----------
@@ -675,7 +735,7 @@ test("a refresh costs nothing when no note changed and rewrites only the subskil
   assert.deepEqual([same.refresh, same.usage.calls, t.calls.length], ["unchanged", 0, 0]);
 
   const changed = material.map((m) => (m.name === "Pipe notes" ? { ...m, text: m.text + "\n\nA full pipe blocks the writer." } : m));
-  t.replies.push(`### 3. Pipe buffer\nprerequisites: 1\nobjectives: O3\nvisual: simulation | the read and write indices wrap around the array\n- A pipe is a fixed-size circular buffer; a full pipe blocks the writer ([[Pipe notes]]).\nworked example:\nWith 4 slots full, the writer waits until slot 0 is read.\n\n=====QUESTIONS=====\n\n### Q1\nsubskill: 3\ntype: short\nfamily: full-pipe\ntask: application\nquestion: What happens to a writer when the pipe is full?\nanswer: it blocks\nexplanation: No free slot.`);
+  t.replies.push(`### 3. Pipe buffer\nprerequisites: 1\nobjectives: O3\nvisual: simulation | the read and write indices wrap around the array\n- A pipe is a fixed-size circular buffer; a full pipe blocks the writer ([[Pipe notes]]).\nworked example:\nWith 4 slots full, the writer waits until slot 0 is read.\n\n=====QUESTIONS=====\n\n### Q1\nsubskill: 3\ntype: short\nfamily: full-pipe\ntask: application\nquestion: What happens to a writer when the pipe is full?\nanswer: it blocks\nexplanation: No free slot.\n\n### Q2\nsubskill: 3\ntype: short\nfamily: drain-probe\ntask: probe\nquestion: A reader empties an eight-slot ring one slot per second. After how many seconds may a stalled producer resume?\nanswer: 1\nexplanation: One free slot is enough.`);
   const r = await t.engine.refresh({ ...req, material: changed });
   assert.deepEqual([r.refresh, r.subskillsRefreshed, t.calls.length], ["partial", [3], 1]);
   assert.match(t.calls[0].input, /REFRESH: 3/);
@@ -686,6 +746,10 @@ test("a refresh costs nothing when no note changed and rewrites only the subskil
   assert.match(topic.subskills.find((s) => s.n === 3)!.section, /a full pipe blocks the writer/);
   const qs = await t.store.loadQuestions(t.dir);
   assert.deepEqual(qs.map((q) => [q.id, q.subskill]), [["Q1", 1], ["Q2", 1], ["Q3", 2], ["Q4", 2], ["Q6", 3]], "the old question on 3 is replaced and the new one takes a fresh id");
+  // The refresh's probe is sealed, not banked.
+  assert.equal(r.questions, 5);
+  assert.deepEqual((await t.store.loadSealed(t.dir)).map((q) => [q.subskill, q.task]), [[3, "probe"]]);
+  assert.ok(!qs.some((q) => q.task === "probe"));
   const after = await t.store.loadState(t.dir, 4);
   assert.deepEqual([after.levels[3], after.attempts.map((a) => a.id), after.cards.Q1?.interval], [2, ["keep"], 6], "levels, evidence and untouched review schedules are kept");
   const pkg = (await t.store.loadPackage(t.dir))!;
@@ -758,4 +822,67 @@ test("an answer in a numeric variant is assessed against that variant, and a les
   assert.equal(res.assessment.correct, true, "checked against the variant's own trace");
   await assert.rejects(t.engine.recordActivityResult(t.dir, out.activity!.id, { answer: 1 }, { lesson: { ...variant.lesson, objective: "something else entirely" } }), /does not match the saved one/);
   assert.equal(t.calls.length + t.local.requests.length, 1, "only the first configuration used a model");
+});
+
+// ---------- blueprints planned at compile time with the main provider ----------
+
+const ringReply = () => JSON.stringify({ fits: true, objective: "Track head, tail and count as a ring buffer fills, empties and wraps", settings: FIXTURES.ring.settings, assetIds: [], assessmentId: "ring-count", predictionQuestion: "How many items are in the ring at the end?", hint: "Head equals tail both when the ring is full and when it is empty.", missingOperation: "" });
+
+async function planSetup(settings: Record<string, unknown> = {}, local: string[] = []) {
+  const t = await setup({ registry: null, local, settings: { compileStrategy: "main", ...settings } });
+  t.engine.visuals = adaptRegistry(registryModule as any);
+  return t;
+}
+
+test("compiling with the main provider plans each marked blueprint once, saves it, and study time reuses it without a call", async () => {
+  const t = await planSetup();
+  t.replies.push(ringReply());
+  const planned = await t.engine.planBlueprints(t.dir);
+  assert.deepEqual([planned.planned, planned.ready, planned.failed, planned.calls, t.calls.length], [1, 1, 0, 1, 1]);
+  assert.equal(t.calls[0].model, "sonnet");
+  const [rec] = await t.store.loadActivities(t.dir);
+  assert.deepEqual([rec.status, rec.provider, rec.claudeCalls, rec.localCalls, rec.moduleId, rec.trigger], ["ready", "main", 1, 0, "circular-buffer", "compile"]);
+  // The same sources and catalogue are not planned again, so a refresh costs nothing.
+  const again = await t.engine.planBlueprints(t.dir);
+  assert.deepEqual([again.planned, again.calls, t.calls.length], [0, 0, 1]);
+  // Study time finds the record: no local call, no main call, and the report counts the plan.
+  await t.focus(3, { 1: 3, 3: 2 });
+  const chat = await t.chatIn("auto");
+  const opened = await t.engine.requestActivity(t.dir, { kind: "simulation", chatPath: chat });
+  assert.deepEqual([opened.lesson?.moduleId, t.local.requests.length, t.calls.length], ["circular-buffer", 0, 1]);
+  const report = await t.engine.activityReport(t.dir);
+  assert.equal(report.claudeCalls, 1);
+});
+
+test("a failed plan is saved as a failure, never blocks the local model, and never fails the compile", async () => {
+  const t = await planSetup({}, [ringReply()]);
+  const bad = ringReply().replace('"capacity":4', '"capacity":99');
+  t.replies.push(bad, bad);
+  const planned = await t.engine.planBlueprints(t.dir);
+  assert.deepEqual([planned.planned, planned.ready, planned.failed, planned.calls], [1, 0, 1, 2]);
+  const [rec] = await t.store.loadActivities(t.dir);
+  assert.deepEqual([rec.status, rec.provider, rec.claudeCalls], ["invalid", "main", 2]);
+  // The failed main record is not "saved" for study time, so the local model still gets its turn.
+  await t.focus(3, { 1: 3, 3: 2 });
+  const chat = await t.chatIn("auto");
+  const opened = await t.engine.requestActivity(t.dir, { kind: "simulation", chatPath: chat });
+  assert.deepEqual([opened.lesson?.moduleId, t.local.requests.length], ["circular-buffer", 1]);
+});
+
+test("blueprints are planned only under the main strategy, and the setting turns them off", async () => {
+  for (const settings of [{ compileStrategy: "hybrid" }, { compileStrategy: "local" }, { compileBlueprints: false }]) {
+    const t = await planSetup(settings);
+    t.replies.push(ringReply());
+    const planned = await t.engine.planBlueprints(t.dir);
+    assert.deepEqual([planned.planned, t.calls.length], [0, 0], JSON.stringify(settings));
+  }
+});
+
+test("a subskill at target is not done while an idea in it the bank can ask has never been asked", () => {
+  const done = sk({ n: 1, level: 4, supported: 4, independent: 3, independentCorrect: 3, bankLeft: 2 });
+  assert.equal(decide(pin({ skills: [done] })).action, "retrieval", "nothing unasked: the usual recall check");
+  const gap = decide(pin({ skills: [{ ...done, uncovered: 2, uncoveredNames: ["Integrate polynomials", "Chain rule"] }] }));
+  assert.deepEqual([gap.action, gap.focus, gap.local], ["independent-practice", 1, "bank"]);
+  assert.match(gap.reason, /at target, but 2 ideas in it have not been asked yet: Integrate polynomials; Chain rule\. Those come next\./);
+  assert.match(gap.constraint, /every idea in a subskill is asked at least once/);
 });

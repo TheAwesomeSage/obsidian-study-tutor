@@ -1,8 +1,11 @@
 // A client for a local Ollama server, used for visual modules and bounded evidence selection.
 // One request at a time, a short context, bounded output, low temperature and a JSON schema
 // passed as Ollama's `format`, so the model is constrained while it writes. The reply is still
-// checked again by the caller. Note excerpts never leave the machine: only loopback addresses
-// are accepted. Node only (it uses the http module), no Obsidian imports.
+// checked again by the caller. Only loopback servers are accepted, but a loopback Ollama can
+// still forward a cloud model (such as gpt-oss:120b-cloud) to ollama.com, so the server address
+// alone does not prove that inference is local: `locateLocal` asks Ollama where the model runs,
+// and a caller that promises local inference refuses a model that is not proven local.
+// Node only (it uses the http module), no Obsidian imports.
 
 import { Schema, ollamaSchema } from "./jsonschema";
 
@@ -46,18 +49,72 @@ export interface ChatJsonOptions {
   maxTokens?: number;
   seed?: number;
   timeoutMs?: number;
+  /** Context window for this request, in tokens; the client's own setting when unset. */
+  numCtx?: number;
   signal?: AbortSignal;
+}
+
+/** Where a local model's inference runs, as far as it could be established. */
+export interface LocalModelInfo {
+  /** The tag requests name. */
+  model: string;
+  /**
+   * "local": Ollama on this computer reports the model as its own. "cloud": the name or Ollama
+   * says it runs elsewhere (an Ollama cloud model, or a server that is not this computer).
+   * "unknown": Ollama could not be asked, which is not proof that it runs here.
+   */
+  runs: "local" | "cloud" | "unknown";
+  /** The model's digest as /api/tags lists it, empty when not listed: its concrete identity. */
+  digest: string;
+  /** Why, in a few words, for notices. */
+  detail: string;
 }
 
 /** What the configuration step needs from a local model. Tests supply a scripted one. */
 export interface LocalModel {
   readonly model: string;
   chatJson(o: ChatJsonOptions): Promise<LocalReply>;
+  /** Asks the server where the model runs and which build it is. The Ollama client always has it. */
+  describe?(signal?: AbortSignal): Promise<LocalModelInfo>;
 }
 
 export type Transport = (method: "GET" | "POST", url: string, body: string | null, timeoutMs: number, signal?: AbortSignal) => Promise<{ status: number; body: string }>;
 
-/** True for http(s) URLs on a loopback host. */
+/**
+ * True for the names Ollama gives its cloud models: a tag of "cloud" or ending in "-cloud", as in
+ * glm-4.6:cloud or gpt-oss:120b-cloud. Ollama forwards their requests to ollama.com.
+ */
+export function cloudModelName(name: string): boolean {
+  return /(?:^|[:-])cloud$/i.test(name.trim());
+}
+
+/**
+ * Where a local model runs. A cloud name settles it without asking. A model without `describe`
+ * (a test double) is judged by its name alone; the Ollama client always asks the server, and an
+ * error there gives "unknown".
+ */
+export async function locateLocal(m: LocalModel, signal?: AbortSignal): Promise<LocalModelInfo> {
+  if (cloudModelName(m.model)) return { model: m.model, runs: "cloud", digest: "", detail: `${m.model} is an Ollama cloud model, which Ollama runs on ollama.com` };
+  if (!m.describe) return { model: m.model, runs: "local", digest: "", detail: `${m.model} is not named as a cloud model` };
+  try {
+    return await m.describe(signal);
+  } catch (e) {
+    return { model: m.model, runs: "unknown", digest: "", detail: `could not ask Ollama where ${m.model} runs: ${(e as Error).message}` };
+  }
+}
+
+/** A remote host or model in an Ollama listing or model description, as text; empty when it has none. */
+function remoteOf(x: unknown): string {
+  if (!x || typeof x !== "object") return "";
+  const { remote_host: host, remote_model: model } = x as { remote_host?: unknown; remote_model?: unknown };
+  if (typeof host === "string" && host.trim() && !isLoopback(host)) return host.trim();
+  return typeof model === "string" && model.trim() && !(typeof host === "string" && isLoopback(host)) ? `the remote model ${model.trim()}` : "";
+}
+
+/**
+ * True for http(s) URLs on a loopback host. This checks the server's address only: a loopback
+ * Ollama can still run a cloud model, which `locateLocal` detects.
+ */
 export function isLoopback(url: string): boolean {
   try {
     const u = new URL(url);
@@ -124,6 +181,37 @@ export class OllamaClient implements LocalModel {
     }
   }
 
+  /**
+   * Where the model runs, from the server itself: /api/show names a remote host or model for a
+   * cloud model, and /api/tags gives the digest of the installed build. Asked afresh each time, so a
+   * re-pulled model is noticed. Throws when the server cannot be asked; `locateLocal`, which also
+   * checks the name first, reads that as "unknown".
+   */
+  async describe(signal?: AbortSignal): Promise<LocalModelInfo> {
+    const named = { model: this.model, digest: "" };
+    if (!isLoopback(this.baseUrl)) return { ...named, runs: "cloud", detail: `the Ollama server at ${this.baseUrl} is not on this computer` };
+    const show = await this.transport("POST", `${this.baseUrl}/api/show`, JSON.stringify({ model: this.model }), 5000, signal);
+    let shown: unknown;
+    try { shown = JSON.parse(show.body); } catch { shown = null; }
+    if (show.status !== 200 || !shown || typeof shown !== "object") {
+      const msg = shown && typeof (shown as { error?: unknown }).error === "string" ? (shown as { error: string }).error : `HTTP ${show.status}`;
+      throw new LocalModelError(/not found|pull/i.test(msg) ? "model-missing" : "http", `Ollama did not describe ${this.model}: ${msg.slice(0, 200)}`);
+    }
+    let listed: unknown = null;
+    try {
+      const tags = await this.transport("GET", `${this.baseUrl}/api/tags`, null, 5000, signal);
+      const names = [this.model, `${this.model}:latest`];
+      listed = ((JSON.parse(tags.body) as { models?: unknown[] }).models ?? []).find((m) => !!m && typeof m === "object" && names.some((n) => (m as { name?: unknown }).name === n || (m as { model?: unknown }).model === n)) ?? null;
+    } catch {
+      // The digest is optional: without it the model is identified by its tag alone.
+    }
+    const digest = listed && typeof (listed as { digest?: unknown }).digest === "string" ? (listed as { digest: string }).digest : "";
+    const remote = remoteOf(shown) || remoteOf(listed);
+    return remote
+      ? { ...named, digest, runs: "cloud", detail: `Ollama reports that ${this.model} runs on ${remote}` }
+      : { ...named, digest, runs: "local", detail: `Ollama runs ${this.model} on this computer` };
+  }
+
   chatJson(o: ChatJsonOptions): Promise<LocalReply> {
     const run = this.queue.then(() => this.request(o), () => this.request(o));
     this.queue = run.catch(() => undefined);
@@ -140,7 +228,7 @@ export class OllamaClient implements LocalModel {
       keep_alive: this.keepAlive,
       // Thinking models (qwen3) would spend most of a small budget on hidden reasoning.
       ...(/^qwen3/i.test(this.model) ? { think: false } : {}),
-      options: { temperature: o.temperature ?? 0.1, num_predict: o.maxTokens ?? 400, num_ctx: this.numCtx, seed: o.seed ?? 7 },
+      options: { temperature: o.temperature ?? 0.1, num_predict: o.maxTokens ?? 400, num_ctx: o.numCtx ?? this.numCtx, seed: o.seed ?? 7 },
       messages: [
         { role: "system", content: o.system },
         { role: "user", content: o.user },

@@ -2,6 +2,7 @@ import type { AssessmentResponse, AssessmentResult, JsonObject, LessonValidation
 import { evaluate, numericVariant, plotSegments, projectile, rangeBounds, traceAlgorithm, type AlgorithmSettings, type PlotSettings, type ProjectileSettings } from "./models";
 import { ASSETS } from "./assets";
 import { contentHash } from "../formats";
+import { SYSTEMS_DESCRIPTORS, SYSTEMS_EDITABLE, isSystemsModule, systemsAnswer, systemsMatches, systemsQuestion, validateSystemsSettings } from "./systems-modules";
 
 const num = (minimum: number, maximum: number) => ({ type: "number", minimum, maximum });
 const pair = (minimum: number, maximum: number) => ({ type: "array", items: num(minimum, maximum), minItems: 2, maxItems: 2 });
@@ -19,13 +20,20 @@ const descriptors: ModuleDescriptor[] = [
     algorithm: { enum: ["index", "bubble-sort", "linear-search", "binary-search"] }, values: { type: "array", items: { type: "integer", minimum: -999, maximum: 999 }, minItems: 1, maxItems: 16 }, target: { type: "integer", minimum: -999, maximum: 999 }, index: { type: "integer", minimum: 0, maximum: 15 },
   }) },
   { id: "phet-external", version: "1.0.0", supportedObjectives: ["Source-based prediction and reflection around an external PhET activity; no access to simulation state"], assessmentIds: ["external-reflection"], assetTags: [], settingsSchema: schema({ simulation: { enum: ["projectile-motion", "function-builder", "forces-and-motion-basics"] }, question: { type: "string", minLength: 10, maxLength: 1000 } }) },
+  ...SYSTEMS_DESCRIPTORS,
 ];
 export function listModuleDescriptors(): ModuleDescriptor[] { return JSON.parse(JSON.stringify(descriptors)); }
 export function listAssets() { return ASSETS.map(a => ({...a, tags:[...a.tags], description:a.tags.join(", ")})); }
-export function catalogVersion(): string { return "visuals-v1.1.0/kenney-2026-11-14"; }
+export function catalogVersion(): string { return "visuals-v1.2.0/kenney-2026-11-14"; }
+/** The question a module asks for a valid lesson, written by its code; null when the module has none of its own. */
+export function questionFor(value: unknown): string | null {
+  const valid = validateLesson(value);
+  return valid.valid && isSystemsModule(valid.lesson.moduleId) ? systemsQuestion(valid.lesson) : null;
+}
 for (const d of descriptors) {
-  d.kinds = d.id === "phet-external" ? ["external"] : d.id === "projectile" ? ["game", "simulation"] : ["diagram", "simulation"];
-  d.summary = d.supportedObjectives.join("; ");
+  d.kinds ??= d.id === "phet-external" ? ["external"] : d.id === "projectile" ? ["game", "simulation"] : ["diagram", "simulation"];
+  d.summary ??= d.supportedObjectives.join("; ");
+  if (isSystemsModule(d.id)) continue;
   d.questionTemplates = {
     "slope-at-point": "Predict the tangent slope at the initial point x = {pointX}. Then explain how it changes as you move the point.",
     "range-prediction": "Predict the horizontal landing distance at speed {speed} m/s, angle {angle} degrees and gravity {gravity} m/s². Assume no drag and equal heights.",
@@ -76,7 +84,9 @@ export function validateLesson(value: unknown): LessonValidation {
     if (value.moduleVersion !== descriptor.version) fail("moduleVersion", "Unsupported module version");
     if (!descriptor.assessmentIds.includes(value.assessmentId as string)) fail("assessmentId", "Unknown module assessment");
     const before = errors.length;
-    check(value.settings, descriptor.settingsSchema, "settings", errors);
+    // A blueprint has its own validator: structure, safe strings, references and a full run.
+    if (isSystemsModule(descriptor.id)) errors.push(...validateSystemsSettings(descriptor.id, value.settings));
+    else check(value.settings, descriptor.settingsSchema, "settings", errors);
     if (errors.length === before) {
       if (descriptor.id === "projectile") {
         const s = value.settings as unknown as ProjectileSettings;
@@ -105,11 +115,15 @@ export function assessLesson(lesson: VisualLesson, response: AssessmentResponse)
   if (!object(response) || !("answer" in response)) return result("invalid", "Expected a structured assessment response");
   if (response.settings !== undefined) {
     if (!object(response.settings)) return result("invalid", "Expected model settings");
-    const editable = lesson.moduleId === "projectile" ? ["speed", "angle"] : lesson.moduleId === "function-plotter" ? ["pointX", "scale", "shiftY"] : [];
+    const editable = lesson.moduleId === "projectile" ? ["speed", "angle"] : lesson.moduleId === "function-plotter" ? ["pointX", "scale", "shiftY"] : SYSTEMS_EDITABLE[lesson.moduleId] ?? [];
     for (const key of Object.keys(response.settings)) if (!editable.includes(key) && JSON.stringify(response.settings[key]) !== JSON.stringify(lesson.settings[key])) return result("invalid", "Only the module's learner controls may change");
     const edited = validateLesson({...lesson, settings:{...lesson.settings,...response.settings}});
     if (!edited.valid) return result("invalid", edited.errors.map(e=>e.message).join("; "));
     lesson = edited.lesson;
+  }
+  if (isSystemsModule(lesson.moduleId)) {
+    const correct = systemsMatches(systemsAnswer(lesson), response.answer);
+    return result(correct ? "correct" : "incorrect", correct ? "Matches the model. Explain why, then try a fresh unaided problem." : "Does not match this model. Step through the trace and explain where your prediction parts from it.");
   }
   let expected: unknown;
   if (lesson.moduleId === "function-plotter") expected = evaluate(lesson.settings as unknown as PlotSettings, Number(lesson.settings.pointX)).slope;

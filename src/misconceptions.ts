@@ -10,6 +10,7 @@
 // The transitions are pure functions over saved attempts, so they can be replayed and tested
 // without a model. They never touch a level: mastery stays derived from assessments alone.
 
+import { conclusive } from "./grading";
 import type { Attempt } from "./evidence";
 import { similarity, slug } from "./course";
 
@@ -116,8 +117,8 @@ function matches(rec: Misconception, concept: string, p: { id?: string; descript
   return norm(rec.description) === norm(p.description) || similarity(rec.description, p.description) >= 0.5;
 }
 
-/** An attempt that can count as evidence either way: marked, not disputed, not a self-rating. */
-export const countable = (a: Attempt | undefined): a is Attempt => !!a && a.result !== "ungraded" && a.result !== "skipped" && a.verification !== "disputed" && a.grading !== "self";
+/** An attempt that can count as evidence either way: marked, not disputed, not a self-rating, not a cold probe, and a mark its breakdown backs. */
+export const countable = (a: Attempt | undefined): a is Attempt => !!a && !a.probe && a.result !== "ungraded" && a.result !== "skipped" && a.verification !== "disputed" && a.grading !== "self" && conclusive(a);
 const shows = (a: Attempt | undefined): boolean => countable(a) && (a.result === "incorrect" || a.result === "partial");
 const corrects = (a: Attempt | undefined): boolean => countable(a) && a.result === "correct" && !a.assisted && !a.answerExposed;
 

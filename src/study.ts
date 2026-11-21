@@ -11,10 +11,15 @@ import { Material, TurnResult, PresentationOutcome } from "./engine";
 import { Attempt, gradingLabel } from "./evidence";
 import { Mode, fmStr, splitFrontmatter } from "./formats";
 import { ACTION_LABEL, Action, POLICY_VERSION } from "./policy";
+import { bktTrace, brierComparison, comparisonLine, mcqOptions, shadowLine } from "./bkt";
 import { SessionRecord, openQuestion, sessionFor } from "./session";
 import { toolLine } from "./tools";
 import { moveLine } from "./tutormove";
 import { reasoningLines } from "./reasoning";
+import { conclusive, markLine } from "./grading";
+import { isBankId } from "./bankvariants";
+import { coverageOf, coverageSummary } from "./coverage";
+import { codeRunSummary, codeTestRows } from "./codequestions";
 import { expansionLine } from "./expansion";
 import type { Screen, TutorView } from "./view";
 import { MODE_INFO, button, chip, confirmAction, iconButton, modeInfo } from "./ui";
@@ -318,6 +323,15 @@ export class StudyScreen implements Screen {
     const box = el.createDiv({ cls: "st-why-detail" });
     const label = ACTION_LABEL[record!.action as Action];
     box.createDiv({ cls: "st-why-reason", text: label ? `${label}: ${reason}` : reason });
+    // How many of this concept's ideas have been asked and secured (coverage.ts), once the bank is read.
+    const { dir, topic, state } = v;
+    const focus = record!.skill;
+    if (dir && topic && state && focus !== null) {
+      void v.plugin.store.loadQuestions(dir).then((qs) => {
+        const sum = coverageSummary(coverageOf(topic, qs, state, focus));
+        if (sum.total > 1 && box.isConnected) box.createDiv({ cls: "st-meta", text: `Ideas in this concept: ${sum.asked} of ${sum.total} asked, ${sum.secured} secured.` });
+      }).catch(() => undefined);
+    }
     if (!decision) {
       box.createDiv({ cls: "st-meta", text: `Policy version ${POLICY_VERSION}. The scores behind this step are shown after the next turn.` });
       return;
@@ -335,6 +349,8 @@ export class StudyScreen implements Screen {
         for (const x of [s.score, s.parts.gap, s.parts.exam, s.parts.prerequisite, s.parts.errors, s.parts.uncertainty, s.parts.recency]) tr.createEl("td", { cls: "st-num", text: x.toFixed(2) });
       }
     }
+    const exam = decision.scores.find((s) => s.n === decision.focus)?.exam;
+    if (exam) box.createDiv({ cls: "st-meta", text: `Exam: ${exam.about || "metadata given"}. ${exam.note || "It does not change the ranking here."}` });
     box.createDiv({ cls: "st-meta", text: `Policy version ${POLICY_VERSION}. Scores only rank what to study next. Levels change through marked answers and nothing else. Weights are in settings.` });
   }
 
@@ -385,6 +401,7 @@ export class StudyScreen implements Screen {
     const tail = this.tailEl;
     tail.empty();
     const chat = v.chat;
+    const probe = chat ? fmStr(chat.fm, "probe") === "yes" : false;
     const info = modeInfo(v.mode);
     const lastMsg = chat?.messages[chat.messages.length - 1];
 
@@ -400,11 +417,12 @@ export class StudyScreen implements Screen {
       return;
     }
 
+    if (probe) tail.createDiv({ cls: "st-notice st-probe-banner", text: "Cold probe: sealed questions, no help, levels unchanged." });
     if (this.changes.length) chip(tail, `Progress updated: ${this.changes.join("; ")}`, "good", "trending-up");
     if (this.marked) this.feedback(tail, this.marked);
     this.expansionChip(tail);
     const activity = this.activity;
-    if (activity && activity.dir === v.dir && activity.chatPath === v.chatPath) {
+    if (activity && !probe && activity.dir === v.dir && activity.chatPath === v.chatPath) {
       const out = activity.outcome;
       const card = tail.createDiv({ cls: "st-notice st-activity-offer" });
       card.createDiv({ cls: "st-meta", text: out.decision.reason });
@@ -523,13 +541,25 @@ export class StudyScreen implements Screen {
     if (a.confidence !== null) bits.push(`your confidence: ${confidenceLabel(a.confidence).toLowerCase()}`);
     if (a.seconds !== null) bits.push(a.seconds < 90 ? `${a.seconds}s` : `${Math.round(a.seconds / 60)} min`);
     line.createSpan({ cls: "st-meta", text: bits.join(" · ") });
+    // A code answer: how many tests passed and what ran them, or why it was not run.
+    if (a.code) box.createDiv({ cls: "st-meta", text: codeRunSummary(a.code) });
     const more = box.createEl("details", { cls: "st-feedback-more" });
     more.createEl("summary", { text: "How this was checked" });
     if (a.assumptions) more.createDiv({ cls: "st-meta", text: `Basis: ${a.assumptions}.` });
-    more.createDiv({ cls: "st-meta", text: a.assisted || a.answerExposed ? "Because help was given or the answer had been seen, this does not count as unaided evidence." : a.grading === "self" ? "A self-rating does not count as evidence for a level." : a.result === "ungraded" ? "An unmarked answer changes nothing." : "This counts as unaided evidence." });
+    more.createDiv({ cls: "st-meta", text: a.probe ? "This counts toward the unseen-task score only." : a.assisted || a.answerExposed ? "Because help was given or the answer had been seen, this does not count as unaided evidence." : a.grading === "self" ? "A self-rating does not count as evidence for a level." : a.result === "ungraded" ? "An unmarked answer changes nothing." : !conclusive(a) ? "The breakdown could not back this mark, so it does not count as evidence either way." : "This counts as unaided evidence." });
+    const ml = markLine(a);
+    if (ml) more.createDiv({ cls: "st-meta st-reasoning", text: ml });
     if (a.note) more.createDiv({ cls: "st-meta", text: a.note });
     // The result, the method and the assumptions, each with who decided it.
     if (a.reasoning) for (const l of reasoningLines(a.reasoning)) more.createDiv({ cls: "st-meta st-reasoning", text: l });
+    // Each test, hidden ones named now that the answer is marked, with the first failures' details as plain text.
+    if (a.code) {
+      if (a.code.status === "compile-error" && a.code.message) more.createEl("pre", { cls: "st-meta", text: a.code.message });
+      for (const row of codeTestRows(a.code)) {
+        more.createDiv({ cls: "st-meta st-reasoning", text: row.line });
+        if (row.detail) more.createEl("pre", { cls: "st-meta", text: row.detail });
+      }
+    }
     if (this.markedNote) box.createDiv({ cls: "st-meta", text: this.markedNote });
     if (a.result === "ungraded" || a.result === "skipped" || a.grading === "self" || this.busy || !v.dir) return;
     const row = box.createDiv({ cls: "st-actions" });
@@ -544,7 +574,8 @@ export class StudyScreen implements Screen {
             const r = await v.plugin.engine.dispute(dir, a.id, v.chatPath ?? undefined);
             this.marked = r.attempt;
             this.changes = r.changes;
-            this.markedNote = "The mark no longer counts either way. " + (/^Q\d+$/.test(a.questionId) ? "You can ask for a second opinion, or carry on." : "The tutor will look at your answer again on your next message.");
+            // A probe chat never calls the tutor, and a sealed question has no regrade: the next message answers the next question.
+            this.markedNote = a.probe ? "This answer no longer counts in the unseen-task score." : "The mark no longer counts either way. " + (isBankId(a.questionId) ? "You can ask for a second opinion, or carry on." : "The tutor will look at your answer again on your next message.");
             if (v.chatPath) v.chat = await v.plugin.store.loadChat(v.chatPath);
             await v.stateChanged(r.state);
           } catch (e) {
@@ -553,7 +584,7 @@ export class StudyScreen implements Screen {
           this.sync();
         },
       });
-    } else if (/^Q\d+$/.test(a.questionId)) {
+    } else if (isBankId(a.questionId)) {
       const b = button(row, { label: "Regrade with more thinking (uses tokens)", icon: "refresh-cw", tone: "ghost" });
       b.onclick = async () => {
         b.disabled = true;
@@ -589,6 +620,9 @@ export class StudyScreen implements Screen {
     const v = this.view;
     const question = this.openQuestionText();
     const asking = v.mode === "expert";
+    // A cold probe gives no help, so nothing that asks for a hint, an explanation or an activity is offered.
+    const probe = v.chat ? fmStr(v.chat.fm, "probe") === "yes" : false;
+    const NO_HELP = "No help during a cold probe";
 
     // Help with the open question, beside the box you type in.
     const q = this.quickEl;
@@ -597,13 +631,16 @@ export class StudyScreen implements Screen {
     if (!asking) {
       const quick = (label: string, icon: string, message: string, title: string) => {
         const b = button(q, { label, icon, tone: "ghost", title: `${label}: ${title}`, onClick: () => void this.send(message) });
-        b.disabled = this.busy || !question;
+        const help = probe && label !== "Skip";
+        b.disabled = this.busy || !question || help;
+        if (help) { b.title = NO_HELP; b.setAttribute("aria-label", NO_HELP); }
       };
       quick("Hint", "life-buoy", "Hint please.", "ask for a hint. The answer then counts as helped.");
       quick("Explain", "book-open", "Explain this to me.", "ask for an explanation. The answer then counts as helped.");
       quick("Skip", "skip-forward", "skip", "skip this question and see the answer. It is recorded as skipped.");
       const activity = button(q, { label: "Visual", icon: "play", tone: "ghost", title: "Visual activity: ask for a simulation of this concept. Uses a saved activity or Ollama.", onClick: () => void this.send("Show me a simulation for this concept.") });
-      activity.disabled = this.busy;
+      activity.disabled = this.busy || probe;
+      if (probe) { activity.title = NO_HELP; activity.setAttribute("aria-label", NO_HELP); }
     }
 
     this.input.placeholder = asking ? "Ask a question…  (Enter to send, Shift+Enter for a new line)" : question ? "Your answer…  (Enter to send, Shift+Enter for a new line)" : "Message…  (Enter to send, Shift+Enter for a new line)";
@@ -655,9 +692,35 @@ export class StudyScreen implements Screen {
     if (r?.expansion) body.createDiv({ text: `${expansionLine(r.expansion)}.` });
     for (const n of r?.notes ?? []) body.createDiv({ text: `Note: ${n}.` });
     for (const t of r?.tools ?? []) body.createDiv({ text: `Tool: ${toolLine(t)}.` });
+    this.shadowLines(body);
     const su = v.sessionUsage;
     const st = su.input + su.cacheRead + su.cacheWrite;
     body.createDiv({ text: `This sitting: ${k(st)} tokens in (${st ? Math.round((100 * su.cacheRead) / st) : 0}% from cache) · ${k(su.output)} out over ${su.calls} call${su.calls === 1 ? "" : "s"}.` });
+  }
+
+  /** Multiple-choice option counts of the open topic's bank, for BKT's guess floor. Loaded once per topic. */
+  private bankOptions: { dir: string; options: Record<string, number> | null } | null = null;
+
+  /** Knowledge tracing on the focus concept, in shadow (bkt.ts): shown and scored, never used to decide. */
+  private shadowLines(body: HTMLElement): void {
+    const v = this.view;
+    const st = v.state;
+    const n = st?.focus;
+    if (!st || n === null || n === undefined || !(n in st.names) || !v.dir) return;
+    if (this.bankOptions?.dir !== v.dir) {
+      const dir = v.dir;
+      this.bankOptions = { dir, options: null };
+      void v.plugin.store.loadQuestions(dir).then(mcqOptions, () => ({})).then((options) => {
+        if (this.bankOptions?.dir !== dir) return;
+        this.bankOptions.options = options;
+        this.syncDiagnostics();
+      });
+      return;
+    }
+    if (!this.bankOptions.options) return;
+    const t = bktTrace(st.attempts, n, { options: this.bankOptions.options });
+    body.createDiv({ text: `${shadowLine(t)}, on ${st.names[n]}.` });
+    body.createDiv({ cls: "st-meta", text: `${comparisonLine(brierComparison([t]))}.` });
   }
 
   // ---------- actions ----------

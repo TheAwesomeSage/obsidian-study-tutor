@@ -198,7 +198,7 @@ test("home, study, review, topic page and graph work together from the normal en
   // The reasoning behind the action is one click away.
   $(root, ".st-why-btn").click();
   assert.equal($(root, ".st-why-btn").getAttribute("aria-expanded"), "true");
-  assert.match($(root, ".st-why-detail").textContent, /^Diagnosis: Chosen because other concepts rest on it\. There is no evidence on Definition of a linear map yet[\s\S]*Policy version 3\./);
+  assert.match($(root, ".st-why-detail").textContent, /^Diagnosis: Chosen because other concepts rest on it\. There is no evidence on Definition of a linear map yet[\s\S]*Policy version 4\./);
   $(root, ".st-why-btn").click();
   assert.equal(root.querySelector(".st-why-detail"), null);
 
@@ -706,4 +706,213 @@ test("what was rendered is checked again: anything still pointing outside the va
   assert.deepEqual(Array.from(box.querySelectorAll("img"), (i) => i.getAttribute("alt")), ["kept", "inline"]);
   assert.equal(box.querySelectorAll("a, use").length, 2, "a link is only followed on a click, and a shape in the same picture is local");
   assert.equal((box.textContent ?? "").split("[remote content blocked]").length - 1, 5);
+});
+
+test("cold probes: the topic page shows the unseen-task score and starts a probe, Home says when one is due, and the study screen offers no help during it", async () => {
+  const fs = new MemFS();
+  const leaves: any[] = [];
+  let plugin: any = null;
+  const app = makeApp(fs, leaves, [], () => plugin);
+  plugin = new (StudyTutorPlugin as any)(app, { id: "study-tutor" }) as StudyTutorPlugin;
+  await plugin.onload();
+  await tick();
+  const out = parseCompileOutput(COMPILED);
+  const dir = await plugin.store.saveCompiled({ title: "Linear maps", fm: { source: "notes", subject: out.subject, kind: "subject" }, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
+  const status = (o: object) => ({ count: 0, due: false, why: "", asked: 0, correct: 0, lastProbe: null, notTransferring: [], sealedTotal: 0, ...o });
+  let now: any = status({});
+  let started = 0;
+  const startedFor: string[] = [];
+  plugin.engine.probeStatus = async () => now;
+  plugin.engine.startProbe = async (d: string) => {
+    started++;
+    startedFor.push(d);
+    const chatPath = await plugin.store.newChat(d, "Linear maps", "quiz");
+    const chat = await plugin.store.loadChat(chatPath);
+    chat.fm.probe = "yes";
+    chat.fm.card = "s1";
+    chat.messages.push({ role: "tutor", text: "**Cold probe** · 2 questions · no hints or explanations until you finish.\n\nWhy is the kernel a subspace?" });
+    await plugin.store.saveChat(chatPath, chat);
+    return { chatPath, count: 2 };
+  };
+  const view: any = await plugin.activateView();
+  const root = view.contentEl;
+  await view.reload();
+  const topicPage = async () => {
+    view.go("home");
+    view.go("topic");
+    await tick();
+  };
+  const unseen = () => $(root, ".st-probe-status")?.textContent ?? "";
+  const takeButton = () => $$(root, "button").some((b: any) => /Take a cold probe/.test(b.textContent));
+  await topicPage();
+  assert.equal(unseen(), "No sealed questions yet. Recompile the topic to add cold probes.");
+  assert.equal(takeButton(), false, "no button without questions");
+
+  now = status({ sealedTotal: 4, count: 2, asked: 1, correct: 1, lastProbe: "2026-11-20" });
+  await topicPage();
+  assert.equal(unseen(), "Unseen-task score: after 3 cold-probe answers (1 so far).");
+
+  now = status({ sealedTotal: 4, count: 2, asked: 3, correct: 2, lastProbe: "2026-11-20", notTransferring: [2, 99] });
+  await topicPage();
+  assert.equal(unseen(), "Unseen-task score: 2/3 on sealed questions (last probe 2026-11-20).");
+  assert.deepEqual($$(root, ".st-td-level .st-chip").map((c: any) => c.textContent), ["not transferring"], "only a row in the table is tagged");
+  assert.match($$(root, ".st-table tbody tr")[1].textContent, /not transferring/);
+
+  // asked 3 with no last-probe date must never print "null"; no questions left means no button.
+  now = status({ sealedTotal: 4, count: 0, asked: 3, correct: 3, lastProbe: null });
+  await topicPage();
+  assert.doesNotMatch(unseen(), /null/);
+  assert.equal(takeButton(), false);
+
+  now = status({ sealedTotal: 4, count: 2, asked: 3, correct: 2, lastProbe: "2026-11-20", due: true, why: "no probe yet" });
+  await topicPage();
+  button(root, "Take a cold probe (2)").click();
+  await tick(60);
+  assert.equal(started, 1);
+  assert.equal(root.getAttribute("data-screen"), "study");
+  assert.equal(view.chat.fm.probe, "yes");
+  assert.match(root.textContent, /Cold probe: sealed questions, no help, levels unchanged\./);
+  const quick = () => Object.fromEntries($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent.trim(), b]));
+  for (const name of ["Hint", "Explain", "Visual"]) {
+    assert.equal(quick()[name].disabled, true, `${name} is off in a probe`);
+    assert.equal(quick()[name].getAttribute("title"), "No help during a cold probe");
+  }
+  assert.equal(quick().Skip.disabled, false, "Skip stays on");
+
+  // Home: a card when due, naming its topic, whose Start begins a probe; nothing when nothing is due.
+  const dueTitle = () => $(root, ".st-probe-due .st-card-title")?.textContent ?? null;
+  view.go("home");
+  await tick();
+  assert.equal(dueTitle(), "Linear maps: Cold probe due · 2 questions · no probe yet");
+  now = status({ sealedTotal: 4, count: 1, due: true, why: "14 days since the last probe" });
+  view.go("topic");
+  view.go("home");
+  await tick();
+  assert.equal(dueTitle(), "Linear maps: Cold probe due · 1 question · 14 days since the last probe");
+  button($(root, ".st-probe-due"), "Start").click();
+  await tick(60);
+  assert.equal(started, 2);
+  assert.deepEqual(startedFor, [dir, dir]);
+  assert.equal(root.getAttribute("data-screen"), "study");
+  assert.equal(view.chat.fm.probe, "yes");
+  now = status({ sealedTotal: 4, count: 0 });
+  view.go("home");
+  await tick();
+  assert.equal($(root, ".st-probe-due"), null, "no card when nothing is due");
+
+  // With two topics, the card is for the topic with a probe due even when another one is open, and Start begins that topic's probe.
+  const other = await plugin.store.saveCompiled({ title: "Eigenvalues", fm: { source: "notes", subject: out.subject, kind: "subject" }, topicBody: out.topicBody.replace("# Linear maps", "# Eigenvalues"), questionsBody: out.questionsBody, target: 4 });
+  await view.reload();
+  view.go("home");
+  assert.equal(view.dir, dir, "Linear maps is still the open topic");
+  plugin.engine.probeStatus = async (d: string) => (d === other ? status({ sealedTotal: 2, count: 1, due: true, why: "14 days since the last probe" }) : status({ sealedTotal: 4 }));
+  view.go("topic");
+  view.go("home");
+  await tick();
+  assert.equal(dueTitle(), "Eigenvalues: Cold probe due · 1 question · 14 days since the last probe");
+  button($(root, ".st-probe-due"), "Start").click();
+  await tick(60);
+  assert.deepEqual(startedFor.slice(-1), [other]);
+  assert.equal(view.dir, other);
+  assert.equal(root.getAttribute("data-screen"), "study");
+});
+
+/** A topic with a sealed probe on each of its two concepts, both at level 3 with unaided successes before today. */
+async function probeReady(plugin: any): Promise<string> {
+  const out = parseCompileOutput(COMPILED);
+  const probes = "\n\n### Q4\nsubskill: 1\ntype: short\ntask: probe\nquestion: Does doubling every input of g(x) = 5x double every output? Answer yes or no.\nanswer: yes\nexplanation: g(2x) = 2g(x).\n\n"
+    + "### Q5\nsubskill: 2\ntype: short\ntask: probe\nquestion: How many vectors does an invertible 2 by 2 matrix send to zero?\nanswer: 1\nexplanation: Only the zero vector.\n";
+  const dir = await plugin.store.saveCompiled({ title: "Linear maps", fm: { source: "notes", subject: out.subject, kind: "subject" }, topicBody: out.topicBody, questionsBody: out.questionsBody + probes, target: 4 });
+  const state = await plugin.store.loadState(dir, 4);
+  for (const n of [1, 2]) {
+    state.levels[n] = 3;
+    for (const [k, day] of [["a", "2026-11-15"], ["b", "2026-11-16"]]) state.attempts.push({
+      v: 2, id: `u${n}${k}`, skill: n, concept: state.concepts[n], questionId: `q-${n}${k}`, question: `practice ${n}${k}`, answer: "a", activity: "independent-practice", mode: "quiz", difficulty: null,
+      result: "correct", errorType: "", note: "", confidence: null, assisted: false, assistance: [], answerExposed: false, transfer: false, seconds: null,
+      timestamp: `${day}T10:00:00.000Z`, grading: "deterministic", verification: "verified", assumptions: "",
+    });
+  }
+  await plugin.store.saveState(dir, state);
+  plugin.engine.today = () => "2026-11-17";
+  plugin.engine.call = async () => { throw new Error("no model call expected"); };
+  return dir;
+}
+
+test("cold probes: Practise never reopens a probe chat, and disputing a probe mark says it leaves the score instead of promising a tutor", async () => {
+  const fs = new MemFS();
+  const leaves: any[] = [];
+  let plugin: any = null;
+  const app = makeApp(fs, leaves, [], () => plugin);
+  plugin = new (StudyTutorPlugin as any)(app, { id: "study-tutor" }) as StudyTutorPlugin;
+  await plugin.onload();
+  await tick();
+  const dir = await probeReady(plugin);
+  const view: any = await plugin.activateView();
+  const root = view.contentEl;
+  await view.reload();
+  const sealed = await plugin.store.loadSealed(dir);
+  const answer = () => sealed.find((q: any) => q.id === view.chat.fm.card).answer;
+  const helpOn = () => {
+    assert.equal($(root, ".st-probe-banner"), null, "no probe banner");
+    const visual = $$(root, ".st-quick .st-btn").find((b: any) => b.textContent.trim() === "Visual");
+    assert.equal(visual.disabled, false, "help is offered");
+    assert.notEqual($$(root, ".st-quick .st-btn").find((b: any) => b.textContent.trim() === "Hint").getAttribute("title"), "No help during a cold probe");
+  };
+
+  await view.startProbe(dir);
+  await tick(60);
+  const probePath = view.chatPath;
+  assert.equal(view.chat.fm.probe, "yes");
+  await view.study.send(answer());
+  await tick(60);
+  assert.match($(root, ".st-feedback").textContent, /Marked correct/);
+  assert.match($(root, ".st-feedback").textContent, /This counts toward the unseen-task score only\./);
+  assert.doesNotMatch($(root, ".st-feedback").textContent, /unaided evidence/, "a probe answer is not called evidence for a level");
+
+  // Disputing a probe mark: the answer leaves the unseen-task score, and nothing says the tutor will look again.
+  button($(root, ".st-feedback"), "Dispute this mark").click();
+  await tick(60);
+  const note = $(root, ".st-feedback").textContent;
+  assert.match(note, /This answer no longer counts in the unseen-task score\./);
+  assert.doesNotMatch(note, /tutor will look/);
+  assert.equal($$(root, ".st-feedback button").some((b: any) => /Regrade/.test(b.textContent)), false, "no regrade for a sealed question");
+  const st = await plugin.engine.probeStatus(dir);
+  assert.equal(st.asked, 0, "the disputed answer is out of the score");
+  assert.equal((await plugin.store.loadState(dir, 4)).attempts.filter((a: any) => a.probe).length, 1, "it is still on record");
+
+  // Practise in the middle of a probe opens a normal chat with help.
+  view.go("home");
+  await tick();
+  button(root, "Practise").click();
+  await tick(60);
+  assert.notEqual(view.chatPath, probePath, "Practise does not resume the probe");
+  assert.equal(view.chat.fm.probe, undefined);
+  button(root, "Start quiz").click();
+  await tick(60);
+  assert.ok(view.chat.messages.length > 0);
+  helpOn();
+
+  // Back to the probe (starting one resumes it), finish it, then Practise again: a new normal chat, and the probe is no longer the topic's chat.
+  await view.startProbe(dir);
+  await tick(60);
+  assert.equal(view.chatPath, probePath);
+  await view.study.send(answer());
+  await tick(60);
+  assert.match(view.chat.messages[view.chat.messages.length - 1].text, /Cold probe finished/);
+  assert.equal(view.chat.fm.probe_done, "2026-11-17");
+  assert.notEqual(plugin.data.activeChat[dir], probePath, "a finished probe is not the topic's active chat");
+  view.go("home");
+  await tick();
+  button(root, "Practise").click();
+  await tick(60);
+  assert.notEqual(view.chatPath, probePath);
+  assert.equal(view.chat.fm.probe, undefined);
+  button(root, "Start quiz").click();
+  await tick(60);
+  helpOn();
+  // Reopening the topic does not pick the finished probe either, even when it is the only chat left.
+  for (const p of await plugin.store.listChats(dir)) if (p !== probePath) await view.deleteChat(p);
+  assert.deepEqual(await plugin.store.listChats(dir), [probePath]);
+  await view.reload();
+  assert.equal(view.chatPath, null);
 });

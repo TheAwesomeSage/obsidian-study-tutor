@@ -6,7 +6,9 @@
 // the subskills whose notes changed. Pure functions, no Obsidian imports.
 
 import type { Question, Topic } from "./formats";
+import { readObjectiveLine, type ObjectiveExam } from "./objective-meta";
 import type { StagedCourse } from "./compiler";
+import type { ObjectiveVersion } from "./objective-version";
 
 export const PACKAGE_VERSION = 1;
 
@@ -18,6 +20,8 @@ export interface PackageObjective {
   subskills: number[];
   questions: string[];
   covered: boolean;
+  /** Exam weight, paper, command words, marks, minutes and date, when the objective line gave them (docs/OBJECTIVE-METADATA.md). */
+  exam?: ObjectiveExam;
 }
 
 export interface PackageLesson {
@@ -56,6 +60,8 @@ export interface CoursePackage {
   /** Where the objectives came from: the card's Objectives section, or one per subskill. */
   objectivesFrom: "card" | "subskills";
   objectives: PackageObjective[];
+  /** The topic's exam date (yyyy-mm-dd), when the card gives one. */
+  examDate?: string;
   lessons: PackageLesson[];
   families: QuestionFamily[];
   rubrics: { question: string; rubric: string }[];
@@ -66,19 +72,58 @@ export interface CoursePackage {
   refreshed: { at: string; subskills: number[]; notes: string[] }[];
   /** Staged compilation metadata. Absent on courses built before staged compilation. */
   staged?: StagedCourse;
+  /**
+   * The version of each objective (objective-version.ts): it goes up only on a material change.
+   * Absent on packages from before 0.10; the first compile after that sets the baseline.
+   */
+  versions?: ObjectiveVersion[];
 }
 
 export function withStagedCoverage(pkg: CoursePackage, staged: StagedCourse): CoursePackage {
   const availability = new Map(staged.availability.map(a => [a.objective, a]));
   const objectives = staged.inventory.map(o => {
     const a = availability.get(o.id);
-    return { id: o.id, text: o.text, source: o.references.join(", "), subskills: a?.lessons ?? [], questions: a?.questions ?? [], covered: !!a && !a.gaps.length };
+    // Exam metadata the specification's wording carried, or else what the card's line for this id gave.
+    const line = readObjectiveLine(o.text);
+    const exam = line.exam ?? pkg.objectives.find(x => x.id === o.id)?.exam;
+    const text = line.exam ? (line.source ? `${line.text} (${line.source})` : line.text) : o.text;
+    return { id: o.id, text, source: o.references.join(", "), subskills: a?.lessons ?? [], questions: a?.questions ?? [], covered: !!a && !a.gaps.length, ...(exam ? { exam } : {}) };
   });
   const missing = objectives.filter(o => !o.covered).map(o => o.id);
   return { ...pkg, objectives, objectivesFrom: "card", staged, coverage: { ...pkg.coverage, objectives: objectives.length, covered: objectives.length - missing.length, missing, complete: staged.status === "complete" } };
 }
 
-const linkName = (l: string): string => l.replace(/^\[\[|\]\]$/g, "").split(/[|#]/)[0].trim();
+/** A question's family: the compiler's, or one made from its subskill and task. */
+export const familyId = (q: Question): string => q.family || `s${q.subskill}-${q.task ?? q.type}`;
+
+/**
+ * Groups a bank into question families and marks the ones kept for assessment: the transfer
+ * families, or else the last family of a subskill that has at least three. Practice never takes
+ * a question from a kept family, so the family is still unseen when an unaided check needs one.
+ */
+export function questionFamilies(questions: Question[]): QuestionFamily[] {
+  const groups = new Map<string, QuestionFamily>();
+  for (const q of questions) {
+    const id = familyId(q);
+    const f = groups.get(id) ?? { id, subskill: q.subskill, task: q.task ?? "", questions: [], reserved: false, derived: !q.family };
+    f.questions.push(q.id);
+    groups.set(id, f);
+  }
+  const families = [...groups.values()];
+  for (const n of new Set(families.map((f) => f.subskill))) {
+    const mine = families.filter((f) => f.subskill === n);
+    const transfer = mine.filter((f) => f.task === "transfer");
+    if (transfer.length) transfer.forEach((f) => (f.reserved = true));
+    else if (mine.length >= 3 && !mine[mine.length - 1].derived) mine[mine.length - 1].reserved = true;
+  }
+  return families;
+}
+
+/** The ids of the bank questions in families kept for assessment. */
+export const reservedQuestions = (questions: Question[]): Set<string> => new Set(questionFamilies(questions).filter((f) => f.reserved).flatMap((f) => f.questions));
+
+/** The note a [[link]] names, without alias or heading. */
+export const linkName = (l: string): string => l.replace(/^\[\[|\]\]$/g, "").split(/[|#]/)[0].trim();
 
 function citationsIn(text: string): string[] {
   const notes = [...text.matchAll(/\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/g)].map((m) => `[[${m[1].trim()}]]`);
@@ -96,27 +141,11 @@ export function buildPackage(p: { topic: Topic; questions: Question[]; concepts:
     ? topic.objectives!.map((o) => {
         const subskills = topic.subskills.filter((s) => (s.objectives ?? []).some((x) => x.toLowerCase() === o.id.toLowerCase())).map((s) => s.n);
         const qs = questions.filter((q) => subskills.includes(q.subskill)).map((q) => q.id);
-        return { id: o.id, text: o.text, source: o.source, subskills, questions: qs, covered: subskills.length > 0 && qs.length > 0 };
+        return { id: o.id, text: o.text, source: o.source, subskills, questions: qs, covered: subskills.length > 0 && qs.length > 0, ...(o.exam ? { exam: o.exam } : {}) };
       })
     : topic.subskills.map((s) => ({ id: `S${s.n}`, text: s.name, source: "subskill", subskills: [s.n], questions: bySkill(s.n).map((q) => q.id), covered: bySkill(s.n).length > 0 }));
 
-  const groups = new Map<string, QuestionFamily>();
-  for (const q of questions) {
-    const derived = !q.family;
-    const id = q.family || `s${q.subskill}-${q.task ?? q.type}`;
-    const f = groups.get(id) ?? { id, subskill: q.subskill, task: q.task ?? "", questions: [], reserved: false, derived };
-    f.questions.push(q.id);
-    groups.set(id, f);
-  }
-  const families = [...groups.values()];
-  for (const s of topic.subskills) {
-    const mine = families.filter((f) => f.subskill === s.n);
-    const transfer = mine.filter((f) => f.task === "transfer");
-    // Fresh families are kept for assessment: the transfer ones, or else the last family of a
-    // subskill that has at least three.
-    if (transfer.length) transfer.forEach((f) => (f.reserved = true));
-    else if (mine.length >= 3 && !mine[mine.length - 1].derived) mine[mine.length - 1].reserved = true;
-  }
+  const families = questionFamilies(questions);
 
   const missing = objectives.filter((o) => !o.covered).map((o) => o.id);
   const withoutQ = lessons.filter((l) => l.questions === 0).map((l) => l.n);
@@ -131,6 +160,7 @@ export function buildPackage(p: { topic: Topic; questions: Question[]; concepts:
     research: p.research,
     objectivesFrom: fromCard ? "card" : "subskills",
     objectives,
+    ...(topic.examDate ? { examDate: topic.examDate } : {}),
     lessons,
     families,
     rubrics: questions.filter((q) => q.rubric).map((q) => ({ question: q.id, rubric: q.rubric! })),

@@ -205,6 +205,12 @@ export class TutorView extends ItemView {
       const remembered = this.plugin.data.activeChat[dir];
       const path = remembered && chats.includes(remembered) ? remembered : chats[chats.length - 1];
       if (path) await this.openChat(path, false);
+      // A finished cold probe is not the chat a topic reopens on. (openChat set the chat, which TypeScript cannot see.)
+      const opened = this.chat as Chat | null;
+      if (opened && fmStr(opened.fm, "probe_done")) {
+        this.chat = null;
+        this.chatPath = null;
+      }
       if (this.plugin.data.activeTopic !== dir) {
         this.plugin.data.activeTopic = dir;
         await this.plugin.save();
@@ -234,7 +240,12 @@ export class TutorView extends ItemView {
     this.chatPath = path;
     const m = fmStr(this.chat.fm, "mode", "tutor") as Mode;
     this.mode = MODE_INFO.some((p) => p.mode === m) ? m : "tutor";
-    if (remember && this.dir && this.plugin.data.activeChat[this.dir] !== path) {
+    // A finished cold probe can be reread, but it is no longer the topic's chat.
+    const done = !!fmStr(this.chat.fm, "probe_done");
+    if (done && this.dir && this.plugin.data.activeChat[this.dir] === path) {
+      delete this.plugin.data.activeChat[this.dir];
+      await this.plugin.save();
+    } else if (remember && !done && this.dir && this.plugin.data.activeChat[this.dir] !== path) {
       this.plugin.data.activeChat[this.dir] = path;
       await this.plugin.save();
     }
@@ -286,14 +297,30 @@ export class TutorView extends ItemView {
         this.state.focus = o.focus;
         await this.plugin.store.saveState(this.dir, this.state);
       }
+      // A cold probe is in quiz mode too, but is never continued as practice.
+      const probe = !!this.chat && fmStr(this.chat.fm, "probe") === "yes";
       if (o.chatPath) await this.openChat(o.chatPath);
-      else if (o.mode && !(this.chat && this.mode === o.mode && !o.focus)) await this.newChat(o.mode);
+      else if (o.mode && !(this.chat && !probe && this.mode === o.mode && !o.focus)) await this.newChat(o.mode);
       else if (!this.chat) await this.newChat(o.mode ?? this.mode);
     } catch (e) {
       new Notice(`Study Tutor: ${(e as Error).message}`);
     }
     this.show("study");
     if (o.begin && this.chat && !this.chat.messages.length && this.mode !== "expert") void this.study.send("");
+  }
+
+  /** Starts a cold probe on a topic and opens it. When nothing is ready any more, the screen is only redrawn. */
+  async startProbe(dir: string): Promise<void> {
+    try {
+      const made = await this.plugin.engine.startProbe(dir);
+      if (made) {
+        await this.startStudy({ dir, chatPath: made.chatPath });
+        return;
+      }
+    } catch (e) {
+      new Notice(`Study Tutor: ${(e as Error).message}`);
+    }
+    this.screens[this.screen].refresh?.();
   }
 
   /** Acts on a suggested step: the review screen, or a chat in the right mode on the right concept. */

@@ -11,6 +11,8 @@ import { sessionFor } from "./session";
 import { activeDescriptions, recompute } from "./misconceptions";
 import { REASONING_RULE, ReasoningAssessment, parseReasoning, rubricBrief } from "./reasoning";
 import { GRADE_REASONING_SCHEMA, applyAttempt } from "./engine-common";
+import { normaliseMark, outcomeOfGrade, withNote } from "./grading";
+import { taskOf } from "./bankvariants";
 import type { Engine } from "./engine";
 
 /**
@@ -74,16 +76,23 @@ export async function regrade(eng: Engine, dir: string, attemptId: string): Prom
   if (!found) throw new Error("That attempt is no longer on record.");
   const { state, attempt: a } = found;
   if (found.dir !== dir) throw new Error("This answer was marked in conversation, so there is no model answer to regrade it against. Ask the tutor to look again.");
-  const q = (await eng.store.loadQuestions(dir)).find((x) => x.id === a.questionId);
+  const q = taskOf(await eng.store.loadQuestions(dir), a.questionId)?.question;
   if (!q) throw new Error("This answer was marked in conversation, so there is no model answer to regrade it against. Ask the tutor to look again.");
   const g = await eng.grade(q, a.answer, true);
-  a.result = g.grade === "again" ? "incorrect" : g.grade === "hard" ? "partial" : "correct";
+  // The second opinion is held to its own breakdown like any other mark (grading.ts).
+  const mark = normaliseMark({ proposed: outcomeOfGrade(g.grade), reasoning: g.reasoning, rubric: q.rubric });
+  a.result = mark.result;
   a.grading = "model";
   a.verification = "unverified";
-  a.note = `Regraded after a dispute. ${g.feedback}`.trim();
+  a.note = `Regraded after a dispute. ${withNote(g.feedback, mark)}`.trim();
   a.assumptions = "a second model judgement with more thinking, after the first mark was disputed";
-  if (g.reasoning) a.reasoning = g.reasoning;
-  else delete a.reasoning;
+  if (g.reasoning) {
+    a.reasoning = g.reasoning;
+    a.mark = mark.basis;
+  } else {
+    delete a.reasoning;
+    delete a.mark;
+  }
   const changes = [...applyAttempt(state, a), ...eng.recomputeMisconceptions(state)];
   await eng.store.saveState(dir, state);
   return { state, attempt: a, changes, usage: g.usage };

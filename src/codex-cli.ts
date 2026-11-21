@@ -106,7 +106,11 @@ function codexArgs(opts: CodexCall, dir: string, instructions: string, schemaFil
 
 const tokens = (value: unknown): number => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 
-/** Only the final assistant message and turn usage leave the Codex JSONL stream. */
+/**
+ * Only the final assistant message and turn usage leave the Codex JSONL stream. Its events
+ * (thread.started, turn.*, item.*) name no model, so a result carries no `model` and callers keep
+ * the configured model as its identity.
+ */
 export class CodexTurn {
   private text: string | undefined;
   private usage: JsonObject | null = null;

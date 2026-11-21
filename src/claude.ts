@@ -55,6 +55,30 @@ export interface CallResult {
   text: string;
   structured?: unknown;
   usage: Usage;
+  /**
+   * The concrete model that answered, when the CLI reports it (Claude Code does, in `modelUsage`;
+   * Codex exec events name no model, so it is unset there). An alias such as "sonnet" resolves to
+   * a dated model id, and this is that id.
+   */
+  model?: string;
+}
+
+/**
+ * The model that answered, from Claude Code's JSON result. Its `modelUsage` holds per-model totals
+ * keyed by the model id the API was called with (for example "claude-sonnet-4-5-20250929"), for
+ * every model call in the run: the main reply, and any fallback or internal call. The main reply
+ * writes most of the output, so with several entries the one with the most output tokens is it.
+ */
+export function answeringModel(modelUsage: unknown): string | undefined {
+  if (!modelUsage || typeof modelUsage !== "object" || Array.isArray(modelUsage)) return undefined;
+  let best: string | undefined, most = -1;
+  for (const [id, u] of Object.entries(modelUsage as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))) {
+    if (!/^[\w.:@/[\]-]{1,200}$/.test(id)) continue;
+    const out = u && typeof u === "object" ? Number((u as { outputTokens?: unknown }).outputTokens) : NaN;
+    const n = Number.isFinite(out) ? out : 0;
+    if (n > most) { best = id; most = n; }
+  }
+  return best;
 }
 
 export class ClaudeError extends Error {}
@@ -186,7 +210,7 @@ export function callClaude(opts: CallOptions): Promise<CallResult> {
           return;
         }
         // A reply is rendered as Markdown and saved into notes, so nothing in it may load from outside the vault.
-        resolve({ text: neutraliseRemote(String(j.result ?? "")), structured: neutraliseDeep(j.structured_output), usage });
+        resolve({ text: neutraliseRemote(String(j.result ?? "")), structured: neutraliseDeep(j.structured_output), usage, model: answeringModel(j.modelUsage) });
       }),
     );
     child.stdin.on("error", () => {

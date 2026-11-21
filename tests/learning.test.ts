@@ -6,7 +6,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as F from "../src/formats";
-import { Attempt, missingFor, normaliseAttempt, recordAttempt, skillEvidence, supportedLevel } from "../src/evidence";
+import { Attempt, checkDue, missingFor, normaliseAttempt, recordAttempt, skillEvidence, supportedLevel } from "../src/evidence";
+import { classifyChange, conceptRevisions, materialText, traceAttempt, versionObjectives } from "../src/objective-version";
+import { digest } from "../src/compile-sources";
+import { bankCount, sealedId, splitSealed } from "../src/sealed";
 import { effectivePrereqs, parseTopicGraph, syncTopicGraph, wouldCycle } from "../src/course";
 import { DEFAULT_WEIGHTS, LEARN_ACTIONS, PolicyInput, SkillInput, V1_WEIGHTS, decide, replay, scoreSkills } from "../src/policy";
 import { openQuestion, readIntent, readSessionReply, sessionFor } from "../src/session";
@@ -513,7 +516,7 @@ test("confidence, time, error type and how the mark was verified are recorded", 
   const a = r.attempt!;
   assert.deepEqual([a.result, a.errorType, a.note, a.confidence, a.difficulty, a.questionId], ["incorrect", "procedural", "dropped the second product-rule term", 0.9, 3, "q7"]);
   assert.ok(a.seconds !== null && a.seconds >= 89 && a.seconds <= 95, `time to answer was recorded (${a.seconds}s)`);
-  assert.deepEqual([a.grading, a.verification], ["model", "verified"], "the model marked it and SymPy confirmed the result the reply states");
+  assert.deepEqual([a.grading, a.verification], ["model", "unverified"], "the model marked it; SymPy confirmed the results the reply states, which does not verify the mark");
   assert.match(a.assumptions, /SymPy recomputed/);
   assert.equal(a.concept, "calculus/derivatives");
   assert.ok(r.tools!.some((x) => x.tool === "maths.check" && x.ok && x.kind === "step-validation"));
@@ -922,7 +925,7 @@ test("tools validate input, time out, cancel and report failures as results", as
 
   // The engine's own tools.
   const t = await setup();
-  assert.deepEqual(t.engine.tools.list().map((x) => x.name), ["maths.equivalent", "maths.check", "maths.compute", "vault.transcript", "vault.source", "vault.passage", "course.lesson", "graph.inspect"]);
+  assert.deepEqual(t.engine.tools.list().map((x) => x.name), ["maths.equivalent", "maths.check", "maths.compute", "vault.transcript", "vault.source", "vault.passage", "course.lesson", "graph.inspect", "code.run"]);
   const state = await t.store.loadState(t.dir, 4);
   state.levels = { 1: 1, 2: 3, 3: null };
   await t.store.saveState(t.dir, state);
@@ -1014,4 +1017,1260 @@ test("synoptic proposals validate target IDs, stay unreviewed and leave mastery 
     return JSON.stringify({ target: "", rationale: "", challenge: "" });
   });
   await assert.rejects(t.engine.suggestSynoptic(a.id), /No valid/);
+});
+
+// ---------- objective versions: editorial edits keep mastery, material changes ask for a recheck ----------
+
+test("objective versions: editorial edits are told apart from material changes, conservatively", () => {
+  const cls = (a: string, b: string) => classifyChange(materialText([a]), materialText([b])).change;
+  // Editorial: formatting, case, spacing, punctuation, links, a typo, a filler word.
+  assert.equal(cls("The chain rule differentiates compositions.", "The **chain rule**  differentiates\ncompositions"), "same");
+  assert.equal(cls("See [[Calc notes|notes]] for $x^n$.", "See Calc notes for x^n"), "same");
+  assert.equal(cls("Differentiate a composition of functions", "Diferentiate a composition of functions"), "editorial");
+  assert.equal(cls("Find the derivative of a product", "Find derivative of a product"), "editorial");
+  // Material: numbers, negation, connectives, conditions, a different word, a different order.
+  const material: [string, string][] = [
+    ["valid for n > 1", "valid for n > 2"],
+    ["the series converges", "the series does not converge"],
+    ["compute the derivative", "compute and interpret the derivative"],
+    ["valid for continuous f", "valid for differentiable f"],
+    ["a stack is last in first out", "a queue is last in first out"],
+    ["a implies b", "b implies a"],
+    ["state the rule", "state the rule unless f is constant"],
+  ];
+  for (const [a, b] of material) assert.equal(cls(a, b), "material", `${a} → ${b}`);
+  assert.match(classifyChange(materialText(["valid for n > 1"]), materialText(["valid for n > 2"])).why, /"1" became "2"/);
+});
+
+test("objective versions: ids that move keep their version; new, changed or uncomparable objectives are dated", () => {
+  const cur = (id: string, text: string, subskills = [1]) => {
+    const material = materialText([text]);
+    return { id, subskills, sources: ["p1"], material, fingerprint: digest(material) };
+  };
+  const first = versionObjectives({ previous: null, current: [cur("O1a", "Derive the power rule"), cur("O1b", "Apply the chain rule", [2])], at: "2026-11-01T00:00:00.000Z", previousText: () => null });
+  assert.deepEqual(first.map((v) => [v.id, v.v, v.materialAt]), [["O1a", 1, undefined], ["O1b", 1, undefined]], "a first compile sets the baseline and dates nothing");
+  const texts = new Map([[first[0].fingerprint, materialText(["Derive the power rule"])], [first[1].fingerprint, materialText(["Apply the chain rule"])]]);
+  const next = versionObjectives({
+    previous: first,
+    // O1a's passage moved, so its id changed; its text gained a typo fix. O1b gained a condition. O1c is new.
+    current: [cur("O1z", "Derive the powr rule"), cur("O1b", "Apply the chain rule to differentiable functions", [2]), cur("O1c", "Use implicit differentiation", [3])],
+    at: "2026-11-05T00:00:00.000Z",
+    previousText: (fp) => texts.get(fp) ?? null,
+  });
+  assert.deepEqual(next.map((v) => [v.id, v.v, v.materialAt ?? null, v.aliases ?? []]), [
+    ["O1z", 1, null, ["O1a"]],
+    ["O1b", 2, "2026-11-05T00:00:00.000Z", []],
+    ["O1c", 1, "2026-11-05T00:00:00.000Z", []],
+  ]);
+  assert.match(next[1].why!, /added "to differentiable functions"/);
+  // Without the earlier text there is nothing to compare: the change counts as material.
+  const blind = versionObjectives({ previous: first, current: [cur("O1a", "Derive the power rule for integers")], at: "2026-11-06T00:00:00.000Z", previousText: () => null });
+  assert.deepEqual([blind[0].v, blind[0].why], [2, "the earlier text is not available to compare"]);
+  assert.deepEqual(conceptRevisions(next)[2], { refs: ["O1b@2"], at: "2026-11-05T00:00:00.000Z", why: 'O1b changed: added "to differentiable functions"' });
+});
+
+test("objective versions: a material change asks for one focused recheck; an editorial edit keeps everything", async () => {
+  const t = await setup();
+  const today = new Date().toISOString().slice(0, 10);
+  t.setDay(today);
+  const req = (text: string) => ({ mode: "notes" as const, material: [{ name: "Calc notes", text }], research: false });
+  let pkg = await t.engine.writePackage(t.dir, req("The derivitive of x^n is n x^(n-1) for every real n."), null);
+  assert.deepEqual(pkg.versions!.map((v) => [v.id, v.v, v.materialAt ?? null]), [["S1", 1, null], ["S2", 1, null], ["S3", 1, null]]);
+  let st = await t.store.loadState(t.dir, 4);
+  assert.deepEqual([st.objectiveRefs, st.revisions], [{ 1: ["S1@1"], 2: ["S2@1"], 3: ["S3@1"] }, {}]);
+  // Unaided successes on subskill 2 recorded against version 1, on two days, one a transfer.
+  st.attempts.push(
+    attempt({ id: "v1", skill: 2, concept: st.concepts[2], questionId: "Q2", objectives: ["S2@1"], timestamp: "2026-11-10T10:00:00.000Z" }),
+    attempt({ id: "v2", skill: 2, concept: st.concepts[2], questionId: "Q3", objectives: ["S2@1"], timestamp: "2026-11-11T10:00:00.000Z", transfer: true, taskType: "transfer" }),
+  );
+  st.levels[1] = 4; // the prerequisite is in place, so the check on subskill 2 is what remains
+  st.levels[2] = 4;
+  await t.store.saveState(t.dir, st);
+  const before = F.mastery(await t.store.loadState(t.dir, 4), 2);
+
+  // Editorial: a typo fixed, emphasis, maths delimiters and a line break.
+  pkg = await t.engine.writePackage(t.dir, req("The **derivative** of $x^n$ is n x^(n-1)\nfor every real n"), pkg);
+  assert.deepEqual(pkg.versions!.map((v) => [v.v, v.materialAt ?? null]), [[1, null], [1, null], [1, null]]);
+  st = await t.store.loadState(t.dir, 4);
+  let m = F.mastery(st, 2);
+  assert.deepEqual([m.level, m.supported, m.evidence.recheck, m.evidence.nextCheck], [4, before.supported, null, before.evidence.nextCheck], "nothing about the evidence moved");
+
+  // Material: the source is corrected with an exception.
+  pkg = await t.engine.writePackage(t.dir, req("The derivative of x^n is n x^(n-1) for every real n except n = 0."), pkg);
+  assert.deepEqual(pkg.versions!.map((v) => v.v), [2, 2, 2]);
+  st = await t.store.loadState(t.dir, 4);
+  assert.deepEqual(st.objectiveRefs?.[2], ["S2@2"]);
+  assert.match(st.revisions?.[2]?.why ?? "", /^S2 changed: .*"except n = 0"/);
+  m = F.mastery(st, 2);
+  assert.equal(m.level, 4, "the level is not reset");
+  assert.equal(m.supported, before.supported, "earlier evidence still counts");
+  assert.equal(m.evidence.recheck?.why, st.revisions?.[2]?.why);
+  assert.ok(checkDue(m.evidence, today), "the recheck is due now");
+  // The policy asks for it, and says why.
+  const input = (t.engine as any).policyInput({ mode: "auto", state: st, pre: await t.store.prereqs(t.dir, await t.store.loadTopic(t.dir)), chat: await t.store.loadChat(await t.chatIn("auto")), session: sessionFor(await t.store.loadChat(await t.chatIn("auto")), st, "auto"), intent: "none", questions: await t.store.loadQuestions(t.dir), external: [] });
+  const sk = input.skills.find((k: SkillInput) => k.n === 2);
+  assert.deepEqual([sk.checkDue, typeof sk.recheck], [true, "string"]);
+  const d = decide({ ...input, focus: 2 });
+  assert.equal(d.action, "retrieval");
+  assert.match(d.reason, /The course changed what Derivatives asks for/);
+  // Source → objective → question → attempt.
+  assert.deepEqual(traceAttempt(pkg, st.attempts.find((a) => a.id === "v1")!), [{ id: "S2", assessed: 1, current: 2, sources: ["[[Calc notes]]"], questions: pkg.objectives.find((o) => o.id === "S2")!.questions }]);
+
+  // One unaided answer on the new version settles it, whatever else is on record.
+  st.attempts.push(attempt({ id: "v3", skill: 2, concept: st.concepts[2], questionId: "Q2", ...F.objectiveStamp(st, 2), timestamp: new Date().toISOString() }));
+  assert.equal(F.mastery(st, 2).evidence.recheck, null);
+  // Attempts from before versions were recorded are dated instead: one before the change does not count as current.
+  const legacy = skillEvidence([attempt({ id: "old", skill: 2, timestamp: "2026-11-10T10:00:00.000Z" })], 2, { at: "2026-11-12T00:00:00.000Z", why: "S2 changed" });
+  assert.equal(legacy.recheck?.since, "2026-11-12T00:00:00.000Z");
+  assert.equal(legacy.nextCheck, "2026-11-11", "the earlier of the normal check and the change day");
+});
+
+
+test("question families: practice never uses a family kept for assessment, and a transfer check takes an unmet one first", async () => {
+  const { pickQuizQuestion } = await import("../src/engine-common");
+  const { questionFamilies } = await import("../src/coursepkg");
+  const q = (id: string, subskill: number, family: string, task = "application"): F.Question => ({ id, subskill, type: "short", question: id, options: [], answer: "1", explanation: "", family, task });
+  const bank = [q("Q1", 1, "a"), q("Q2", 1, "b"), q("Q3", 1, "c"), q("Q4", 1, "c"), q("Q5", 2, "d"), q("Q6", 2, "e", "transfer")];
+  assert.deepEqual(questionFamilies(bank).filter((f) => f.reserved).map((f) => f.id), ["c", "e"], "the last of three families, and every transfer family");
+
+  const s = F.newState(F.parseTopic(CARD(NAMES)), 4);
+  const today = "2026-11-17";
+  const pick = (asked: string[], purpose?: "practice" | "retrieval" | "transfer", only?: (x: F.Question) => boolean) => pickQuizQuestion(bank, s, asked, today, { purpose, only })?.id ?? null;
+  const one = (x: F.Question) => x.subskill === 1;
+  assert.equal(pick(["Q1", "Q2"], "practice", one), null, "practice has nothing left once only kept families remain");
+  assert.equal(pick([], undefined, (x) => x.subskill === 2), "Q5", "Practise mode skips the transfer family too");
+  assert.equal(pick([], "transfer", one), "Q3", "a transfer check takes the kept family first");
+  assert.equal(pick(["Q1"], "retrieval", one), "Q2", "a retrieval check spends a kept family only when nothing else is left");
+  assert.equal(pick(["Q1", "Q2"], "retrieval", one), "Q3");
+
+  // Once the learner has met family c, a transfer check prefers a family still unmet.
+  s.attempts.push(attempt({ id: "a1", skill: 1, questionId: "Q3", timestamp: "2026-11-16T10:00:00.000Z" }));
+  s.attempts.push(attempt({ id: "a2", skill: 1, questionId: "Q1", timestamp: "2026-11-16T10:05:00.000Z" }));
+  assert.equal(pick(["Q3"], "transfer", one), "Q2", "b is the only family not met yet");
+
+  // Placement leaves the kept family alone when the subskill has another.
+  const placed = F.placementQuestions([q("P1", 1, "x", "transfer"), q("P2", 1, "y")], F.newState(F.parseTopic(CARD(NAMES)), 4));
+  assert.deepEqual(placed.map((x) => x.id), ["P2"]);
+});
+
+test("question families: a family kept for assessment is never a new review card or a Spaced Repetition card", () => {
+  const q = (id: string, subskill: number, family: string, task = "application"): F.Question => ({ id, subskill, type: "short", question: id, options: [], answer: "1", explanation: "", family, task });
+  const bank = [q("Q1", 1, "a"), q("Q2", 1, "b"), q("Q3", 1, "c"), q("Q4", 1, "d", "transfer")];
+  const s = F.newState(F.parseTopic(CARD(NAMES)), 4);
+  assert.deepEqual(F.reviewQueue(bank, s, "2026-11-17", 10).map((x) => x.id), ["Q1", "Q2", "Q3"]);
+  s.cards["Q4"] = F.schedule(undefined, "good", "2026-11-01");
+  assert.ok(F.reviewQueue(bank, s, "2026-11-17", 10).some((x) => x.id === "Q4"), "a family already met may be reviewed");
+  assert.ok(!F.buildSrNote(bank, "t").includes("Q4"));
+});
+
+/** A topic whose one bank question has a generator with worked steps and a known mistake. No model call is allowed. */
+async function motion() {
+  const gen = { v: 1, params: { u: { min: 1, max: 9 }, a: { min: 1, max: 5 }, t: { min: 2, max: 8 } },
+    template: "A cart starts at {u} m/s and speeds up at {a} m/s² for {t} s. What is its final speed in m/s?", answer: "u+a*t",
+    steps: ["Use v = u + a t.", "v = {u} + {a} × {t} = {=u+a*t}."],
+    mistakes: [{ label: "subtracted the change in speed", expr: "u-a*t", step: 1, says: "v = {u} − {a} × {t} = {=u-a*t}." }],
+    tests: [{ params: { u: 3, a: 2, t: 4 }, answer: 11 }] };
+  const bank = `### Q1\nsubskill: 1\ntype: short\ntask: application\nfamily: s1-velocity\nquestion: A cart starts at 3 m/s and speeds up at 2 m/s² for 4 s. What is its final speed in m/s?\nanswer: 11\nexplanation: v = u + at = 3 + 2·4 = 11.\ngenerator: ${JSON.stringify(gen)}\n`;
+  const fs = new MemFS();
+  const store = new Store(fs, "Tutor", () => "2026-11-17");
+  const settings: any = { claudePath: "", chatModel: "sonnet", compileModel: "sonnet", utilityModel: "haiku", effort: "low", targetLevel: 4, maxChatWords: 600, maxTopicWords: 2000, singlePassWords: 6000, smartRouting: false, hardEffort: "high", bankQuiz: true, codePlacement: true };
+  const engine = new Engine(store, () => settings, () => "2026-11-17");
+  let calls = 0;
+  (engine as any).call = async () => { calls++; throw new Error("no model call expected"); };
+  const dir = await store.saveCompiled({ title: "Motion", fm: { subject: "none" }, topicBody: CARD(NAMES), questionsBody: bank, target: 4 });
+  const questions = await store.loadQuestions(dir);
+  assert.ok(questions[0].generator, "the spec passed its checks and is kept with the question");
+  return { store, engine, dir, questions, fs, calls: () => calls };
+}
+
+test("question families: code asks new numbers, sets a repair task after a known mistake, then checks the fix without help", async () => {
+  const { taskOf } = await import("../src/bankvariants");
+  const { store, engine, dir, questions, calls } = await motion();
+  const chat = await store.newChat(dir, "Motion", "quiz", new Date(2026, 10, 17, 9, 0));
+  const card = async () => F.fmStr((await store.loadChat(chat)).fm, "card");
+  const answerOf = async () => taskOf(questions, await card())!.inst!;
+
+  let r = await engine.quizTurn(dir, chat, "");
+  assert.equal(await card(), "Q1", "the question as compiled comes first");
+  r = await engine.quizTurn(dir, chat, "11");
+  assert.match(r.reply, /\*\*Correct\.\*\*/);
+  assert.equal(await card(), "Q1~1", "met once, it comes back with new numbers");
+
+  const first = await answerOf();
+  r = await engine.quizTurn(dir, chat, String(first.params.u - first.params.a * first.params.t));
+  assert.match(r.reply, /\*\*Incorrect\.\*\* Your answer is what this mistake gives: subtracted the change in speed\./);
+  assert.equal(r.attempt?.errorType, "subtracted the change in speed");
+  assert.equal(await card(), "Q1~1#fix0", "a worked solution with that mistake comes next");
+  assert.match(r.reply, /one mistake in it/);
+
+  const cardsNow = async () => (await store.loadState(dir, 4)).cards;
+  const mistakeCard = "Q1#m-subtracted-the-change-in-speed";
+  const lapsed = await cardsNow();
+  assert.ok(lapsed[mistakeCard], "the known mistake starts a card of its own");
+  assert.equal(lapsed[mistakeCard].lapses, 1, "scheduled as a miss");
+  r = await engine.quizTurn(dir, chat, `step 2, answer ${first.answerText}, it should be a plus`);
+  assert.match(r.reply, /\*\*Correct\.\*\*/);
+  assert.equal(r.attempt?.assisted, true, "the repair is helped work");
+  assert.deepEqual(await cardsNow(), lapsed, "helped work moves no card: the solution was in view");
+  assert.equal(r.attempt?.taskType, "error-finding");
+  assert.equal(await card(), "Q1~2", "then new numbers check the fix");
+
+  const second = await answerOf();
+  r = await engine.quizTurn(dir, chat, second.answerText);
+  assert.match(r.reply, /\*\*Correct\.\*\*/);
+  assert.equal(r.attempt?.assisted, false);
+  assert.equal(r.attempt?.family, "s1-velocity", "same family: practice, not transfer");
+  assert.equal(calls(), 0, "no model call anywhere");
+
+  const st = await store.loadState(dir, 4);
+  assert.deepEqual(Object.keys(st.cards).sort(), ["Q1", mistakeCard], "new numbers share the question's card; the mistake has its own");
+  assert.ok(st.cards.Q1.reps > lapsed.Q1.reps, "an unaided right answer on new numbers advances the question's card");
+  assert.ok(st.cards[mistakeCard].reps > lapsed[mistakeCard].reps && st.cards[mistakeCard].due > lapsed[mistakeCard].due, "and the fresh check moves the mistake's card out");
+  const e = skillEvidence(st.attempts, 1);
+  assert.equal(e.independentCorrect, 1, "new numbers for one question count as one question");
+  assert.equal(e.delayedTransfer, false);
+});
+
+test("question families: in Adaptive mode, guided practice is a faded worked example on new numbers, marked by code as helped work", async () => {
+  const { store, engine, dir, calls } = await motion();
+  const st = await store.loadState(dir, 4);
+  st.levels[1] = 2;
+  st.taught[1] = "2026-11-16";
+  st.focus = 1;
+  await store.saveState(dir, st);
+  const chat = await store.newChat(dir, "Motion", "auto", new Date(2026, 10, 17, 9, 0));
+  const r = await engine.study(dir, chat, "");
+  assert.deepEqual([r.decision!.action, r.decision!.local, r.local], ["guided-practice", "bank", true]);
+  assert.match(r.reply, /A worked solution with its last step left for you:\n\n1\. Use v = u \+ a t\.\n2\. Step 2: …/);
+  const card = F.fmStr((await store.loadChat(chat)).fm, "card");
+  assert.equal(card, "Q1~1#fade1");
+  const { taskOf } = await import("../src/bankvariants");
+  const inst = taskOf(await store.loadQuestions(dir), card)!.inst!;
+  const a = await engine.study(dir, chat, inst.answerText);
+  assert.match(a.reply, /\*\*Correct\.\*\*/);
+  assert.deepEqual([a.attempt!.assisted, a.attempt!.grading, a.attempt!.verification], [true, "deterministic", "verified"]);
+  assert.match(a.attempt!.assistance.join(" "), /faded worked example/);
+  assert.equal(calls(), 0);
+});
+
+test("question families: a due mistake card sets a fresh check, and a known mistake card never counts as a flashcard to review", async () => {
+  const { store, engine, dir, questions, calls, fs } = await motion();
+  const { taskOf } = await import("../src/bankvariants");
+  const chat = await store.newChat(dir, "Motion", "quiz", new Date(2026, 10, 17, 9, 0));
+  const card = async (c = chat) => F.fmStr((await store.loadChat(c)).fm, "card");
+  await engine.quizTurn(dir, chat, "");
+  await engine.quizTurn(dir, chat, "11");
+  const first = taskOf(questions, await card())!.inst!;
+  await engine.quizTurn(dir, chat, String(first.params.u - first.params.a * first.params.t));
+  const st = await store.loadState(dir, 4);
+  const mistakeCard = "Q1#m-subtracted-the-change-in-speed";
+  assert.ok(st.cards[mistakeCard]);
+  assert.equal(F.dueCount(st, "2099-01-01"), 1, "only the question's card is a flashcard to review");
+  assert.equal(F.reviewCards(st).length, 1);
+  // Due and in a chat of its own: the check comes first, on numbers not used before, with no model call.
+  st.cards[mistakeCard] = { ...st.cards[mistakeCard], due: "2026-11-17" };
+  await store.saveState(dir, st);
+  const fresh = await store.newChat(dir, "Motion", "quiz", new Date(2026, 10, 17, 10, 0));
+  await engine.quizTurn(dir, fresh, "");
+  assert.match(await card(fresh), /^Q1~[2-9]$/, "new numbers, not the seeds already used");
+  assert.equal(calls(), 0);
+  // Not due, or the question already asked in this chat: no check is set.
+  const { dueMistake } = await import("../src/bankvariants");
+  assert.equal(dueMistake(questions, { ...st, cards: { ...st.cards, [mistakeCard]: { ...st.cards[mistakeCard], due: "2026-12-30" } } }, "2026-11-17", []), null);
+  assert.equal(dueMistake(questions, st, "2026-11-17", ["Q1~7"]), null, "this chat has met the question already");
+  assert.match(dueMistake(questions, st, "2026-11-17", [])!.reason, /subtracted the change in speed/);
+  // The cards of known mistakes go with their questions through a refresh that keeps them.
+  const raw = fs.files.get(`${dir}/questions.md`) as string;
+  const questionsBody = raw.slice(raw.indexOf("### Q1"));
+  await store.saveCompiled({ title: "Motion", fm: { subject: "none" }, topicBody: CARD(NAMES), questionsBody, target: 4, existingDir: dir, keepCards: ["Q1"] });
+  assert.ok((await store.loadState(dir, 4)).cards[mistakeCard], "kept with Q1");
+  await store.saveCompiled({ title: "Motion", fm: { subject: "none" }, topicBody: CARD(NAMES), questionsBody, target: 4, existingDir: dir });
+  assert.ok(!(await store.loadState(dir, 4)).cards[mistakeCard], "a new bank starts its schedule again");
+});
+
+test("question families: a contrasting pair follows the faded examples, is marked by code as helped work, and moves no card", async () => {
+  const { taskOf, pairedFor, markTask, followUp, mistakeUpdates } = await import("../src/bankvariants");
+  const { parseTaskId } = await import("../src/families");
+  const { store, engine, dir, questions, calls } = await motion();
+  const base = questions[0];
+  const s0 = F.newState(F.parseTopic(CARD(NAMES)), 4);
+  const q = pairedFor(base, s0, [])!;
+  assert.match(q.id, /^Q1~1#pair0$/);
+  assert.deepEqual(parseTaskId(q.id), { base: "Q1", seed: 1, kind: "pair", k: 0 });
+  assert.match(q.question, /Case 1, worked:[\s\S]*Answer: \d+[\s\S]*Case 2 is the same question with one value changed \(\w+ goes from \d+ to \d+\)/);
+  const task = taskOf(questions, q.id)!;
+  assert.equal(task.kind, "pair");
+  assert.equal(task.question.id, q.id, "rebuilt from its seed");
+  assert.equal(markTask(task, task.inst!.answerText)?.grade, "good", "Case 2's answer is the one marked");
+  assert.equal(markTask(task, "-999")?.grade, "again");
+  assert.equal(followUp(task, { result: "incorrect", errorType: "subtracted the change in speed" } as any, s0, []), null, "no repair on a pair: its ids name the first case");
+  assert.deepEqual(mistakeUpdates(task, { result: "correct", errorType: "", assisted: true, answerExposed: false }, s0), [], "helped work moves no mistake card");
+  // At most two answered right per question.
+  const done = (id: string) => ({ ...(F.newState(F.parseTopic(CARD(NAMES)), 4)), attempts: [id, "Q1~2#pair0"].map((qid, i) => attempt({ id: `p${i}`, skill: 1, questionId: qid, result: "correct" })) });
+  assert.equal(pairedFor(base, done("Q1~1#pair0"), []), null);
+
+  // In Adaptive mode, once the faded example has been answered, guided practice is a pair.
+  const st = await store.loadState(dir, 4);
+  st.levels[1] = 2;
+  st.taught[1] = "2026-11-16";
+  st.focus = 1;
+  await store.saveState(dir, st);
+  const chat = await store.newChat(dir, "Motion", "auto", new Date(2026, 10, 17, 9, 0));
+  const cardOf = async () => F.fmStr((await store.loadChat(chat)).fm, "card");
+  await engine.study(dir, chat, "");
+  assert.equal(await cardOf(), "Q1~1#fade1");
+  await engine.study(dir, chat, taskOf(questions, "Q1~1#fade1")!.inst!.answerText);
+  // The learner stays at the same level, so guided practice comes up again, and the faded examples have run out.
+  const again = await store.loadState(dir, 4);
+  for (const n of Object.keys(again.names).map(Number)) again.levels[n] = n === 1 ? 2 : 4;
+  again.focus = 1;
+  await store.saveState(dir, again);
+  const second = await store.newChat(dir, "Motion", "auto", new Date(2026, 10, 17, 9, 30));
+  const paired = await engine.study(dir, second, "");
+  assert.deepEqual([paired.decision?.action, paired.decision?.local], ["guided-practice", "bank"]);
+  const card = F.fmStr((await store.loadChat(second)).fm, "card");
+  assert.equal(card, "Q1~2#pair0");
+  const before = (await store.loadState(dir, 4)).cards;
+  const a = await engine.study(dir, second, taskOf(questions, card)!.inst!.answerText);
+  assert.match(a.reply, /\*\*Correct\.\*\*/);
+  assert.deepEqual([a.attempt!.assisted, a.attempt!.grading], [true, "deterministic"]);
+  assert.match(a.attempt!.assistance.join(" "), /contrasting pair/);
+  assert.deepEqual((await store.loadState(dir, 4)).cards, before, "helped work moves no card");
+  assert.equal(calls(), 0);
+});
+
+// ---------- coverage of a subskill's ideas, and building on the last question ----------
+
+const IDEAS_CARD = [
+  "# Maths", "", "## Overview", "Calculus.", "", "## Objectives",
+  "- O1: Differentiate polynomials with the power rule (Spec 1.1)",
+  "- O2: Integrate polynomials with the reverse power rule (Spec 1.2)",
+  "", "## Subskills", "",
+  "### 1. Calculus basics", "prerequisites: none", "objectives: O1, O2",
+  "- Differentiate polynomials with the power rule ([[Notes]]).",
+  "- Integrate polynomials with the reverse power rule ([[Notes]]).",
+  "worked example:", "d/dx x^3 = 3x^2.", "",
+].join("\n");
+const IDEAS_BANK = [
+  ["Q1", "Differentiate x^3 at x = 2 with the power rule: what is the value of the derivative?", "12"],
+  ["Q2", "Differentiate x^4 at x = 1 with the power rule: what is the value of the derivative?", "4"],
+  ["Q3", "Integrate 2x from 0 to 3 with the reverse power rule: what is the value?", "9"],
+  ["Q4", "Integrate 3x^2 from 0 to 2 with the reverse power rule: what is the value?", "8"],
+].map(([id, q, a]) => `### ${id}\nsubskill: 1\ntype: short\ntask: application\nfamily: ${id.toLowerCase()}\nquestion: ${q}\nanswer: ${a}\nexplanation: Worked by the rule.\n`).join("\n");
+
+async function ideas() {
+  const fs = new MemFS();
+  const store = new Store(fs, "Tutor", () => "2026-11-17");
+  const settings: any = { claudePath: "", chatModel: "sonnet", compileModel: "sonnet", utilityModel: "haiku", effort: "low", targetLevel: 4, maxChatWords: 600, maxTopicWords: 2000, singlePassWords: 6000, smartRouting: false, hardEffort: "high", bankQuiz: true, codePlacement: false };
+  const engine = new Engine(store, () => settings, () => "2026-11-17");
+  let calls = 0;
+  (engine as any).call = async () => { calls++; throw new Error("no model call expected"); };
+  const dir = await store.saveCompiled({ title: "Maths", fm: { subject: "none" }, topicBody: IDEAS_CARD, questionsBody: IDEAS_BANK, target: 4 });
+  return { store, engine, dir, calls: () => calls };
+}
+
+test("coverage: a subskill's ideas, which idea a question tests, and what counts as secured", async () => {
+  const { ideasOf, ideaOf, coverageOf, coverageSummary } = await import("../src/coverage");
+  const topic = F.parseTopic(IDEAS_CARD);
+  const list = ideasOf(topic, 1);
+  assert.deepEqual(list.map((i) => i.id), ["O1", "O2"], "two objectives: those are the ideas");
+  assert.equal(ideasOf(F.parseTopic(CARD(NAMES)), 2).length, 1, "one claim: one idea");
+  const claims = ideasOf(F.parseTopic(IDEAS_CARD.replace("objectives: O1, O2\n", "")), 1);
+  assert.deepEqual(claims.map((i) => i.id), ["c1", "c2"], "no objectives: one idea per claim, none from the worked example");
+  const qs = F.parseQuestions(IDEAS_BANK);
+  assert.deepEqual(qs.map((q) => ideaOf(q, list)), ["O1", "O1", "O2", "O2"]);
+  assert.equal(ideaOf({ question: "What is a limit?" }, list), null, "nothing shared: no guess");
+
+  const at = (id: string, questionId: string, over: Record<string, unknown> = {}) => attempt({ id, skill: 1, questionId, question: qs.find((q) => q.id === questionId.replace(/~\d+$/, ""))!.question, ...over });
+  const state = F.newState(topic, 4);
+  state.attempts = [at("a1", "Q1"), at("a2", "Q2", { assisted: true }), at("a3", "Q3", { result: "incorrect" })];
+  let status = coverageOf(topic, qs, state, 1);
+  assert.deepEqual(status.map((i) => [i.id, i.asked, i.unaidedCorrect, i.secured]), [["O1", 2, 1, false], ["O2", 1, 0, false]], "helped and wrong answers are asked but not secured");
+  state.attempts.push(at("a4", "Q2~2"));
+  status = coverageOf(topic, qs, state, 1);
+  assert.deepEqual([status[0].unaidedCorrect, status[0].secured, status[1].secured], [2, true, false]);
+  const sum = coverageSummary(status);
+  assert.deepEqual([sum.total, sum.asked, sum.secured, sum.unasked.length], [2, 2, 1, 0]);
+});
+
+test("build on the last question when the mark, confidence or time say the idea is shaky; otherwise move to an idea not yet asked", async () => {
+  const { nextMove, MAX_BUILDS } = await import("../src/coverage");
+  const idea = (secured = false) => ({ id: "O1", text: "t", asked: 1, unaidedCorrect: secured ? 2 : 1, secured, questions: ["Q1"] });
+  const right = { result: "correct" as const, confidence: null, assisted: false, answerExposed: false, seconds: 20 };
+  const move = (over: Record<string, unknown>, i: Record<string, unknown> = {}) => nextMove({ attempt: { ...right, ...over } as any, idea: idea(), typicalSeconds: 20, buildsInARow: 0, ...i });
+  assert.equal(move({}).kind, "advance", "right, no signal of doubt");
+  assert.equal(move({ confidence: 0.9 }).kind, "advance", "right and sure");
+  assert.equal(move({ confidence: 0.3 }).kind, "build-on", "right but unsure: see that it holds");
+  assert.match(move({ confidence: 0.3 }).reason, /weren't sure/);
+  assert.equal(move({ confidence: 0.3 }, { idea: idea(true) }).kind, "advance", "an idea already secured twice is not asked again for a wobble");
+  assert.equal(move({ seconds: 70 }).kind, "build-on", "right but much slower than usual, and not sure");
+  assert.equal(move({ seconds: 70, confidence: 0.9 }).kind, "advance", "slow but sure: no");
+  assert.equal(move({ seconds: 70 }, { typicalSeconds: null }).kind, "advance", "no usual time known: time says nothing");
+  assert.equal(move({ result: "incorrect", confidence: 0.9 }).kind, "build-on");
+  assert.match(move({ result: "incorrect", confidence: 0.9 }).reason, /sure and it didn't hold/);
+  assert.match(move({ result: "incorrect", confidence: 0.2 }).reason, /smaller step/);
+  assert.equal(move({ result: "partial" }).kind, "build-on");
+  assert.equal(move({ assisted: true }).kind, "build-on", "a helped right answer is asked again without help");
+  assert.equal(move({ answerExposed: true, result: "incorrect" }).kind, "build-on");
+  assert.equal(move({ result: "skipped" }).kind, "advance");
+  assert.equal(move({ result: "incorrect" }, { buildsInARow: MAX_BUILDS }).kind, "advance", "two follow-ups at most");
+  assert.equal(nextMove({ attempt: right as any, idea: null, typicalSeconds: null, buildsInARow: 0 }).kind, "advance", "no idea to build on");
+});
+
+test("a bank quiz builds on the last question when you were unsure, moves to a new idea when you were sure, and says which", async () => {
+  let calls = () => 0;
+  const run = async (answers: [string, number][]) => {
+    const { store, engine, dir, calls: used } = await ideas();
+    calls = used;
+    const chat = await store.newChat(dir, "Maths", "quiz", new Date(2026, 10, 17, 9, 0));
+    const seen: { card: string; reply: string }[] = [];
+    let r = await engine.quizTurn(dir, chat, "");
+    seen.push({ card: F.fmStr((await store.loadChat(chat)).fm, "card"), reply: r.reply });
+    for (const [text, confidence] of answers) {
+      r = await engine.quizTurn(dir, chat, text, { confidence });
+      seen.push({ card: F.fmStr((await store.loadChat(chat)).fm, "card").replace(/~\d+$/, ""), reply: r.reply });
+    }
+    return seen;
+  };
+  // Wrong and unsure on the first differentiation question: the next is the other differentiation question.
+  let seen = await run([["7", 0.2]]);
+  assert.equal(seen[0].card, "Q1");
+  assert.equal(seen[1].card, "Q2", "same idea, from another question");
+  assert.match(seen[1].reply, /Builds on the last question \(Differentiate polynomials with the power rule\)\. You weren't sure, so a smaller step on the same idea\./);
+  // Right and sure: on to the integration idea, which has not been asked.
+  seen = await run([["12", 0.9]]);
+  assert.equal(seen[1].card, "Q3", "a new idea");
+  assert.match(seen[1].reply, /A new idea: Integrate polynomials with the reverse power rule\./);
+  // Right but unsure: the same idea once more.
+  seen = await run([["12", 0.3]]);
+  assert.equal(seen[1].card, "Q2");
+  assert.match(seen[1].reply, /Right, but you weren't sure/);
+  // Wrong again on the last question of an idea: nothing left on it, so on to the other idea, and it says so.
+  seen = await run([["7", 0.2], ["7", 0.2]]);
+  assert.equal(seen[2].card, "Q3");
+  assert.match(seen[2].reply, /No other question on that idea is left, so on to a new one\./);
+  assert.equal(calls(), 0, "no model call anywhere");
+});
+
+test("cold probes: fast probe answers never make a practice answer look slow, in a bank quiz or a model-led turn", async () => {
+  // Five practice answers at 40 s and seven probe answers at 5 s: the usual time is 40 s, not 5 s.
+  const timed = (probe: boolean, i: number) => attempt({ id: `${probe ? "p" : "t"}${i}`, skill: 1, questionId: `x${i}`, question: "Name a colour.", seconds: probe ? 5 : 40, probe: probe || undefined, timestamp: `2026-11-1${probe ? 5 : 4}T10:0${i}:00.000Z` });
+  const history = [...[0, 1, 2, 3, 4].map((i) => timed(false, i)), ...[0, 1, 2, 3, 4, 5, 6].map((i) => timed(true, i))];
+  // A bank quiz: right in 50 s, with no confidence set, moves on to the other idea.
+  {
+    const { store, engine, dir, calls } = await ideas();
+    const st = await store.loadState(dir, 4);
+    st.attempts.push(...history);
+    await store.saveState(dir, st);
+    const chat = await store.newChat(dir, "Maths", "quiz", new Date(2026, 10, 17, 9, 0));
+    await engine.quizTurn(dir, chat, "");
+    const c = await store.loadChat(chat);
+    assert.equal(F.fmStr(c.fm, "card"), "Q1");
+    c.fm.asked_at = new Date(Date.now() - 50_000).toISOString();
+    await store.saveChat(chat, c);
+    const r = await engine.quizTurn(dir, chat, "12");
+    assert.doesNotMatch(r.reply, /took a while/);
+    assert.equal(F.fmStr((await store.loadChat(chat)).fm, "card").replace(/~\d+$/, ""), "Q3", "on to a new idea");
+    assert.equal(calls(), 0);
+  }
+  // A model-led turn: the same answer recorded, and the brief does not say to build on it.
+  {
+    const { store, engine, dir } = await ideas();
+    const seen: string[] = [];
+    (engine as any).call = async (o: any) => { seen.push(o.input); return { text: "Which comes first?", usage }; };
+    const q1 = F.parseQuestions(IDEAS_BANK)[0];
+    const st = await store.loadState(dir, 4);
+    st.focus = 1;
+    st.attempts.push(...history, attempt({ id: "r1", skill: 1, questionId: "Q1", question: q1.question, seconds: 50, timestamp: "2026-11-16T10:00:00.000Z" }));
+    await store.saveState(dir, st);
+    const chat = await store.newChat(dir, "Maths", "teach", new Date(2026, 10, 17, 9, 0));
+    await engine.turn(dir, chat, "go on");
+    assert.match(seen[0], /- O1: .* — asked 1/);
+    assert.doesNotMatch(seen[0], /took a while/);
+  }
+});
+
+// ---------- exam metadata on objectives, BKT in shadow, and the measurement summary ----------
+
+const EXAM_CARD = (fm = "") => [
+  ...(fm ? ["---", fm, "---"] : []),
+  "# Calculus", "", "## Overview", "Rates of change.", "", "## Objectives",
+  "- O1: Derive the power rule (Spec 2.1) (weight 8%, paper 2, command: derive, 6 marks, 8 min)",
+  "- O2: Apply the chain rule {weight 12, explain, marks 4-6}",
+  "- O3: Sketch a gradient function (weight lots, paper two-ish, 3 marks)",
+  "- O4: Find f(x) (Spec 3.4)",
+  "- O5: State the limit (weight banana)",
+  "- O6: Integrate (derive)",
+  "Exam date: 2027-05-01",
+  "", "## Subskills", "",
+  "### 1. Power rule", "prerequisites: none", "objectives: O1, O3", "- A claim ([[Calc notes]]).", "",
+  "### 2. Chain rule", "prerequisites: 1", "objectives: O2", "- A claim.", "",
+  "### 3. Composites", "prerequisites: 1", "objectives: O2, O4", "- A claim.", "",
+].join("\n");
+
+test("exam metadata: a trailing group on an objective line is read when it reads cleanly, and ignored when it does not", async () => {
+  const { readObjectiveLine, examDay } = await import("../src/objective-meta");
+  const t = F.parseTopic(EXAM_CARD("exam: 2027-06-12"));
+  const by = Object.fromEntries((t.objectives ?? []).map((o) => [o.id, o]));
+  assert.equal(t.examDate, "2027-06-12", "the properties win over an Exam: line");
+  assert.equal(F.parseTopic(EXAM_CARD()).examDate, "2027-05-01", "without one, the Exam: line under Objectives gives the date");
+  // Valid: every field, beside a separate source group.
+  assert.deepEqual([by.O1.text, by.O1.source], ["Derive the power rule", "Spec 2.1"]);
+  assert.deepEqual(by.O1.exam, { weight: 0.08, paper: "Paper 2", commands: ["derive"], marks: 6, minutes: 8 });
+  // Braces, a bare percentage, a bare command word beside a keyed field, a range of marks.
+  assert.deepEqual([by.O2.text, by.O2.source, by.O2.exam], ["Apply the chain rule", "", { weight: 0.12, commands: ["explain"], marks: 5 }]);
+  // Partial: what reads cleanly is kept, the rest is ignored and reported.
+  assert.deepEqual(by.O3.exam, { marks: 3 });
+  assert.deepEqual(readObjectiveLine("Sketch a gradient function (weight lots, paper two-ish, 3 marks)").ignored, ["weight lots", "paper two-ish"]);
+  // Malformed only, or no metadata: the line is read exactly as before, the group being the source.
+  assert.deepEqual([by.O4.text, by.O4.source, by.O4.exam], ["Find f(x)", "Spec 3.4", undefined]);
+  assert.deepEqual([by.O5.source, by.O5.exam], ["weight banana", undefined]);
+  assert.deepEqual([by.O6.source, by.O6.exam], ["derive", undefined], "a bare command word alone stays a source");
+  assert.equal(t.objectives!.length, 6, "the Exam: line is not an objective");
+  // Metadata before the source, a mixed group, an objective date, bad values.
+  assert.deepEqual(readObjectiveLine("Prove it (8% of marks; exam 2027-06-03) (Spec 1)"), { text: "Prove it", source: "Spec 1", exam: { weight: 0.08, date: "2027-06-03" }, ignored: [] });
+  assert.deepEqual(readObjectiveLine("Prove it (Spec 1; time 5 minutes)"), { text: "Prove it", source: "Spec 1", exam: { minutes: 5 }, ignored: [] });
+  assert.equal(readObjectiveLine("Prove it (weight 140%)").exam, null, "a weight over 100% is not a weight");
+  assert.deepEqual([examDay("2027-02-30"), examDay("2027/6/3"), examDay("June 3")], [null, "2027-06-03", null]);
+
+  // The course package keeps it, from the card or from the specification wording of a staged compile.
+  const { buildPackage, withStagedCoverage } = await import("../src/coursepkg");
+  const pkg = buildPackage({ topic: t, questions: [], concepts: {}, sources: {}, previous: null, at: "2026-11-18T00:00:00.000Z", mode: "notes", research: false });
+  assert.deepEqual(pkg.objectives.find((o) => o.id === "O1")!.exam, by.O1.exam);
+  assert.equal(pkg.objectives.find((o) => o.id === "O4")!.exam, undefined);
+  assert.equal(pkg.examDate, "2027-06-12");
+  const staged: any = { status: "complete", inventory: [{ id: "O1", text: "Derive the power rule", references: ["p1"], search: "" }, { id: "O9", text: "Compare rates (weight 5%, compare)", references: ["p2"], search: "" }], sourceRevisions: [], lessons: [], availability: [], issues: [], metrics: {} };
+  const sp = withStagedCoverage(pkg, staged);
+  assert.deepEqual(sp.objectives.map((o) => [o.id, o.text, o.exam]), [["O1", "Derive the power rule", by.O1.exam], ["O9", "Compare rates", { weight: 0.05, commands: ["compare"] }]]);
+});
+
+test("exam metadata: weight and the exam date scale priority within fixed bounds, say why, and add timed practice", async () => {
+  const P = await import("../src/policy");
+  type Signal = import("../src/policy").ExamSignal;
+  const sig = (over: Partial<Signal>): Signal => ({ weight: null, daysToExam: null, minutes: null, marks: null, paper: "", commands: [], ...over });
+  // From the card: weight split over the subskills that teach an objective; the nearest date counts.
+  const signals = P.examSignals(F.parseTopic(EXAM_CARD("exam: 2027-06-12")), "2027-06-02");
+  assert.deepEqual(signals[1], { weight: 0.08, daysToExam: 10, minutes: 8, marks: 6, paper: "Paper 2", commands: ["derive"] });
+  assert.deepEqual([signals[2].weight, signals[3].weight], [0.06, 0.06], "O2's 12% is shared by the two subskills that teach it");
+
+  const two = (a: Partial<SkillInput>, b: Partial<SkillInput>) => input({ completedStep: true, skills: [skill({ n: 1, level: 2, supported: 2, ...a }), skill({ n: 2, level: 2, supported: 2, ...b })] });
+  const plain = scoreSkills(two({}, {}));
+  assert.equal(plain[0].score, plain[1].score);
+  assert.equal("exam" in plain[0], false, "no metadata, no exam field: decisions without it are unchanged");
+  const light = sig({ weight: 0.02 }), heavy = sig({ weight: 0.2 });
+  const s = scoreSkills(two({ exam: light }, { exam: heavy }));
+  const s1 = s.find((x) => x.n === 1)!, s2 = s.find((x) => x.n === 2)!;
+  assert.deepEqual([s2.exam!.factor, s1.exam!.factor], [P.EXAM_FACTOR_MAX, P.EXAM_FACTOR_MIN], "nearly twice the average share is capped; a fifth of it is floored");
+  assert.deepEqual([s2.parts.exam, s1.parts.exam], [0.125, -0.062]);
+  assert.ok(s2.score > s1.score);
+  const d = decide(two({ exam: light }, { exam: heavy }));
+  assert.equal(d.focus, 2);
+  assert.match(d.reason, /Exam weighting: it carries 20% of the marks, 1\.8× this topic's average, so its priority is scaled ×1\.50, the most exam metadata can add \(1 → 1\.5\)\./);
+  // Bounded whatever the inputs: a huge share on exam day, and a priority already at its maximum.
+  const extreme = scoreSkills(two({ exam: sig({ weight: 0.001 }) }, { exam: sig({ weight: 1, daysToExam: 0 }), priority: 5 })).find((x) => x.n === 2)!;
+  assert.deepEqual([extreme.exam!.factor, extreme.exam!.priority, extreme.parts.exam], [1.5, 5, 1]);
+  // The date alone: up to +25% within 60 days, nothing outside them or after the exam.
+  const near = (days: number) => scoreSkills(input({ skills: [skill({ n: 1, level: 2, supported: 2, exam: sig({ daysToExam: days }) })] }))[0].exam!;
+  assert.deepEqual([0, 30, 60, 90, -3].map((x) => near(x).factor), [1.25, 1.125, 1, 1, 1]);
+  assert.equal(near(90).note, "", "no effect, nothing to explain");
+  assert.match(near(90).about, /exam in 90 days/);
+  // A single weighted subskill has nothing to be compared with, so weight alone changes nothing.
+  assert.equal(scoreSkills(input({ skills: [skill({ n: 1, level: 2, supported: 2, exam: heavy })] }))[0].exam!.factor, 1);
+
+  // Timed practice: unaided practice, minutes the time available holds, exam not past or far off.
+  const practise = (exam: Signal, minutes = 25) => decide(input({ minutes, skills: [skill({ n: 1, level: 3, supported: 3, bankLeft: 2, exam })] }));
+  const timed = practise(sig({ minutes: 8, marks: 6, commands: ["derive"], paper: "Paper 2", daysToExam: 10 }));
+  assert.deepEqual([timed.action, timed.timed], ["independent-practice", 8]);
+  assert.match(timed.reason, /Exam practice: allow about 8 minutes, as in the exam \(6 marks, derive, Paper 2\)\.$/);
+  assert.equal(practise(sig({ minutes: 30 })).timed, undefined, "more minutes than the learner has");
+  assert.equal(practise(sig({ minutes: 8, daysToExam: 90 })).timed, undefined, "the exam is too far off");
+  assert.equal(practise(sig({ minutes: 8, daysToExam: -1 })).timed, undefined, "the exam has passed");
+  assert.equal(decide(input({ skills: [skill({ n: 1, level: 1, supported: 1, exam: sig({ minutes: 8 }) })] })).timed, undefined, "a lesson is not timed");
+  assert.equal(decide(input({ mode: "teach", skills: [skill({ n: 1, level: 3, supported: 3, exam: sig({ minutes: 8 }) })] })).timed, undefined, "Learn mode is not timed");
+  // Deterministic: the same input gives the same decision.
+  assert.deepEqual(decide(two({ exam: light }, { exam: heavy })), d);
+});
+
+test("exam metadata reaches the policy from a compiled card, and BKT rides along in shadow", async () => {
+  const { store, engine, dir } = await setup();
+  const body = EXAM_CARD().replace("Exam date: 2027-05-01", "Exam: 2026-11-23").replace("(weight 8%,", "(weight 18%,");
+  await store.saveCompiled({ title: "Calculus", fm: { subject: "none" }, topicBody: body, questionsBody: BANK, target: 4, existingDir: dir });
+  const topic = await store.loadTopic(dir);
+  const state = await store.loadState(dir, 4);
+  state.attempts.push(attempt({ id: "x1", skill: 1, concept: state.concepts[1] ?? "", questionId: "Q1", timestamp: "2026-11-12T10:00:00.000Z" }));
+  const chat: F.Chat = { fm: {}, summary: "", messages: [] };
+  const pin = (engine as any).policyInput({ mode: "auto", state, pre: await store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions: await store.loadQuestions(dir), external: [], topic }) as PolicyInput;
+  assert.deepEqual(pin.skills[0].exam, { weight: 0.18, daysToExam: 10, minutes: 8, marks: 6, paper: "Paper 2", commands: ["derive"] });
+  // Q1 is a two-option multiple-choice question, so the guess is 1/2.
+  const after = (0.3 * 0.9) / (0.3 * 0.9 + 0.7 * 0.5);
+  const known = after + (1 - after) * 0.15;
+  assert.deepEqual(pin.skills[0].shadow, { pKnown: Math.round(known * 1000) / 1000, pCorrect: Math.round((known * 0.9 + (1 - known) * 0.2) * 1000) / 1000, observations: 1 });
+  assert.equal(pin.skills[1].shadow, undefined, "no observation, no shadow value");
+  await store.saveState(dir, state);
+  const advice = await engine.advise(dir, 1);
+  assert.ok(advice.scores.find((x) => x.n === 1)!.exam!.factor > 1);
+});
+
+test("BKT in shadow: the update matches hand-computed values, with the multiple-choice guess floor", async () => {
+  const B = await import("../src/bkt");
+  const params = { pInit: 0.5, pLearn: 0.1, pSlip: 0.1, pGuess: 0.2 };
+  const seq = [attempt({ id: "a", timestamp: "2026-11-10T10:00:00.000Z" }), attempt({ id: "b", result: "incorrect", timestamp: "2026-11-11T10:00:00.000Z" })];
+  const t = B.bktTrace(seq, 1, { params });
+  const close = (x: number, y: number) => assert.ok(Math.abs(x - y) < 1e-12, `${x} vs ${y}`);
+  // Correct: P(c) = 0.5·0.9 + 0.5·0.2 = 0.55; posterior 0.45/0.55 = 9/11; with learning 9/11 + 2/11·0.1 = 46/55.
+  close(t.steps[0].pCorrect, 0.55);
+  close(t.steps[0].after, 46 / 55);
+  // Incorrect: P(c) = 46/55·0.9 + 9/55·0.2 = 43.2/55; posterior 4.6/(4.6 + 7.2) = 23/59; with learning 26.6/59.
+  close(t.steps[1].pCorrect, 43.2 / 55);
+  close(t.steps[1].after, 26.6 / 59);
+  close(t.pKnown, 26.6 / 59);
+  close(t.pCorrect, (26.6 / 59) * 0.9 + (32.4 / 59) * 0.2);
+  assert.deepEqual(t.steps.map((s) => s.estimate), [0.5, 2 / 3], "the existing estimate before each answer: (correct + 1) / (n + 2)");
+  // A four-option question raises the guess to 1/4; a ten-option one leaves it at pGuess.
+  close(B.bktTrace(seq, 1, { params, options: { "q-a": 4 } }).steps[0].pCorrect, 0.5 * 0.9 + 0.5 * 0.25);
+  close(B.bktTrace(seq, 1, { params, options: { "q-a": 10 } }).steps[0].pCorrect, 0.55);
+  assert.deepEqual(B.mcqOptions(F.parseQuestions(BANK)), { Q1: 2, Q5: 2 });
+  assert.match(B.shadowLine(t), /^BKT \(shadow, not used for decisions\): P\(known\) 0\.45 after 2 unaided answers$/);
+  assert.equal(B.shadowLine(B.bktTrace([], 1)), "BKT (shadow, not used for decisions): P(known) 0.30, the starting value: no unaided answers yet");
+});
+
+test("BKT in shadow: helped, exposed, self-rated, inconclusive, disputed and repeated attempts are not observations", async () => {
+  const B = await import("../src/bkt");
+  const base = [attempt({ id: "a", timestamp: "2026-11-10T10:00:00.000Z" }), attempt({ id: "b", result: "incorrect", timestamp: "2026-11-11T10:00:00.000Z" })];
+  const noise = [
+    attempt({ id: "h", assisted: true, assistance: ["hint"], timestamp: "2026-11-10T11:00:00.000Z" }),
+    attempt({ id: "x", answerExposed: true, timestamp: "2026-11-10T12:00:00.000Z" }),
+    attempt({ id: "s", grading: "self", verification: "unverified", timestamp: "2026-11-10T13:00:00.000Z" }),
+    attempt({ id: "i", mark: { v: 1, proposed: "correct", rules: [], conclusive: false } as any, timestamp: "2026-11-10T14:00:00.000Z" }),
+    attempt({ id: "d", verification: "disputed", timestamp: "2026-11-10T15:00:00.000Z" }),
+    attempt({ id: "u", result: "ungraded", timestamp: "2026-11-10T16:00:00.000Z" }),
+    attempt({ id: "r", questionId: "q-a", timestamp: "2026-11-10T17:00:00.000Z" }),
+    attempt({ id: "o", skill: 2, timestamp: "2026-11-10T18:00:00.000Z" }),
+  ];
+  const clean = B.bktTrace(base, 1);
+  const noisy = B.bktTrace([...noise, ...base], 1);
+  assert.deepEqual(noisy.steps.map((s) => s.attempt), ["a", "b"]);
+  assert.deepEqual([noisy.pKnown, noisy.pCorrect], [clean.pKnown, clean.pCorrect]);
+  assert.equal(noisy.skipped, 7, "every attempt on the subskill that is not an observation is counted as skipped");
+  assert.equal(noisy.steps.length, skillEvidence([...noise, ...base], 1).independent, "the observations are exactly skillEvidence's independent data points");
+});
+
+test("BKT in shadow never changes a decision, and replay re-scores it over a decision log", async () => {
+  const skills = [skill({ n: 1, level: 2, supported: 2 }), skill({ n: 2, level: 3, supported: 3, bankLeft: 2, recentFailures: 1 })];
+  const base = input({ skills, completedStep: true });
+  const d = decide(base);
+  for (const v of [0, 0.5, 1]) {
+    const shadowed = { ...base, skills: base.skills.map((k) => ({ ...k, shadow: { pKnown: v, pCorrect: 1 - v, observations: 40 } })) };
+    assert.deepEqual(decide(shadowed), d, `shadow ${v} changes nothing`);
+    assert.deepEqual(scoreSkills(shadowed), scoreSkills(base));
+  }
+  const logged = { ...base, skills: base.skills.map((k) => ({ ...k, shadow: { pKnown: 0.9, pCorrect: 0.85, observations: 3 } })) };
+  const cases = [{ t: "2026-11-12T09:00:00.000Z", topic: "Calculus", input: logged, decision: { version: d.version, action: d.action, focus: d.focus, local: d.local } }];
+  const history = [attempt({ id: "a", skill: d.focus!, timestamp: "2026-11-10T10:00:00.000Z" }), attempt({ id: "b", skill: d.focus!, result: "incorrect", timestamp: "2026-11-13T10:00:00.000Z" })];
+  const r = replay(cases, DEFAULT_WEIGHTS, { attempts: { Calculus: history } });
+  assert.deepEqual([r.total, r.same, r.changed], [1, 1, []]);
+  assert.equal(r.shadow!.unaffected, true);
+  assert.deepEqual([r.shadow!.cases[0].focus, r.shadow!.cases[0].observations], [d.focus, 1], "only attempts before the logged decision count");
+  assert.equal(r.shadow!.comparison.n, 2);
+  assert.deepEqual(Object.keys(replay(cases, DEFAULT_WEIGHTS)), ["total", "same", "changed"], "without attempts, replay is as before");
+});
+
+test("BKT in shadow: Brier scores against the existing estimate and the learner's confidence on a fixture history", async () => {
+  const B = await import("../src/bkt");
+  const params = { pInit: 0.5, pLearn: 0.1, pSlip: 0.1, pGuess: 0.2 };
+  const history = [
+    attempt({ id: "a", confidence: 0.8, timestamp: "2026-11-10T10:00:00.000Z" }),
+    attempt({ id: "b", result: "incorrect", confidence: 0.6, timestamp: "2026-11-11T10:00:00.000Z" }),
+    attempt({ id: "h", assisted: true, timestamp: "2026-11-11T11:00:00.000Z" }),
+    attempt({ id: "c", timestamp: "2026-11-12T10:00:00.000Z" }),
+  ];
+  const c = B.brierComparison([B.bktTrace(history, 1, { params })]);
+  const l3 = 26.6 / 59;
+  const p = [0.55, 43.2 / 55, l3 * 0.9 + (1 - l3) * 0.2];
+  const close = (x: number | null, y: number) => assert.ok(x !== null && Math.abs(x - y) < 1e-12, `${x} vs ${y}`);
+  assert.deepEqual([c.n, c.rated], [3, 2]);
+  close(c.bkt, ((p[0] - 1) ** 2 + p[1] ** 2 + (p[2] - 1) ** 2) / 3);
+  close(c.estimate, ((0.5 - 1) ** 2 + (2 / 3) ** 2 + (0.5 - 1) ** 2) / 3);
+  close(c.bktRated, ((p[0] - 1) ** 2 + p[1] ** 2) / 2);
+  close(c.estimateRated, ((0.5 - 1) ** 2 + (2 / 3) ** 2) / 2);
+  close(c.confidence, 0.2);
+  close(c.confidence, skillEvidence(history, 1).brier!);
+  assert.match(B.comparisonLine(c), /^Brier over 3 unaided answers \(lower is better\): BKT 0\.35, existing estimate 0\.31; on the 2 with your confidence: BKT 0\.41, estimate 0\.35, your confidence 0\.20; fewer than 20 answers, too few to tell them apart$/);
+  assert.equal(B.comparisonLine(B.brierComparison([])), "No unaided answers to score BKT against yet");
+});
+
+test("the measurement summary reads saved records without a model, and says call counts are not savings", async () => {
+  const M = await import("../src/metrics");
+  const line = (r: object) => JSON.stringify(r);
+  const evidence = ["---", "tutor: evidence", "---", "", "```jsonl", line({ kind: "attempt", ...attempt({ id: "a", seconds: 20 }) }), line({ kind: "change", t: "x" }), "{not json", line({ kind: "attempt", ...attempt({ id: "b", grading: "model", verification: "unverified", seconds: 40, timestamp: "2026-11-11T10:00:00.000Z" }) }), line({ kind: "attempt", ...attempt({ id: "c", assisted: true, seconds: 60, timestamp: "2026-11-11T11:00:00.000Z" }) }), "```"].join("\n");
+  const attempts = M.attemptsFromText(evidence);
+  assert.deepEqual(attempts.map((a) => a.id), ["a", "b", "c"]);
+  const pkg = M.packageFromText('head\n\n```json\n{"format":"study-tutor-course","topic":"Calculus","staged":{"metrics":{"localCalls":2,"cacheHits":3,"elapsedMs":1000,"generators":4,"generatorsRejected":1,"laterCounter":5,"escalated":""}}}\n```\n')!;
+  const s = M.summariseMetrics({
+    packages: [pkg, { topic: "old" }],
+    attempts: { Calculus: attempts },
+    activities: [{ status: "ready", localCalls: 2, repairs: 1, claudeCalls: 0, firstPassValid: false, timing: { wallMs: 900, localMs: 800, loadMs: 100, promptTokens: 50, evalTokens: 20 } }],
+    decisions: [{ decision: { version: 4, local: "bank" } }, { decision: { version: 3, local: null } }],
+  });
+  assert.deepEqual(s.compile.totals, { localCalls: 2, cacheHits: 3, generators: 4, generatorsRejected: 1, laterCounter: 5 }, "every numeric counter is summed, new ones included");
+  assert.deepEqual([s.compile.packages, s.compile.staged, s.compile.elapsedMs.median], [2, 1, 1000]);
+  assert.deepEqual([s.attempts.markedByCode, s.attempts.markedByModel, s.attempts.assisted, s.attempts.independent, s.attempts.seconds.median], [2, 1, 1, 2, 40]);
+  assert.deepEqual([s.activities.localCalls, s.activities.repairs, s.activities.firstPassValid, s.activities.firstPassKnown], [2, 1, 0, 1]);
+  assert.deepEqual([s.decisions.bank, s.decisions.model, s.decisions.byVersion], [1, 1, { "3": 1, "4": 1 }]);
+  assert.equal(s.shadow.n, 2);
+  const report = M.metricsReport(s);
+  assert.ok(report.includes(M.CALL_COUNT_CAVEAT));
+  assert.match(report, /Token use and cost per study turn: shown in Details for the current sitting only, not saved\./);
+});
+
+test("model-led turns are told which ideas are not yet asked, and whether to build on the last answer", async () => {
+  const { store, engine, dir } = await ideas();
+  const seen: string[] = [];
+  (engine as any).call = async (o: any) => { seen.push(o.input); return { text: "Which comes first?", usage }; };
+  const st = await store.loadState(dir, 4);
+  st.focus = 1;
+  await store.saveState(dir, st);
+  const chat = await store.newChat(dir, "Maths", "teach", new Date(2026, 10, 17, 9, 0));
+  await engine.turn(dir, chat, "");
+  assert.match(seen[0], /# Coverage of Calculus basics\nEvery idea below must be asked at least once[\s\S]*- O1: Differentiate polynomials with the power rule — not asked yet\n- O2: Integrate polynomials with the reverse power rule — not asked yet\nChoose the next question on an idea not yet asked\./);
+  // A wrong answer given with low confidence: the brief says to stay on that idea.
+  const q1 = F.parseQuestions(IDEAS_BANK)[0];
+  const again = await store.loadState(dir, 4);
+  again.attempts.push(attempt({ id: "w1", skill: 1, questionId: "Q1", question: q1.question, result: "incorrect", confidence: 0.2 }));
+  await store.saveState(dir, again);
+  await engine.turn(dir, chat, "go on");
+  assert.match(seen[1], /- O1: .* — asked 1, not secured/);
+  assert.match(seen[1], /Build on the last question: stay on O1[\s\S]*You weren't sure, so a smaller step on the same idea\./);
+});
+
+test("cold probes: a probe family is split out of the bank, and a near-copy of practice is dropped", () => {
+  const sec = (id: string, sub: number, task: string, q: string) =>
+    `### ${id}\nsubskill: ${sub}\ntype: short\ntask: ${task}\nquestion: ${q}\nanswer: 1\n\n`;
+  const body =
+    "Intro\n\n" +
+    sec("Q1", 1, "application", "Find the slope of the line through two points.") +
+    sec("Q2", 1, "probe", "Why does a wider base make a pyramid more stable?") +
+    sec("Q3", 2, "application", "A ball is thrown up at 5 m/s. How high does it rise?") +
+    sec("Q4", 2, "probe", "A ball is thrown up at 8 m/s. How high does it rise?");
+  const r = splitSealed(body);
+  assert.deepEqual(F.parseQuestions(r.bank).map((x) => x.id), ["Q1", "Q3"]);
+  assert.equal(r.sealed.length, 1);
+  assert.match(r.sealed[0].id, /^P[0-9a-f]{10}$/);
+  assert.equal(r.sealed[0].subskill, 1);
+  assert.equal(r.dropped, 1);
+  assert.equal(F.parseQuestions(r.sealed[0].section)[0].task, "probe");
+  assert.equal(sealedId("x"), sealedId("x"));
+  assert.equal(F.parseQuestions("### P1\nsubskill: 1\ntype: short\ntask: probe\nconcept: c-abc\nquestion: x\nanswer: 1\n")[0].concept, "c-abc");
+  const plain = sec("Q1", 1, "application", "Find the slope.");
+  const none = splitSealed(plain);
+  assert.deepEqual({ sealed: none.sealed, dropped: none.dropped }, { sealed: [], dropped: 0 });
+  assert.equal(none.bank, plain);
+});
+
+test("cold probes: a probe is sealed under any heading the question parser accepts, with CRLF too", () => {
+  const body = "### Q1\nsubskill: 1\ntype: short\ntask: application\nquestion: Find the slope.\nanswer: 1\n\n#### **Q5**\nsubskill: 1\ntype: short\ntask: probe\nquestion: Why is a wider base more stable?\nanswer: 1\n";
+  for (const text of [body, body.replace(/\n/g, "\r\n")]) {
+    const r = splitSealed(text);
+    assert.deepEqual(F.parseQuestions(r.bank).map((x) => x.id), ["Q1"]);
+    assert.equal(r.sealed.length, 1);
+    assert.match(r.sealed[0].section, /^### P[0-9a-f]{10}\r?\n/);
+    assert.equal(F.parseQuestions(r.sealed[0].section)[0].task, "probe");
+  }
+});
+
+const sealedSec = (id: string, sub: number, task: string, q: string) =>
+  `### ${id}\nsubskill: ${sub}\ntype: short\ntask: ${task}\nquestion: ${q}\nanswer: 1\n\n`;
+
+test("cold probes: questions.md never holds a sealed question, so no bank reader, review or flashcard export can show it", async () => {
+  const probe = "Why does a wider base make a pyramid more stable?";
+  const body =
+    sealedSec("Q1", 1, "application", "Find the slope of the line through two points.") +
+    sealedSec("Q2", 1, "probe", probe) +
+    sealedSec("Q3", 2, "application", "A ball is thrown up at 5 m/s. How high does it rise?") +
+    sealedSec("Q4", 2, "probe", "A ball is thrown up at 8 m/s. How high does it rise?");
+  const store = new Store(new MemFS(), "Tutor");
+  const dir = await store.saveCompiled({ title: "Calculus", fm: { subject: "none" }, topicBody: CARD(NAMES), questionsBody: body, target: 4 });
+  const bank = await store.loadQuestions(dir);
+  assert.ok(bank.every((x) => x.task !== "probe"));
+  assert.deepEqual(bank.map((x) => x.id), ["Q1", "Q3"]);
+  const sealed = await store.loadSealed(dir);
+  assert.equal(sealed.length, 1);
+  assert.equal(sealed[0].concept, (await store.loadState(dir, 4)).concepts[1]);
+  assert.equal(sealed[0].subskill, 1);
+  const fs = (store as any).fs as MemFS;
+  assert.ok(!(await fs.read(`${dir}/questions.md`)).includes(probe));
+  assert.ok((await fs.read(`${dir}/sealed.md`)).includes(probe));
+  assert.ok(!F.buildSrNote(bank, "t").includes(probe));
+  const state = await store.loadState(dir, 4);
+  assert.ok(!JSON.stringify(F.reviewQueue(bank, state, "2026-11-21", 50)).includes(probe));
+});
+
+test("cold probes: a recompile keeps sealed questions with their concept, a new probe replaces the old one, and a retired concept loses its own", async () => {
+  const names: [string, string][] = [["Slopes", "none"], ["Projectiles", "none"], ["Stability", "none"]];
+  const one = (sub: number, probe: string) => sealedSec(`Q${sub}`, sub, "application", `Practice item number ${sub} about something else entirely.`) + sealedSec(`Q${sub + 10}`, sub, "probe", probe);
+  const p1 = "Why does a wider base make a pyramid more stable?";
+  const p2 = "How would a bridge engineer decide where to put the supports?";
+  const p3 = "Explain why a spinning top stays upright for a while.";
+  const store = new Store(new MemFS(), "Tutor");
+  const fs = (store as any).fs as MemFS;
+  const dir = await store.saveCompiled({ title: "Calculus", fm: { subject: "none" }, topicBody: CARD(names), questionsBody: one(1, p1) + one(2, p2) + one(3, p3), target: 4 });
+  const first = await store.loadSealed(dir);
+  assert.equal(first.length, 3);
+  const st1 = await store.loadState(dir, 4);
+  const [c1, c2, c3] = [1, 2, 3].map((n) => st1.concepts[n]);
+  const id = (c: string) => first.find((x) => x.concept === c)!.id;
+  const oldC2 = id(c2);
+  const p1b = "What makes a tall narrow tower topple in a strong wind?";
+  // Swap the first two subskills, give only the old subskill 1 a new probe, and drop the third subskill.
+  const swapped: [string, string][] = [["Projectiles", "none"], ["Slopes", "none"]];
+  await store.saveCompiled({
+    title: "Calculus", fm: { subject: "none" }, topicBody: CARD(swapped), target: 4, existingDir: dir,
+    questionsBody: sealedSec("Q1", 1, "application", "Practice item number 1 about something else entirely.") + sealedSec("Q2", 2, "application", "Practice item number 2 about something else entirely.") + sealedSec("Q12", 2, "probe", p1b),
+  });
+  const after = await store.loadSealed(dir);
+  const st2 = await store.loadState(dir, 4);
+  assert.equal(st2.concepts[1], c2);
+  assert.equal(st2.concepts[2], c1);
+  const ofC2 = after.filter((x) => x.concept === c2);
+  assert.deepEqual(ofC2.map((x) => [x.id, x.subskill]), [[oldC2, 1]]);
+  const ofC1 = after.filter((x) => x.concept === c1);
+  assert.equal(ofC1.length, 1);
+  assert.notEqual(ofC1[0].id, id(c1));
+  assert.equal(ofC1[0].subskill, 2);
+  assert.equal(after.filter((x) => x.concept === c3).length, 0);
+  assert.equal(after.length, 2);
+  assert.ok(!(await fs.read(`${dir}/sealed.md`)).includes(p3));
+  // A topic saved without probes has none, and no file is made for it.
+  const plain = await store.saveCompiled({ title: "Plain", fm: {}, topicBody: CARD([["Slopes", "none"]]).replace("# Calculus", "# Plain"), questionsBody: sealedSec("Q1", 1, "application", "Find it."), target: 4 });
+  assert.deepEqual(await store.loadSealed(plain), []);
+  assert.ok(!(await fs.exists(`${plain}/sealed.md`)));
+  // Retiring every concept empties the file instead of leaving old questions behind.
+  await store.saveCompiled({ title: "Calculus", fm: { subject: "none" }, topicBody: CARD([["Brand new", "none"]]), target: 4, existingDir: dir, questionsBody: sealedSec("Q1", 1, "application", "Find it.") });
+  assert.deepEqual(await store.loadSealed(dir), []);
+});
+
+test("cold probes: a recompile keeps an old sealed question over a reworded copy of it, and drops one the new bank now nearly copies", async () => {
+  const names: [string, string][] = [["Slopes", "none"], ["Projectiles", "none"], ["Stability", "none"]];
+  const practice = (sub: number) => sealedSec(`Q${sub}`, sub, "application", `Practice item number ${sub} about something else entirely.`);
+  const p1 = "Why does a wider base make a pyramid more stable?";
+  const p2 = "How would a bridge engineer decide where to put the supports?";
+  const p3 = "Explain why a spinning top stays upright for a while.";
+  const store = new Store(new MemFS(), "Tutor");
+  const fs = (store as any).fs as MemFS;
+  const dir = await store.saveCompiled({ title: "Calculus", fm: { subject: "none" }, topicBody: CARD(names), target: 4,
+    questionsBody: practice(1) + sealedSec("Q11", 1, "probe", p1) + practice(2) + sealedSec("Q12", 2, "probe", p2) + practice(3) + sealedSec("Q13", 3, "probe", p3) });
+  const first = await store.loadSealed(dir);
+  const st = await store.loadState(dir, 4);
+  const idOf = (n: number) => first.find((q) => q.concept === st.concepts[n])!.id;
+  const dropped = async () => Number(/^dropped: (\d+)$/m.exec(await fs.read(`${dir}/sealed.md`))?.[1]);
+  assert.equal(await dropped(), 0);
+  // Subskill 1 gets a lightly reworded copy of its old probe; subskill 2's new bank has a question close to its old probe.
+  const p1b = "Why does a wider base make a pyramid much more stable?";
+  await store.saveCompiled({ title: "Calculus", fm: { subject: "none" }, topicBody: CARD(names), target: 4, existingDir: dir,
+    questionsBody: practice(1) + sealedSec("Q11", 1, "probe", p1b) + sealedSec("Q2", 2, "application", "How would a bridge engineer decide where to put the supports first?") + practice(3) });
+  const after = await store.loadSealed(dir);
+  const text = await fs.read(`${dir}/sealed.md`);
+  assert.deepEqual(after.filter((q) => q.concept === st.concepts[1]).map((q) => [q.id, q.question]), [[idOf(1), p1]], "the old question and its id are kept");
+  assert.ok(!text.includes(p1b), "the reworded copy is not sealed as unseen work");
+  assert.equal(after.filter((q) => q.concept === st.concepts[2]).length, 0, "an old probe the bank now nearly copies is dropped");
+  assert.deepEqual(after.filter((q) => q.concept === st.concepts[3]).map((q) => q.id), [idOf(3)], "an unrelated old probe stays");
+  assert.equal(await dropped(), 2);
+});
+
+test("cold probes: the compile notice counts bank questions only, not the sealed probe", () => {
+  const body = sealedSec("Q1", 1, "application", "Find the slope of the line.") + sealedSec("Q2", 1, "probe", "Why does a wider base make a pyramid more stable?") + sealedSec("Q3", 2, "application", "A ball is thrown up at 5 m/s. How high?") + sealedSec("Q4", 2, "transfer", "Describe a river's flow as a rate of change.");
+  assert.equal(F.parseQuestions(body).length, 4);
+  assert.equal(bankCount(body), 3);
+});
+
+test("cold probes: a probe answer is recorded but moves no level, estimate, BKT value or delayed check", async () => {
+  const B = await import("../src/bkt");
+  const s = F.newState(F.parseTopic(CARD(NAMES)), 4);
+  for (const [id, hour] of [["p1", "10"], ["p2", "11"]]) {
+    const a = attempt({ id, timestamp: `2026-11-14T${hour}:00:00.000Z` });
+    s.attempts = recordAttempt(s.attempts, a);
+    applyAttempt(s, a);
+  }
+  assert.equal(s.levels[1], 3);
+  const e0 = skillEvidence(s.attempts, 1);
+  const a = attempt({ id: "probe1", probe: true, taskType: "transfer", family: "unmet-family", timestamp: "2026-11-17T10:00:00.000Z" });
+  s.attempts = recordAttempt(s.attempts, a);
+  assert.deepEqual(skillEvidence(s.attempts, 1), e0);
+  assert.deepEqual(applyAttempt(s, a), []);
+  assert.equal(s.levels[1], 3);
+  assert.equal(B.bktShadow(s.attempts, 1)?.observations, B.bktShadow(s.attempts.filter((x) => !x.probe), 1)?.observations);
+  assert.equal(normaliseAttempt(JSON.parse(JSON.stringify(a)))?.probe, true);
+  assert.equal(normaliseAttempt({ ...JSON.parse(JSON.stringify(a)), probe: "true" })?.probe, undefined, "only a boolean true marks a probe");
+  assert.equal(normaliseAttempt(JSON.parse(JSON.stringify(attempt({ id: "old" }))))?.probe, undefined, "older evidence has no probe field");
+
+  // A wrong probe answer at level 4 leaves the level there.
+  s.levels[1] = 4;
+  const wrong = attempt({ id: "probe2", probe: true, result: "incorrect", timestamp: "2026-11-18T10:00:00.000Z" });
+  s.attempts = recordAttempt(s.attempts, wrong);
+  assert.deepEqual(applyAttempt(s, wrong), []);
+  assert.equal(s.levels[1], 4);
+  assert.deepEqual(skillEvidence(s.attempts, 1), e0);
+});
+
+test("cold probes: the metrics report counts probe answers apart from unaided practice", async () => {
+  const M = await import("../src/metrics");
+  const base = [attempt({ id: "a" })];
+  const without = M.summariseMetrics({ packages: [], attempts: { Calculus: base } });
+  const s = M.summariseMetrics({ packages: [], attempts: { Calculus: [...base, attempt({ id: "pr", probe: true, timestamp: "2026-11-12T10:00:00.000Z" }), attempt({ id: "pw", probe: true, result: "incorrect", timestamp: "2026-11-12T11:00:00.000Z" })] } });
+  assert.deepEqual([s.attempts.probes, s.attempts.probeCorrect], [2, 1]);
+  assert.equal(s.attempts.independent, without.attempts.independent);
+  assert.equal(s.shadow.n, without.shadow.n);
+  assert.match(M.metricsReport(s), /Cold probes: 2 answers, 1 correct\./);
+});
+
+test("cold probes: a probe answer is never evidence for or against a misconception", async () => {
+  const M = await import("../src/misconceptions");
+  const wrong = attempt({ id: "pw", probe: true, result: "incorrect" });
+  assert.equal(M.countable(wrong), false);
+  assert.equal(M.countable(attempt({ id: "w", result: "incorrect" })), true);
+});
+
+// ---------- cold probes: when one is due and what it asks ----------
+
+const probeState = (levels: (number | null)[], firstDay = "2026-11-15") => {
+  const s = F.newState(F.parseTopic(CARD(levels.map((_, i) => [`Skill ${i + 1}`, "none"] as [string, string]))), 4);
+  levels.forEach((lv, i) => {
+    const n = i + 1;
+    s.levels[n] = lv;
+    s.concepts[n] = `c${n}`;
+    if (lv !== null && lv >= 3) {
+      for (const [k, day] of [["a", firstDay], ["b", "2026-11-16"]]) s.attempts.push(attempt({ id: `u${n}${k}`, skill: n, concept: `c${n}`, timestamp: `${day}T10:00:00.000Z` }));
+    }
+  });
+  return s;
+};
+const sealedQ = (n: number, k = 0, over: Partial<F.Question> = {}): F.Question => ({
+  id: `P${String(n * 10 + k).padStart(10, "0")}`, subskill: 0, type: "short", question: `unseen ${n}.${k}`, options: [], answer: "1", explanation: "", task: "probe", concept: `c${n}`, ...over,
+});
+const probeAttempt = (id: string, q: F.Question, over: Partial<Attempt> = {}) =>
+  attempt({ id, skill: q.subskill, concept: q.concept!, questionId: q.id, probe: true, activity: "probe", taskType: "transfer", timestamp: "2026-11-10T10:00:00.000Z", ...over });
+
+test("cold probes: the queue takes one unspent sealed question per concept ready for it, at most six", async () => {
+  const P = await import("../src/probe");
+  const s = probeState([4, 4, 4, 4, 3, 3, 3, 3, 2, 3]);
+  s.attempts = s.attempts.filter((a) => a.skill !== 10);
+  s.attempts.push(attempt({ id: "t10", skill: 10, concept: "c10", timestamp: "2026-11-17T09:00:00.000Z" }));
+  const gen = sealedQ(2, 1, { generator: {} as any });
+  const sealed = [...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => sealedQ(n)), sealedQ(1, 1), gen, sealedQ(99)];
+  const q = P.probeQueue(sealed, s, "2026-11-17");
+  assert.equal(q.length, 6);
+  assert.deepEqual(q.map((x) => x.subskill), [1, 2, 3, 4, 5, 6], "level 4 first, then lowest n");
+  assert.ok(!q.some((x) => [9, 10].includes(x.subskill)), "level 2 and the first success today are not ready");
+  assert.equal(q[1].id, gen.id, "the question with a generator comes first");
+  assert.equal(q[0].id, sealedQ(1).id);
+  // A spent question gives way to the concept's other one.
+  const spent = P.spentSealed(sealed, [probeAttempt("pa", sealedQ(1))]);
+  assert.deepEqual([...spent], [sealedQ(1).id]);
+  s.attempts.push(probeAttempt("pa", sealedQ(1)));
+  assert.equal(P.probeQueue(sealed, s, "2026-11-17")[0].id, sealedQ(1, 1).id);
+  // A question whose concept is unknown is dropped; the rest take their subskill from the concept.
+  const current = P.currentSealed(sealed, s);
+  assert.equal(current.length, sealed.length - 1);
+  assert.ok(!current.some((x) => x.concept === "c99"));
+  s.concepts = { ...s.concepts, 1: "c2", 2: "c1" };
+  assert.deepEqual(P.currentSealed([sealedQ(1), sealedQ(2)], s).map((x) => x.subskill), [2, 1]);
+});
+
+test("cold probes: a probe is due first, then every 14 days, sooner before an exam, never with nothing to ask", async () => {
+  const P = await import("../src/probe");
+  const today = "2026-11-17";
+  const s = probeState([4, 3]);
+  const sealed = [sealedQ(1), sealedQ(2)];
+  let st = P.probeStatus(sealed, s, today);
+  assert.deepEqual([st.count, st.due, st.why, st.lastProbe, st.sealedTotal], [2, true, "no cold probe yet", null, 2]);
+  const probeOn = (day: string, over: Partial<Attempt> = {}) => s.attempts.push(probeAttempt(`p-${day}-${s.attempts.length}`, sealedQ(1, 5), { timestamp: `${day}T10:00:00.000Z`, ...over }));
+  probeOn("2026-11-07");
+  st = P.probeStatus(sealed, s, today);
+  assert.deepEqual([st.due, st.why, st.lastProbe], [false, "", "2026-11-07"]);
+  s.attempts.pop();
+  probeOn("2026-11-12");
+  assert.equal(P.probeStatus(sealed, s, today, "2026-11-20").due, false, "the exam is near, but the last probe is under a week old");
+  s.attempts.pop();
+  probeOn("2026-11-03");
+  st = P.probeStatus(sealed, s, today);
+  assert.deepEqual([st.due, st.why], [true, "14 days since the last cold probe"]);
+  s.attempts.pop();
+  probeOn("2026-11-09");
+  st = P.probeStatus(sealed, s, today, "2026-11-22");
+  assert.deepEqual([st.due, st.why], [true, "the exam is within a week"]);
+  assert.equal(P.probeStatus(sealed, s, today, "2026-11-30").due, false, "the exam is far");
+  assert.equal(P.probeStatus(sealed, s, today, "2026-11-10").due, false, "an exam in the past does not count");
+  // Nothing left to ask.
+  s.attempts.push(probeAttempt("x1", sealedQ(1)), probeAttempt("x2", sealedQ(2)));
+  st = P.probeStatus(sealed, s, today);
+  assert.deepEqual([st.count, st.due], [0, false]);
+  assert.equal(P.probeStatus([], s, today).sealedTotal, 0);
+});
+
+test("cold probes: asked and correct skip ungraded and disputed answers, and not transferring follows the concept through a renumbering", async () => {
+  const P = await import("../src/probe");
+  const s = probeState([4, 4, 3]);
+  const [q1, q2, q3] = [sealedQ(1), sealedQ(2), sealedQ(3)];
+  s.attempts.push(
+    probeAttempt("a", q1, { result: "correct", timestamp: "2026-11-10T10:00:00.000Z" }),
+    probeAttempt("b", q2, { result: "incorrect", timestamp: "2026-11-11T10:00:00.000Z" }),
+    probeAttempt("c", q3, { result: "incorrect", timestamp: "2026-11-12T10:00:00.000Z" }),
+    probeAttempt("d", q1, { result: "ungraded", timestamp: "2026-11-13T10:00:00.000Z" }),
+    probeAttempt("e", q1, { result: "incorrect", verification: "disputed", timestamp: "2026-11-14T10:00:00.000Z" }),
+  );
+  let st = P.probeStatus([q1, q2, q3], s, "2026-11-17");
+  assert.deepEqual([st.asked, st.correct, st.lastProbe], [3, 1, "2026-11-14"]);
+  assert.deepEqual(st.notTransferring, [2], "level 4 and wrong; subskill 3 is only level 3 and subskill 1 last passed");
+  // A recompile swaps the numbers of the first two concepts: the same concept is reported under its new number.
+  s.concepts = { 1: "c2", 2: "c1", 3: "c3" };
+  s.levels = { 1: 4, 2: 4, 3: 3 };
+  st = P.probeStatus([q1, q2, q3], s, "2026-11-17");
+  assert.deepEqual(st.notTransferring, [1]);
+  // A probe attempt for a question since dropped from sealed.md is still counted and still found by its concept.
+  const gone = sealedQ(1, 7);
+  s.attempts.push(probeAttempt("f", gone, { result: "skipped", timestamp: "2026-11-16T10:00:00.000Z" }));
+  st = P.probeStatus([q2, q3], s, "2026-11-17");
+  assert.equal(st.asked, 4);
+  assert.deepEqual(st.notTransferring, [1, 2]);
+});
+
+test("bank marking: markBankAnswer marks a letter by code and asks again for a non-letter", async () => {
+  const { markBankAnswer } = await import("../src/engine-bank");
+  const { engine, calls } = await motion();
+  const q = F.parseQuestions(BANK)[0];
+  const right = await markBankAnswer(engine, q, null, "B", {});
+  assert.equal(right.kind, "marked");
+  if (right.kind === "marked") assert.deepEqual([right.grade, right.grading, right.skipped], ["good", "deterministic", false]);
+  const wrong = await markBankAnswer(engine, q, null, "A", {});
+  assert.ok(wrong.kind === "marked" && wrong.grade === "again");
+  assert.deepEqual(await markBankAnswer(engine, q, null, "maybe", {}), { kind: "reply", reply: "Reply with one letter, for example **B**." });
+  assert.equal(calls(), 0);
+});
+
+test("bank marking: verdictText gives one verdict for bank and sealed answers", async () => {
+  const { markBankAnswer, verdictText } = await import("../src/engine-bank");
+  const { engine } = await motion();
+  const q = F.parseQuestions(BANK)[0];
+  const right = await markBankAnswer(engine, q, null, "B", {});
+  const wrong = await markBankAnswer(engine, q, null, "A", {});
+  const skip = await markBankAnswer(engine, q, null, "skip", {});
+  assert.ok(right.kind === "marked" && wrong.kind === "marked" && skip.kind === "marked");
+  if (right.kind !== "marked" || wrong.kind !== "marked" || skip.kind !== "marked") return;
+  assert.equal(verdictText(right, q, "correct", ""), "**Correct.**");
+  assert.equal(verdictText(wrong, q, "incorrect", ""), `**Incorrect.**\n\nAnswer: ${F.answerText(q)}\n\nThe terms shrink.`);
+  assert.equal(verdictText(skip, q, "skipped", "", "*Score so far: 1/5.*").startsWith("**Skipped.**\n\nAnswer: "), true);
+  assert.equal(verdictText(right, q, "ungraded", "n").startsWith("**Left ungraded.** n"), true);
+  assert.equal(verdictText(right, q, "partial", "").startsWith("**Partly right.**"), true);
+  assert.equal(verdictText(right, q, "correct", "", "*Score so far: 1/5.*"), "**Correct.**\n\n*Score so far: 1/5.*");
+});
+
+// ---------- cold probes: running one ----------
+
+/** A topic with two level-3 concepts, a bank question for each, and a short sealed probe for each: 7 and 6. */
+async function probeRun(only = 2, first: [string, string] = ["Evaluate six plus one, written as a digit.", "7"]) {
+  const { PROBE_NO_HELP } = await import("../src/engine-probe");
+  const fs = new MemFS();
+  const store = new Store(fs, "Tutor", () => "2026-11-17");
+  const settings: any = { claudePath: "", chatModel: "sonnet", compileModel: "sonnet", utilityModel: "haiku", effort: "low", targetLevel: 4, maxChatWords: 600, maxTopicWords: 2000, singlePassWords: 6000, smartRouting: false, hardEffort: "high", bankQuiz: true, codePlacement: true };
+  const engine = new Engine(store, () => settings, () => "2026-11-17");
+  let calls = 0;
+  (engine as any).call = async () => { calls++; throw new Error("no model call expected"); };
+  const sec = (id: string, sub: number, task: string, q: string, a: string) => `### ${id}\nsubskill: ${sub}\ntype: short\ntask: ${task}\nquestion: ${q}\nanswer: ${a}\nexplanation: Add them.\n\n`;
+  const body = sec("Q1", 1, "application", "A cart starts at 3 m/s and speeds up at 2 m/s² for 4 s. What is its final speed in m/s?", "11")
+    + sec("Q2", 2, "application", "A lamp uses 60 W for 5 hours. How many watt-hours does it use?", "300")
+    + sec("Q3", 1, "probe", ...first)
+    + (only > 1 ? sec("Q4", 2, "probe", "Evaluate ten minus four, written as a digit.", "6") : "");
+  const dir = await store.saveCompiled({ title: "Motion", fm: { subject: "none" }, topicBody: CARD(NAMES), questionsBody: body, target: 4 });
+  const state = await store.loadState(dir, 4);
+  for (const n of [1, 2]) {
+    state.levels[n] = 3;
+    for (const [k, day] of [["a", "2026-11-15"], ["b", "2026-11-16"]]) state.attempts.push(attempt({ id: `u${n}${k}`, skill: n, concept: state.concepts[n], timestamp: `${day}T10:00:00.000Z` }));
+  }
+  await store.saveState(dir, state);
+  return { store, engine, dir, fs, PROBE_NO_HELP, calls: () => calls };
+}
+
+test("cold probes: a probe asks sealed questions with no help, marks them by code and changes no level", async () => {
+  const { store, engine, dir, PROBE_NO_HELP, calls } = await probeRun(1);
+  const sealed = await store.loadSealed(dir);
+  assert.equal(sealed.length, 1);
+  const started = await engine.startProbe(dir);
+  assert.equal(started?.count, 1);
+  const chatPath = started!.chatPath;
+  const chat = await store.loadChat(chatPath);
+  assert.match(chat.messages[chat.messages.length - 1].text, /\*\*Cold probe\*\*/);
+  assert.equal(F.fmStr(chat.fm, "card"), sealed[0].id);
+  const before = (await store.loadState(dir, 4)).attempts.length;
+
+  for (const help of ["can I have a hint?", "show me a diagram"]) {
+    const r = await engine.study(dir, chatPath, help);
+    assert.equal(r.reply, PROBE_NO_HELP);
+    assert.equal(r.local, true);
+  }
+  assert.equal(calls(), 0);
+  assert.equal((await store.loadState(dir, 4)).attempts.length, before);
+
+  const r = await engine.study(dir, chatPath, "7");
+  assert.equal(calls(), 0);
+  assert.match(r.reply, /1\/1 right/);
+  assert.match(r.reply, /Levels are unchanged/);
+  const state = await store.loadState(dir, 4);
+  assert.equal(state.attempts.length, before + 1);
+  const a = state.attempts[state.attempts.length - 1];
+  assert.deepEqual([a.probe, a.result, a.grading, a.activity, a.taskType, a.questionId], [true, "correct", "deterministic", "probe", "transfer", sealed[0].id]);
+  assert.equal(state.levels[1], 3);
+  assert.equal(state.cards[sealed[0].id], undefined);
+  assert.deepEqual(state.misconceptions, []);
+  const done = await store.loadChat(chatPath);
+  assert.equal(F.fmStr(done.fm, "card"), "");
+  assert.equal(F.fmStr(done.fm, "probe_done"), "2026-11-17");
+  assert.equal(await engine.startProbe(dir), null, "nothing is left to ask that day");
+});
+
+test("cold probes: a probe left half done resumes with the next question and never asks an answered one again", async () => {
+  const { store, engine, dir, calls } = await probeRun(2);
+  const { chatPath, count } = (await engine.startProbe(dir))!;
+  assert.equal(count, 2);
+  const queue = F.fmList((await store.loadChat(chatPath)).fm, "probe_queue");
+  assert.equal(queue.length, 2);
+  const sealed = await store.loadSealed(dir);
+  const text = (id: string) => sealed.find((q) => q.id === id)!.question;
+  assert.equal(F.fmStr((await store.loadChat(chatPath)).fm, "card"), queue[0]);
+
+  const wrong = await engine.study(dir, chatPath, "99");
+  assert.match(wrong.reply, /\*\*Incorrect\.\*\*/);
+  assert.match(wrong.reply, /Answer: /, "the answer is shown after an attempt");
+  assert.ok(wrong.reply.includes(text(queue[1])), "the next question follows");
+  const resumed = await store.loadChat(chatPath);
+  assert.equal(F.fmStr(resumed.fm, "card"), queue[1]);
+  const again = await engine.study(dir, chatPath, "");
+  assert.ok(again.reply.includes(text(queue[1])) && !again.reply.includes(text(queue[0])));
+  assert.equal(again.local, true);
+  assert.equal((await store.loadState(dir, 4)).attempts.filter((a) => a.probe).length, 1, "asking again records nothing");
+
+  const second = queue[1] === sealed.find((q) => q.question.includes("ten minus"))?.id ? "6" : "7";
+  const last = await engine.study(dir, chatPath, second);
+  assert.match(last.reply, /1\/2 right/);
+  const state = await store.loadState(dir, 4);
+  assert.deepEqual(state.attempts.filter((a) => a.probe).map((a) => a.questionId).sort(), [...queue].sort());
+  assert.deepEqual([state.levels[1], state.levels[2]], [3, 3]);
+  assert.equal(calls(), 0);
+  const skipRun = await engine.study(dir, chatPath, "skip");
+  assert.match(skipRun.reply, /finished/);
+});
+
+test("cold probes: starting a probe while one is unfinished returns that chat instead of a second one", async () => {
+  const { store, engine, dir, calls } = await probeRun(2);
+  const a = (await engine.startProbe(dir))!;
+  const again = (await engine.startProbe(dir))!;
+  assert.deepEqual([again.chatPath, again.count], [a.chatPath, 2]);
+  assert.equal((await store.listChats(dir)).length, 1, "no second chat is made");
+  await engine.study(dir, a.chatPath, "99");
+  const resumed = (await engine.startProbe(dir))!;
+  assert.deepEqual([resumed.chatPath, resumed.count], [a.chatPath, 1], "the same chat, with one question left");
+  assert.equal((await store.loadChat(a.chatPath)).messages.filter((m) => m.role === "tutor").length, 2, "resuming adds nothing to the chat");
+  await engine.study(dir, a.chatPath, "skip");
+  assert.ok(F.fmStr((await store.loadChat(a.chatPath)).fm, "probe_done"));
+  assert.equal(await engine.startProbe(dir), null, "a finished probe is not resumed, and nothing else is left to ask");
+  assert.equal(calls(), 0);
+});
+
+test("cold probes: a question answered in one probe chat is not recorded again from another", async () => {
+  const { store, engine, dir, calls } = await probeRun(1);
+  const a = (await engine.startProbe(dir))!;
+  // A second chat on the same questions, as an earlier version could start one.
+  const b = { chatPath: await store.newChat(dir, "Motion", "quiz") };
+  await store.saveChat(b.chatPath, await store.loadChat(a.chatPath));
+  assert.notEqual(a.chatPath, b.chatPath);
+  const sealed = (await store.loadSealed(dir))[0];
+  await engine.study(dir, a.chatPath, "7");
+  const before = (await store.loadState(dir, 4)).attempts.filter((x) => x.probe).length;
+  assert.equal(before, 1);
+  const r = await engine.study(dir, b.chatPath, "7");
+  assert.ok(!r.reply.includes(sealed.question), "the answered question is not asked again");
+  assert.match(r.reply, /Cold probe finished/);
+  assert.equal((await store.loadState(dir, 4)).attempts.filter((x) => x.probe).length, 1);
+  assert.equal(calls(), 0);
+});
+
+test("cold probes: plain help requests are refused locally while a bare answer is still marked", async () => {
+  const { store, engine, dir, PROBE_NO_HELP, calls } = await probeRun(1);
+  const { chatPath } = (await engine.startProbe(dir))!;
+  for (const help of ["give me a hint", "I need help", "please explain"]) assert.equal((await engine.study(dir, chatPath, help)).reply, PROBE_NO_HELP);
+  assert.equal(calls(), 0);
+  assert.equal((await store.loadState(dir, 4)).attempts.filter((x) => x.probe).length, 0);
+  assert.match((await engine.study(dir, chatPath, "7")).reply, /1\/1 right/);
+});
+
+test("cold probes: an answer that starts with a question word is marked, while a question or a request for help is still refused", async () => {
+  const { store, engine, dir, PROBE_NO_HELP, calls } = await probeRun(1, ["In words, when does a moving body keep a constant velocity?", "When the net force is zero"]);
+  const { chatPath } = (await engine.startProbe(dir))!;
+  for (const help of ["can I have a hint?", "show me a diagram", "When does it hold?"]) assert.equal((await engine.study(dir, chatPath, help)).reply, PROBE_NO_HELP, help);
+  assert.equal((await store.loadState(dir, 4)).attempts.filter((x) => x.probe).length, 0);
+  const r = await engine.study(dir, chatPath, "When the net force is zero");
+  assert.notEqual(r.reply, PROBE_NO_HELP);
+  assert.match(r.reply, /1\/1 right/);
+  assert.deepEqual((await store.loadState(dir, 4)).attempts.filter((x) => x.probe).map((x) => x.result), ["correct"]);
+  assert.equal(calls(), 0);
+});
+
+test("cold probes: skip while a question is open records a skipped attempt and moves on", async () => {
+  const { store, engine, dir, calls } = await probeRun(2);
+  const { chatPath } = (await engine.startProbe(dir))!;
+  const r = await engine.study(dir, chatPath, "skip");
+  assert.match(r.reply, /\*\*Skipped\.\*\*/);
+  let probes = (await store.loadState(dir, 4)).attempts.filter((x) => x.probe);
+  assert.deepEqual(probes.map((x) => x.result), ["skipped"]);
+  assert.ok(F.fmStr((await store.loadChat(chatPath)).fm, "card"), "the next question is open");
+  const last = await engine.study(dir, chatPath, "skip");
+  assert.match(last.reply, /0\/2 right/);
+  probes = (await store.loadState(dir, 4)).attempts.filter((x) => x.probe);
+  assert.deepEqual(probes.map((x) => x.result), ["skipped", "skipped"]);
+  assert.equal(calls(), 0);
+});
+
+test("cold probes: a probe whose remaining questions a recompile retired says so when it closes, and never reports 0/0", async () => {
+  const RETIRED = "The topic was recompiled, so this probe's remaining questions were retired.";
+  const retire = async (store: Store, dir: string, id: string) => {
+    const concept = (await store.loadSealed(dir)).find((q) => q.id === id)!.concept!;
+    const fs = (store as any).fs as MemFS;
+    await fs.write(`${dir}/sealed.md`, (await fs.read(`${dir}/sealed.md`)).split(concept).join("retired-concept"));
+  };
+  // The only question is retired before it is answered: nothing was asked, so there is no score.
+  let t = await probeRun(1);
+  let chatPath = (await t.engine.startProbe(t.dir))!.chatPath;
+  await retire(t.store, t.dir, F.fmStr((await t.store.loadChat(chatPath)).fm, "card"));
+  let r = await t.engine.study(t.dir, chatPath, "7");
+  assert.equal(r.reply, `${RETIRED}\n\nCold probe finished. Levels are unchanged.`);
+  assert.doesNotMatch(r.reply, /0\/0/);
+  // One answered, the next retired: the line comes before the summary of what was answered.
+  t = await probeRun(2);
+  chatPath = (await t.engine.startProbe(t.dir))!.chatPath;
+  await t.engine.study(t.dir, chatPath, "99");
+  await retire(t.store, t.dir, F.fmStr((await t.store.loadChat(chatPath)).fm, "card"));
+  r = await t.engine.study(t.dir, chatPath, "6");
+  assert.ok(r.reply.startsWith(`${RETIRED}\n\n**Cold probe finished:** 0/1 right.`), r.reply);
+  // A probe that ends with every question answered says nothing about a recompile.
+  t = await probeRun(1);
+  chatPath = (await t.engine.startProbe(t.dir))!.chatPath;
+  r = await t.engine.study(t.dir, chatPath, "7");
+  assert.ok(!r.reply.includes(RETIRED));
+  assert.equal(t.calls(), 0);
+});
+
+test("cold probes: a recompile that retires the open question's concept moves the probe on and records nothing for it", async () => {
+  const { store, engine, dir, calls } = await probeRun(2);
+  const { chatPath } = (await engine.startProbe(dir))!;
+  const chat = await store.loadChat(chatPath);
+  const open = F.fmStr(chat.fm, "card");
+  const sealed = await store.loadSealed(dir);
+  const concept = sealed.find((q) => q.id === open)!.concept!;
+  const fs = (store as any).fs as MemFS;
+  await fs.write(`${dir}/sealed.md`, (await fs.read(`${dir}/sealed.md`)).split(concept).join("retired-concept"));
+  assert.ok((await engine.store.loadSealed(dir)).some((q) => q.id !== open));
+  const r = await engine.study(dir, chatPath, "7");
+  assert.equal((await store.loadState(dir, 4)).attempts.filter((x) => x.probe).length, 0, "nothing recorded for the retired question");
+  assert.notEqual(F.fmStr((await store.loadChat(chatPath)).fm, "card"), open);
+  assert.ok(r.reply.length > 0);
+  assert.equal(calls(), 0);
 });
