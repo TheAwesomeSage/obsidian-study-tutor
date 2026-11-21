@@ -9,6 +9,7 @@ import * as F from "../src/formats";
 import { Attempt, checkDue, missingFor, normaliseAttempt, recordAttempt, skillEvidence, supportedLevel } from "../src/evidence";
 import { classifyChange, conceptRevisions, materialText, traceAttempt, versionObjectives } from "../src/objective-version";
 import { digest } from "../src/compile-sources";
+import { sealedId, splitSealed } from "../src/sealed";
 import { effectivePrereqs, parseTopicGraph, syncTopicGraph, wouldCycle } from "../src/course";
 import { DEFAULT_WEIGHTS, LEARN_ACTIONS, PolicyInput, SkillInput, V1_WEIGHTS, decide, replay, scoreSkills } from "../src/policy";
 import { openQuestion, readIntent, readSessionReply, sessionFor } from "../src/session";
@@ -1702,4 +1703,28 @@ test("model-led turns are told which ideas are not yet asked, and whether to bui
   await engine.turn(dir, chat, "go on");
   assert.match(seen[1], /- O1: .* — asked 1, not secured/);
   assert.match(seen[1], /Build on the last question: stay on O1[\s\S]*You weren't sure, so a smaller step on the same idea\./);
+});
+
+test("cold probes: a probe family is split out of the bank, and a near-copy of practice is dropped", () => {
+  const sec = (id: string, sub: number, task: string, q: string) =>
+    `### ${id}\nsubskill: ${sub}\ntype: short\ntask: ${task}\nquestion: ${q}\nanswer: 1\n\n`;
+  const body =
+    "Intro\n\n" +
+    sec("Q1", 1, "application", "Find the slope of the line through two points.") +
+    sec("Q2", 1, "probe", "Why does a wider base make a pyramid more stable?") +
+    sec("Q3", 2, "application", "A ball is thrown up at 5 m/s. How high does it rise?") +
+    sec("Q4", 2, "probe", "A ball is thrown up at 8 m/s. How high does it rise?");
+  const r = splitSealed(body);
+  assert.deepEqual(F.parseQuestions(r.bank).map((x) => x.id), ["Q1", "Q3"]);
+  assert.equal(r.sealed.length, 1);
+  assert.match(r.sealed[0].id, /^P[0-9a-f]{10}$/);
+  assert.equal(r.sealed[0].subskill, 1);
+  assert.equal(r.dropped, 1);
+  assert.equal(F.parseQuestions(r.sealed[0].section)[0].task, "probe");
+  assert.equal(sealedId("x"), sealedId("x"));
+  assert.equal(F.parseQuestions("### P1\nsubskill: 1\ntype: short\ntask: probe\nconcept: c-abc\nquestion: x\nanswer: 1\n")[0].concept, "c-abc");
+  const plain = sec("Q1", 1, "application", "Find the slope.");
+  const none = splitSealed(plain);
+  assert.deepEqual({ sealed: none.sealed, dropped: none.dropped }, { sealed: [], dropped: 0 });
+  assert.equal(none.bank, plain);
 });

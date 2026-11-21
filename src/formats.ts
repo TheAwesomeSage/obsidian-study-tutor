@@ -311,10 +311,12 @@ export interface Question {
    * reference solution.
    */
   code?: CodeTask;
+  /** Stable concept id; set only on sealed questions. */
+  concept?: string;
 }
 
-const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation", "family", "task", "difficulty", "rubric", "generator", "code"] as const;
-const Q_TASKS = ["recall", "application", "transfer", "prediction", "explanation", "error-finding", "teach-back", "edge-case"];
+const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation", "family", "task", "difficulty", "rubric", "generator", "code", "concept"] as const;
+const Q_TASKS = ["recall", "application", "transfer", "prediction", "explanation", "error-finding", "teach-back", "edge-case", "probe"];
 
 const OPTION_LABEL = /^\(?[A-Za-z][.):]\s+/;
 
@@ -344,7 +346,7 @@ function normaliseMcq(options: string[], answer: string): { options: string[]; a
 
 export function parseQuestions(md: string): Question[] {
   const { body } = splitFrontmatter(md);
-  const parts = body.split(/^#{2,4}\s+\**(Q\d+)\**[.:]?[ \t]*$/m);
+  const parts = body.split(/^#{2,4}\s+\**(Q\d+|P[0-9a-f]+)\**[.:]?[ \t]*$/m);
   const out: Question[] = [];
   for (let i = 1; i + 1 < parts.length; i += 2) {
     const f: Record<string, string[]> = {};
@@ -382,6 +384,7 @@ export function parseQuestions(md: string): Question[] {
     if (family) q.family = family;
     if (Q_TASKS.includes(task)) q.task = task;
     if (Number.isInteger(difficulty) && difficulty >= 1 && difficulty <= 5) q.difficulty = difficulty;
+    if (get("concept")) q.concept = get("concept").slice(0, 80);
     if (get("rubric")) q.rubric = get("rubric").slice(0, 800);
     // A spec that fails its checks is dropped: the question stays, with its own numbers only.
     const generator = type === "short" && get("generator") ? parseFamilySpec(get("generator")) : null;
