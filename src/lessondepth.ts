@@ -78,6 +78,8 @@ export function lessonDepth(p: { mode: string; action: string | null; move: Move
     if (m.move === "probe" && (m.reason === "FIND_FAILED_STEP" || m.reason === "SUSPECTED_MISCONCEPTION")) return deep(m.reason === "FIND_FAILED_STEP" ? "the failed step is being located" : "a suspected misconception is being told apart");
     if (m.move === "hint" && (m.hintStage ?? 1) >= 3) return deep("a late hint shows a step worked");
     if (m.move === "worked-solution") return deep("the answer is being worked through");
+    if (m.move === "reteach") return deep("the idea is being taught again another way");
+    if (m.move === "model-strategy") return deep("a parallel problem is being worked to show a way in");
     if (asked) return deep("you asked why or how");
     return ROUTINE;
   }

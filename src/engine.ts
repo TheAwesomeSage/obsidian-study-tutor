@@ -29,7 +29,7 @@ import { normaliseMark, withNote } from "./grading";
 import { reservedQuestions } from "./coursepkg";
 import { fadedFor, isBankId, pairedFor, taskOf } from "./bankvariants";
 import { baseQuestionId } from "./families";
-import { MoveDecision, REASON_TEXT, afterMark, chooseMove, moveBrief } from "./tutormove";
+import { MoveDecision, REASON_TEXT, afterMark, chooseMove, moveBrief, weakPrerequisite } from "./tutormove";
 import { CourseMaterial, lessonDepth } from "./lessondepth";
 import { CourseExpander, ExpansionRecord, GO_FURTHER, expansionNote, expansionRequest, inCourse } from "./expansion";
 import { prereqChecks, setPrereqCheck, taskTypeFor, EngineSettings, TurnResult, TurnOpts, COMPUTE_ROUNDS, FIRST_CHECK_WAIT_MS, MAX_ANSWER_SECONDS, looksMathematical, MODE_NAME, TEACHING, ERROR_TYPES, LOOKS_BACK, daysBetween, equivalenceKind, applyAttempt } from "./engine-common";
@@ -437,8 +437,10 @@ export class Engine {
     // Master mode makes one move a turn, chosen in code from the evidence and what the learner asked.
     let move: MoveDecision | null = null;
     const focusConcept = (before.pendingQuestion && before.concept) || (state.focus !== null ? state.concepts[state.focus] ?? "" : "");
+    // The weakest earlier idea a concept builds on: a wrong answer whose step needs it is taught from there.
+    const weakOf = (concept: string) => weakPrerequisite(Number(Object.entries(state.concepts).find(([, id]) => id === concept)?.[0] ?? NaN) || null, state.levels, state.names, pre);
     if (mode === "tutor") {
-      move = chooseMove({ intent, pending: !!before.pendingQuestion, concept: focusConcept, attempts: state.attempts, misconceptions: onConcept(state.misconceptionRecords ?? [], focusConcept, state.attempts), askedUnder, targets: before.targets ?? "", discriminates: before.discriminates ?? "", helpGiven: before.hints ?? 0 });
+      move = chooseMove({ intent, pending: !!before.pendingQuestion, concept: focusConcept, attempts: state.attempts, misconceptions: onConcept(state.misconceptionRecords ?? [], focusConcept, state.attempts), askedUnder, targets: before.targets ?? "", discriminates: before.discriminates ?? "", helpGiven: before.hints ?? 0, weakPrerequisite: weakOf(focusConcept) });
       session.action = move.move;
       session.reason = `${move.reason}: ${REASON_TEXT[move.reason]}`;
       if (move.move === "hint") session.hints = (before.hints ?? 0) + 1;
@@ -809,7 +811,7 @@ export class Engine {
     let applied: MoveDecision | null = move;
     if (move?.move === "check" && marked && !elsewhere) {
       const recs = state.misconceptionRecords ?? [];
-      applied = afterMark(marked, onConcept(recs, marked.concept, state.attempts), { askedUnder, targets: before.targets ?? "", discriminates: before.discriminates ?? "", pattern: recs.find((m) => m.evidence.includes(marked!.id))?.id });
+      applied = afterMark(marked, onConcept(recs, marked.concept, state.attempts), { askedUnder, targets: before.targets ?? "", discriminates: before.discriminates ?? "", pattern: recs.find((m) => m.evidence.includes(marked!.id))?.id, attempts: state.attempts, weakPrerequisite: weakOf(marked.concept) });
     }
     const chosen = tag && typeof tag.next_move === "string" ? tag.next_move.trim().slice(0, 40) : "";
     if (applied) {

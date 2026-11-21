@@ -7,6 +7,14 @@
 //   ask-justification       a right result without a sound method shown: ask why it holds
 //   fresh-application       a justified answer, a success with help, or no evidence yet: a new problem
 //
+// A wrong answer that no misconception explains is diagnosed first (`diagnoseWrong`), and the move
+// teaches to the cause:
+//
+//   repair-prerequisite     the step needs an earlier idea that is weak: one question on that idea first
+//   probe (slip)            a sound method broken by a slip: the learner looks for it themselves
+//   model-strategy          no workable method at all: a parallel problem worked, then the original back
+//   reteach                 a run of wrong answers with no clearer cause: the idea again, another way
+//
 // A request from the learner comes first: help gets the next graduated hint, a skip or a request for
 // the answer gets the worked solution. The move goes to the model with a short reason code and the
 // evidence behind it, and is kept with the session and shown in Details.
@@ -19,8 +27,8 @@ import type { Attempt } from "./evidence";
 import type { Intent } from "./session";
 import { Misconception, countable } from "./misconceptions";
 
-export type Move = "check" | "hint" | "worked-solution" | "continue" | "probe" | "address-misconception" | "ask-justification" | "fresh-application";
-export const FOLLOW_UPS: Move[] = ["probe", "address-misconception", "ask-justification", "fresh-application"];
+export type Move = "check" | "hint" | "worked-solution" | "continue" | "probe" | "address-misconception" | "ask-justification" | "fresh-application" | "repair-prerequisite" | "model-strategy" | "reteach";
+export const FOLLOW_UPS: Move[] = ["probe", "address-misconception", "ask-justification", "fresh-application", "repair-prerequisite", "model-strategy", "reteach"];
 
 export type ReasonCode =
   | "LEARNER_ASKED_HELP"
@@ -34,6 +42,10 @@ export type ReasonCode =
   | "CONFIRMED_MISCONCEPTION"
   | "MISCONCEPTION_STILL_OPEN"
   | "FIND_FAILED_STEP"
+  | "PREREQUISITE_GAP"
+  | "SLIP_IN_SOUND_METHOD"
+  | "NO_STRATEGY"
+  | "REPEATED_FAILURE"
   | "FLAWED_METHOD"
   | "RESULT_WITHOUT_METHOD"
   | "HEDGED_CORRECT"
@@ -54,6 +66,10 @@ export const REASON_TEXT: Record<ReasonCode, string> = {
   CONFIRMED_MISCONCEPTION: "a confirmed misconception showed in the answer",
   MISCONCEPTION_STILL_OPEN: "a confirmed misconception on this concept is still open",
   FIND_FAILED_STEP: "the last answer was wrong and its cause is not known yet",
+  PREREQUISITE_GAP: "the wrong step needs an earlier idea that is not secure yet",
+  SLIP_IN_SOUND_METHOD: "the method was sound and a slip broke the result",
+  NO_STRATEGY: "the answer had no workable method to start from",
+  REPEATED_FAILURE: "several answers in a row on this idea were wrong, so it is taught another way",
   FLAWED_METHOD: "the result was right but the method was flawed",
   RESULT_WITHOUT_METHOD: "the result was right but no method was shown",
   HEDGED_CORRECT: "the answer was right but given as a guess",
@@ -78,6 +94,62 @@ export interface MoveDecision {
   branches?: Branch[];
   /** The learner asked something with no question open: answer it first, briefly. */
   answerFirst?: boolean;
+  /** For repair-prerequisite: the earlier idea to go back to, when the course names one. */
+  prerequisite?: string;
+}
+
+/** A weak earlier idea the concept builds on, if the course has one: the weakest, first in order on a tie. */
+export interface WeakPrerequisite {
+  n: number;
+  name: string;
+  level: number;
+}
+
+/** What can be read about why a wrong answer went wrong, besides a misconception. */
+export interface WrongContext {
+  /** Every attempt on record; the run of wrong answers on the concept is read from it. */
+  attempts?: Attempt[];
+  weakPrerequisite?: WeakPrerequisite | null;
+}
+
+/** The weakest prerequisite of subskill `n` below `below`, from the course's prerequisites. */
+export function weakPrerequisite(n: number | null, levels: Record<number, number | null>, names: Record<number, string>, pre: Record<number, number[]>, below = 2): WeakPrerequisite | null {
+  if (n === null) return null;
+  const weak = (pre[n] ?? []).filter((p) => p in names && (levels[p] ?? 0) < below).map((p) => ({ n: p, name: names[p], level: levels[p] ?? 0 }));
+  return weak.sort((a, b) => a.level - b.level || a.n - b.n)[0] ?? null;
+}
+
+const SLIPS = new Set(["careless", "arithmetic", "notation"]);
+
+/** Wrong unaided answers on the concept in a row, up to and including this one. */
+function wrongRun(a: Attempt, attempts: Attempt[]): number {
+  const mine = attempts.filter((x) => x.concept === a.concept && !x.probe && countable(x) && x.timestamp <= a.timestamp && x.id !== a.id).sort((x, y) => (x.timestamp < y.timestamp ? -1 : x.timestamp > y.timestamp ? 1 : 0));
+  let run = 1;
+  for (const x of mine.reverse()) {
+    if (x.assisted || x.answerExposed) continue;
+    if (x.result !== "incorrect" && x.result !== "partial") break;
+    run++;
+  }
+  return run;
+}
+
+/**
+ * Why a wrong answer went wrong when no misconception explains it, read in code from the mark and
+ * the record, in this order: a step that needs a weak earlier idea; a slip in a sound method; no
+ * method at all; a run of wrong answers; otherwise the cause is still to be found.
+ */
+export function diagnoseWrong(a: Attempt, ctx: WrongContext = {}): Pick<MoveDecision, "move" | "reason" | "step" | "prerequisite"> {
+  const r = a.reasoning;
+  const kind = r?.earliestError?.kind ?? "";
+  const step = r?.earliestError?.step;
+  const run = wrongRun(a, ctx.attempts ?? []);
+  const prior = (ctx.attempts ?? []).some((x) => x.concept === a.concept && x.id !== a.id && !x.probe && x.result === "correct" && !x.assisted && !x.answerExposed && countable(x));
+  const weak = ctx.weakPrerequisite ?? null;
+  if (kind === "prerequisite" || a.errorType === "prerequisite" || (weak && run >= 2)) return { move: "repair-prerequisite", reason: "PREREQUISITE_GAP", ...(weak ? { prerequisite: weak.name } : {}) };
+  if ((SLIPS.has(kind) || SLIPS.has(a.errorType)) && (r?.method.verdict === "sound" || (!r && prior))) return { move: "probe", reason: "SLIP_IN_SOUND_METHOD", ...(step ? { step } : {}) };
+  if (r?.method.verdict === "missing") return { move: "model-strategy", reason: "NO_STRATEGY" };
+  if (run >= 2) return { move: "reteach", reason: "REPEATED_FAILURE" };
+  return { move: "probe", reason: "FIND_FAILED_STEP", ...(step ? { step } : {}) };
 }
 
 export interface Branch {
@@ -104,6 +176,8 @@ export interface MoveInput {
   discriminates: string;
   /** Help already given for the open question, for the hint ladder. */
   helpGiven: number;
+  /** The weakest earlier idea the concept builds on, for diagnosing a wrong answer. */
+  weakPrerequisite?: WeakPrerequisite | null;
 }
 
 /** An answer that hedges: a guess, or two answers at once. Read in code, so a hedge is never mistaken for a reason. */
@@ -117,13 +191,13 @@ const misc = (m: Misconception | undefined) => (m ? { id: m.id, description: m.d
  * The move after one marked answer. Code's rule, applied in this order:
  *   1. an answer that could not be judged, or work too incomplete to judge, is probed;
  *   2. a wrong answer showing a confirmed misconception addresses it; a suspected one is told apart;
- *   3. any other wrong answer is probed at its earliest failed step;
+ *   3. any other wrong answer is diagnosed (`diagnoseWrong`) and taught to its cause;
  *   4. a right answer leaves a confirmed misconception it was not aimed at still open: it is addressed;
  *   5. a right answer with a flawed or missing method, or given as a guess, asks for the justification
  *      (unless the question already asked for one);
  *   6. a right answer with help, or a justified one, is followed by a fresh application.
  */
-export function afterMark(a: Attempt, ms: Misconception[], ctx: { askedUnder: string; targets: string; discriminates: string; pattern?: string }): MoveDecision {
+export function afterMark(a: Attempt, ms: Misconception[], ctx: { askedUnder: string; targets: string; discriminates: string; pattern?: string } & WrongContext): MoveDecision {
   const r = a.reasoning;
   const confirmed = ms.filter((m) => m.status === "confirmed");
   const shown = ctx.pattern ? ms.find((m) => m.id === ctx.pattern) : undefined;
@@ -132,7 +206,7 @@ export function afterMark(a: Attempt, ms: Misconception[], ctx: { askedUnder: st
   if (a.result === "incorrect" || a.result === "partial") {
     if (shown?.status === "confirmed") return { move: "address-misconception", reason: "CONFIRMED_MISCONCEPTION", evidence: [a.id, ...shown.evidence.filter((x) => x !== a.id)].slice(0, 4), misconception: misc(shown) };
     if (shown) return { move: "probe", reason: "SUSPECTED_MISCONCEPTION", evidence: [a.id, shown.id], misconception: misc(shown) };
-    return { move: "probe", reason: "FIND_FAILED_STEP", evidence: [a.id], misconception: null, ...(r?.earliestError ? { step: r.earliestError.step } : {}) };
+    return { ...diagnoseWrong(a, ctx), evidence: [a.id], misconception: null };
   }
   // A right answer.
   const open = confirmed.find((m) => m.id !== ctx.targets && m.id !== ctx.discriminates);
@@ -154,13 +228,17 @@ function latest(attempts: Attempt[], concept: string): { usable: Attempt | null;
 }
 
 /** The follow-ups an answer can lead to, decided before it is marked, for the model to pick from by its mark. */
-export function branches(ms: Misconception[], askedUnder: string, targets: string, discriminates: string): Branch[] {
+export function branches(ms: Misconception[], askedUnder: string, targets: string, discriminates: string, ctx: { weakPrerequisite?: WeakPrerequisite | null; failing?: boolean } = {}): Branch[] {
   const out: Branch[] = [{ when: "you cannot tell whether it is right, or the work is too incomplete to judge", move: "probe", reason: "AMBIGUOUS_ANSWER" }];
   for (const m of ms.slice(0, 3)) {
     if (m.status === "confirmed") out.push({ when: `wrong, and it shows "${m.description}"`, move: "address-misconception", reason: "CONFIRMED_MISCONCEPTION", misconception: m.id });
     else out.push({ when: `wrong, and it may show "${m.description}"`, move: "probe", reason: "SUSPECTED_MISCONCEPTION", misconception: m.id });
   }
-  out.push({ when: "wrong in another way", move: "probe", reason: "FIND_FAILED_STEP" });
+  const weak = ctx.weakPrerequisite;
+  out.push({ when: weak ? `wrong because the step needs "${weak.name}", an earlier idea` : "wrong because the step needs an earlier idea the learner lacks", move: "repair-prerequisite", reason: "PREREQUISITE_GAP" });
+  out.push({ when: "wrong, but the method is sound and a slip (a sign, a sum, a copied value) broke the result", move: "probe", reason: "SLIP_IN_SOUND_METHOD" });
+  out.push({ when: "wrong with no workable method at all", move: "model-strategy", reason: "NO_STRATEGY" });
+  out.push(ctx.failing ? { when: "wrong in another way", move: "reteach", reason: "REPEATED_FAILURE" } : { when: "wrong in another way", move: "probe", reason: "FIND_FAILED_STEP" });
   const open = ms.find((m) => m.status === "confirmed" && m.id !== targets && m.id !== discriminates);
   if (open) out.push({ when: `right, though "${open.description}" is still open`, move: "address-misconception", reason: "MISCONCEPTION_STILL_OPEN", misconception: open.id });
   else {
@@ -184,7 +262,12 @@ export function chooseMove(p: MoveInput): MoveDecision {
     if (p.intent === "hint") return { move: "hint", reason: "LEARNER_ASKED_HELP", evidence: target ? [target.id] : [], misconception: misc(target ?? undefined), hintStage: Math.min(4, p.helpGiven + 1) };
     if (p.intent === "skip") return { move: "worked-solution", reason: "LEARNER_SKIPPED", evidence: [], misconception: null };
     if (p.intent === "reveal") return { move: "worked-solution", reason: "LEARNER_ASKED_ANSWER", evidence: [], misconception: null };
-    if (p.intent === "attempt") return { move: "check", reason: "ANSWER_TO_CHECK", evidence: [], misconception: null, branches: branches(ms, p.askedUnder, p.targets, p.discriminates) };
+    if (p.intent === "attempt") {
+      const { usable } = latest(p.attempts, p.concept);
+      // The last answer on the concept was already wrong and unaided, so another wrong one makes a run.
+      const failing = !!usable && (usable.result === "incorrect" || usable.result === "partial") && !usable.assisted && !usable.answerExposed;
+      return { move: "check", reason: "ANSWER_TO_CHECK", evidence: [], misconception: null, branches: branches(ms, p.askedUnder, p.targets, p.discriminates, { weakPrerequisite: p.weakPrerequisite, failing }) };
+    }
     if (p.intent !== "switch") return { move: "continue", reason: "OPEN_QUESTION_WAITING", evidence: [], misconception: null };
   }
   if (p.intent === "switch") return { move: "fresh-application", reason: "LEARNER_MOVED_ON", evidence: [], misconception: null };
@@ -198,7 +281,7 @@ export function chooseMove(p: MoveInput): MoveDecision {
     return { move: "fresh-application", reason: "NO_EVIDENCE", evidence: [], misconception: null, ...first };
   }
   const pattern = ms.find((m) => m.evidence.includes(usable.id))?.id;
-  const d = afterMark(usable, ms, { askedUnder: p.askedUnder, targets: p.targets, discriminates: p.discriminates, pattern });
+  const d = afterMark(usable, ms, { askedUnder: p.askedUnder, targets: p.targets, discriminates: p.discriminates, pattern, attempts: p.attempts, weakPrerequisite: p.weakPrerequisite });
   return p.intent === "question" ? { ...d, answerFirst: true } : d;
 }
 
@@ -230,10 +313,16 @@ export function moveBrief(d: MoveDecision): string {
       return `${head}\nAsk the learner to justify the result: why each step holds, or why the method is valid${d.reason === "FLAWED_METHOD" ? ", aimed at the flawed step" : ""}. Not "are you sure?".`;
     case "fresh-application":
       return `${head}\nSet one fresh problem on this concept that has not appeared before. Give no hint, example or method first.`;
+    case "repair-prerequisite":
+      return `${head}\nThe cause is a gap in an earlier idea${d.prerequisite ? `: "${d.prerequisite}"` : ""}. Say so in one sentence, then ask one short question on that earlier idea, the part this problem needs. Come back to this problem only after it is answered.`;
+    case "model-strategy":
+      return `${head}\nThe learner had no way in. Work one parallel problem (different numbers or setting, same method) step by step, naming the decision at each step. Then give the original question back, to be answered without help.`;
+    case "reteach":
+      return `${head}\nThe last explanations have not worked. Teach the idea again in a different representation from before (a picture in words, a concrete case, an analogy, or a counterexample), in a few lines, then ask one easier question on it.`;
   }
 }
 
 /** The move as one line in Details. */
 export function moveLine(d: MoveDecision): string {
-  return `Tutor move: ${d.move} (${d.reason}: ${REASON_TEXT[d.reason]})${d.evidence.length ? ` · evidence ${d.evidence.join(", ")}` : ""}${d.misconception ? ` · ${d.misconception.status} misconception "${d.misconception.description}"` : ""}`;
+  return `Tutor move: ${d.move} (${d.reason}: ${REASON_TEXT[d.reason]}${d.prerequisite ? `, "${d.prerequisite}"` : ""})${d.evidence.length ? ` · evidence ${d.evidence.join(", ")}` : ""}${d.misconception ? ` · ${d.misconception.status} misconception "${d.misconception.description}"` : ""}`;
 }

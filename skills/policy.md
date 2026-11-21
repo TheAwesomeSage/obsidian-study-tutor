@@ -107,6 +107,18 @@ Explicit rules come before the ranking, in this order:
 
 The home screen's suggestion is the decision Adaptive study would make first on that topic, so the two always agree. Flashcards are item recall, kept apart from concept evidence: they come first only when nothing pressing (a lapse, a due delayed check, an unchecked prerequisite) is waiting.
 
+## Diagnosing a wrong answer (Master mode)
+
+When an answer is wrong and no recorded misconception explains it, code reads why from the mark and the record, in this order, and the next move teaches to that cause:
+
+1. The wrong step needs an earlier idea (the mark names a prerequisite error), or two unaided answers in a row are wrong while a prerequisite of the concept is below level 2: one question on that prerequisite first, named.
+2. The method was sound and a slip (arithmetic, a sign, notation, carelessness) broke the result: the learner is asked to find the slip, at the step named. Without a reasoning record, a careless error counts as a slip only after an unaided success on the concept.
+3. No workable method was shown: a parallel problem is worked step by step, then the original comes back to be answered without help.
+4. Two or more unaided answers in a row are wrong with no clearer cause: the idea is taught again in a different representation, then an easier question.
+5. Otherwise one narrower question finds the failed step.
+
+Helped answers do not count toward a run, and a right answer ends one. A confirmed or suspected misconception still comes first. The move and its reason show in Details.
+
 ## Cold probes
 
 A cold probe asks sealed questions: ones the compile wrote and kept out of the question bank, so they were never practised. It measures transfer to unseen work and moves nothing.

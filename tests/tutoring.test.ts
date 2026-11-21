@@ -14,7 +14,7 @@ import { MemFS } from "./memfs";
 import { readSessionReply, sessionFor } from "../src/session";
 import { NoteSourceStore, RetrievalConcept, SourcePassage, SourceStore, extractPassageAsk, notePassages, renderContext, renderRetrieval, retrieve } from "../src/retrieval";
 import { Misconception, activeDescriptions, applyObservation, fromLegacy, isActive, misconceptionLine, onConcept, parseMisconception, recompute, reconcile } from "../src/misconceptions";
-import { afterMark, chooseMove, moveBrief, moveLine } from "../src/tutormove";
+import { afterMark, chooseMove, diagnoseWrong, moveBrief, moveLine, weakPrerequisite } from "../src/tutormove";
 import { finalExpression, normaliseReasoning, parseReasoning, reasoningLines, resultConflict, rubricDimensions, withCheck } from "../src/reasoning";
 import { markLine, normaliseMark } from "../src/grading";
 import { skillEvidence } from "../src/evidence";
@@ -404,10 +404,10 @@ test("moves: conflicting signals resolve by code's order, and a disputed answer 
   // Right as a guess, and right with help.
   assert.equal(chooseMove(input({ attempts: [{ ...right, reasoning: undefined, answer: "B or C, I guess" }] })).reason, "HEDGED_CORRECT");
   assert.equal(chooseMove(input({ attempts: [{ ...right, assisted: true }] })).reason, "HELPED_SUCCESS");
-  // Wrong, its cause unknown: find the failed step, aimed at the earliest error when there is one.
+  // Wrong with a sound method and an arithmetic error: a slip, so the learner looks for it, at the step named.
   const wrong = attempt({ id: "w", concept, timestamp: "2026-11-13T10:00:00.000Z", reasoning: parseReasoning({ result: "incorrect", method: "sound", earliest_error: { step: "2^3 = 6", kind: "arithmetic" } })! });
   d = chooseMove(input({ attempts: [right, wrong] }));
-  assert.deepEqual([d.move, d.reason, d.step], ["probe", "FIND_FAILED_STEP", "2^3 = 6"]);
+  assert.deepEqual([d.move, d.reason, d.step], ["probe", "SLIP_IN_SOUND_METHOD", "2^3 = 6"]);
   // The latest answer disputed: the one before it is what stands.
   d = chooseMove(input({ attempts: [right, { ...wrong, verification: "disputed" }] }));
   assert.equal(d.reason, "JUSTIFIED");
@@ -1404,4 +1404,78 @@ test("outcome check: the task and criteria come from the card, help is refused l
   const fourth = (await t.engine.startAssessment(dir))!;
   assert.match((await t.engine.study(dir, fourth, "skip")).reply, /skipped\. Nothing was marked or recorded/);
   assert.equal((await t.store.loadAssessments(dir)).length, 2);
+});
+
+test("diagnose then teach: a wrong answer no misconception explains is taught to its cause, read in code from the mark and the record", () => {
+  const at = (id: string, minute: number, over: Partial<Attempt> = {}) => attempt({ id, concept: "calc/derivatives", timestamp: `2026-11-13T10:${String(minute).padStart(2, "0")}:00.000Z`, errorType: "", ...over });
+  const R = (o: Record<string, unknown>) => parseReasoning({ result: "incorrect", ...o })!;
+  const weak = { n: 1, name: "Limits", level: 0 };
+
+  // A step that needs an earlier idea goes back to it, named when the course has one.
+  let d = diagnoseWrong(at("p", 1, { reasoning: R({ method: "flawed", earliest_error: { step: "lim h→0", kind: "prerequisite" } }) }), { weakPrerequisite: weak });
+  assert.deepEqual([d.move, d.reason, d.prerequisite], ["repair-prerequisite", "PREREQUISITE_GAP", "Limits"]);
+  assert.equal(diagnoseWrong(at("p2", 1, { errorType: "prerequisite" })).reason, "PREREQUISITE_GAP", "the marker's error type is enough");
+  // Two wrong answers in a row with a weak prerequisite also point back to it.
+  const first = at("a", 1, { reasoning: R({ method: "flawed" }) });
+  const second = at("b", 2, { reasoning: R({ method: "flawed" }) });
+  assert.equal(diagnoseWrong(second, { attempts: [first, second], weakPrerequisite: weak }).reason, "PREREQUISITE_GAP");
+  // A slip in a sound method: the learner looks for it.
+  d = diagnoseWrong(at("s", 1, { reasoning: R({ method: "sound", earliest_error: { step: "3·4 = 7", kind: "arithmetic" } }) }));
+  assert.deepEqual([d.move, d.reason, d.step], ["probe", "SLIP_IN_SOUND_METHOD", "3·4 = 7"]);
+  // Without a reasoning record, a careless error counts as a slip only after an unaided success on the concept.
+  assert.equal(diagnoseWrong(at("c", 2, { errorType: "careless" }), { attempts: [at("ok", 1, { result: "correct" })] }).reason, "SLIP_IN_SOUND_METHOD");
+  assert.equal(diagnoseWrong(at("c2", 2, { errorType: "careless" })).reason, "FIND_FAILED_STEP");
+  // No method at all: model a parallel problem.
+  assert.deepEqual(Object.values(diagnoseWrong(at("n", 1, { reasoning: R({ method: "missing" }) }))), ["model-strategy", "NO_STRATEGY"]);
+  // A run of wrong answers with no clearer cause is retaught another way; helped answers do not make a run.
+  assert.equal(diagnoseWrong(second, { attempts: [first, second] }).reason, "REPEATED_FAILURE");
+  assert.equal(diagnoseWrong(second, { attempts: [{ ...first, assisted: true }, second] }).reason, "FIND_FAILED_STEP");
+  assert.equal(diagnoseWrong(second, { attempts: [first, at("mid", 1, { result: "correct" }), second] }).reason, "FIND_FAILED_STEP", "a right answer between breaks the run");
+  // A misconception still comes first.
+  const m: any = { id: "M1", description: "drops the exponent", status: "confirmed", evidence: ["x"], concept: "calc/derivatives" };
+  assert.equal(afterMark(second, [m], { askedUnder: "", targets: "", discriminates: "", pattern: "M1", attempts: [first, second], weakPrerequisite: weak }).reason, "CONFIRMED_MISCONCEPTION");
+
+  // The weakest prerequisite below level 2, first in order on a tie.
+  assert.deepEqual(weakPrerequisite(3, { 1: 1, 2: 0, 3: 2 }, { 1: "Limits", 2: "Slopes", 3: "Derivatives" }, { 3: [1, 2] }), { n: 2, name: "Slopes", level: 0 });
+  assert.equal(weakPrerequisite(3, { 1: 3, 2: 2 }, { 1: "Limits", 2: "Slopes", 3: "Derivatives" }, { 3: [1, 2] }), null);
+  assert.equal(weakPrerequisite(null, {}, {}, {}), null);
+
+  // Before the mark, the model gets the diagnosis branches; a run in progress makes "another way" a reteach.
+  const check = chooseMove(input({ intent: "attempt", pending: true, attempts: [first], weakPrerequisite: weak }));
+  const reasons = check.branches!.map((b) => b.reason);
+  assert.ok(["PREREQUISITE_GAP", "SLIP_IN_SOUND_METHOD", "NO_STRATEGY", "REPEATED_FAILURE"].every((r) => reasons.includes(r as any)), reasons.join());
+  assert.match(check.branches!.find((b) => b.reason === "PREREQUISITE_GAP")!.when, /needs "Limits"/);
+  assert.ok(!chooseMove(input({ intent: "attempt", pending: true })).branches!.some((b) => b.reason === "REPEATED_FAILURE"), "no run, no reteach branch");
+
+  // Each new move tells the model how to teach to the cause.
+  assert.match(moveBrief({ move: "repair-prerequisite", reason: "PREREQUISITE_GAP", evidence: ["b"], misconception: null, prerequisite: "Limits" }), /gap in an earlier idea: "Limits"[\s\S]*one short question on that earlier idea/);
+  assert.match(moveBrief({ move: "model-strategy", reason: "NO_STRATEGY", evidence: [], misconception: null }), /Work one parallel problem[\s\S]*original question back/);
+  assert.match(moveBrief({ move: "reteach", reason: "REPEATED_FAILURE", evidence: [], misconception: null }), /different representation from before/);
+  assert.match(moveLine({ move: "repair-prerequisite", reason: "PREREQUISITE_GAP", evidence: [], misconception: null, prerequisite: "Limits" }), /PREREQUISITE_GAP: the wrong step needs an earlier idea that is not secure yet, "Limits"/);
+});
+
+test("diagnose then teach in a Master-mode chat: a wrong step that needs a weak prerequisite goes back to it, named, and the model is told how", async () => {
+  const t = await setup();
+  const st = await t.store.loadState(t.dir, 4);
+  st.levels[1] = 0;
+  await t.store.saveState(t.dir, st);
+  const chat = await t.chatIn("tutor");
+  t.replies.push(`Differentiate $x^3$ from first principles?\n${session({ pendingQuestion: "Differentiate $x^3$ from first principles?" })}`);
+  await t.engine.turn(t.dir, chat, "");
+  await tick();
+  assert.match(t.calls[0].input, /Tutor move:/);
+  t.replies.push(`The limit step is where it went wrong. What does $\lim_{h\to0} 3h$ equal?\n${tag({ result: "incorrect", error_type: "prerequisite", next_move: "repair-prerequisite" })}\n${session({ pendingQuestion: "What does $\lim_{h\to0} 3h$ equal?" })}`);
+  const r = await t.engine.turn(t.dir, chat, "I don't know how to take the limit, so 3x^2 + 3xh");
+  assert.match(t.calls[1].input, /wrong because the step needs "Limits", an earlier idea → repair-prerequisite \[PREREQUISITE_GAP\]/, "the model is offered the diagnosis before it marks");
+  assert.deepEqual([r.move?.move, r.move?.reason, r.move?.prerequisite], ["repair-prerequisite", "PREREQUISITE_GAP", "Limits"]);
+  const s = JSON.parse(String((await t.store.loadChat(chat)).fm.session));
+  assert.deepEqual([s.action, s.move.reason], ["repair-prerequisite", "PREREQUISITE_GAP"]);
+});
+
+test("diagnose then teach: reteaching and modelling a strategy load the full lesson, a prerequisite repair does not", async () => {
+  const { lessonDepth } = await import("../src/lessondepth");
+  const m = (move: any, reason: any) => ({ move, reason, evidence: [], misconception: null });
+  assert.equal(lessonDepth({ mode: "tutor", action: null, move: m("reteach", "REPEATED_FAILURE"), said: "", intent: "none" as any }).level, "lesson");
+  assert.equal(lessonDepth({ mode: "tutor", action: null, move: m("model-strategy", "NO_STRATEGY"), said: "", intent: "none" as any }).level, "lesson");
+  assert.notEqual(lessonDepth({ mode: "tutor", action: null, move: m("repair-prerequisite", "PREREQUISITE_GAP"), said: "", intent: "none" as any }).level, "lesson");
 });
