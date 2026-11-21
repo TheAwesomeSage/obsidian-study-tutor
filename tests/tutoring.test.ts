@@ -1195,7 +1195,7 @@ test("ask anything: a retry answers the saved question, and a chat that is not f
 
 test("ask anything: a long free chat sends the opening message and the latest ones within maxChatWords, and keeps the whole transcript on disk", async () => {
   const t = askRig();
-  t.settings.maxChatWords = 500;
+  t.settings.maxChatWords = 500; // below the free-chat floor of 1500 words, so the floor applies
   t.setReplies(["Latest answer."]);
   const p = await t.engine.startAsk("GOALMARK teach me queues");
   const chat = await t.store.loadChat(p);
@@ -1211,7 +1211,7 @@ test("ask anything: a long free chat sends the opening message and the latest on
   assert.doesNotMatch(input, /MSG0X|MSG1X|MSG10X/, "older ones are left out");
   assert.match(input, /\[\d+ earlier messages omitted\]/);
   const sent = (input.match(/\bw\d+\b/g) ?? []).length;
-  assert.ok(sent <= 500, `at most maxChatWords of messages are sent (${sent})`);
+  assert.ok(sent > 500 && sent <= 1500, `a free chat sends up to the 1500-word floor, not the lower maxChatWords (${sent})`);
   assert.equal((await t.store.loadChat(p)).messages.length, 33, "the whole transcript stays on disk: 32 messages and the reply");
 
   // A short chat is sent whole, with no marker.
@@ -1247,4 +1247,27 @@ test("ask anything: the opening header sets the goal, a later header never overw
   const b = await u.engine.startAsk("two");
   const rb = await u.engine.askTurn(b, "two", {});
   assert.equal(rb.reply, "Here is the reply, on the same line.", "an unclosed header does not swallow the reply");
+});
+test("ask anything: recent questions read only the newest files they need", async () => {
+  const fs = new MemFS();
+  const store = new Store(fs, "Tutor");
+  const made: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const p = await store.newAskChat(`Question ${i}`, new Date(2026, 10, 1 + i, 9, 0));
+    const chat = await store.loadChat(p);
+    chat.messages.push({ role: "you", text: `Question ${i}` });
+    await store.saveChat(p, chat);
+    made.push(p);
+  }
+  // The newest file of all has no message yet, so it is skipped and one more is read.
+  await store.newAskChat("Empty", new Date(2026, 10, 20, 9, 0));
+  let reads = 0;
+  const read = fs.read.bind(fs);
+  fs.read = async (path: string) => {
+    if (path.startsWith("Tutor/Ask/")) reads++;
+    return read(path);
+  };
+  const asks = await store.recentAsks(3);
+  assert.deepEqual(asks.map((a) => a.title), ["Question 9", "Question 8", "Question 7"]);
+  assert.equal(reads, 4, "the empty newest chat and the three it returns, not all eleven files");
 });

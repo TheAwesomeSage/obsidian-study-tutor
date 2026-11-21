@@ -1166,3 +1166,23 @@ test("ask anything: a failed call keeps the question, offers a retry, and the ch
   assert.equal(calls.length, 1);
   await view.onClose();
 });
+test("ask anything: Home will not delete a question while its reply is being written", async () => {
+  const { fs, plugin, view, root } = await askPlugin();
+  const doc = (globalThis as any).document;
+  const path = await plugin.store.newAskChat("What is a cache line?");
+  const chat = await plugin.store.loadChat(path);
+  chat.messages.push({ role: "you", text: "What is a cache line?" });
+  await plugin.store.saveChat(path, chat);
+  await view.openAsk(path);
+  view.study.busy = true;
+  view.go("home");
+  await tick(40);
+  notices.length = 0;
+  labelled($(root, ".st-recent-asks .st-row-item"), "Delete this question").click();
+  await tick(40);
+  assert.ok(notices.some((n) => /being answered/.test(n)), notices.join(" | "));
+  assert.equal(doc.querySelector("button.mod-warning"), null, "no confirmation is offered");
+  assert.ok(await fs.exists(path), "nothing is deleted");
+  view.study.busy = false;
+  await view.onClose();
+});

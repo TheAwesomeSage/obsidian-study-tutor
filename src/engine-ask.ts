@@ -34,6 +34,9 @@ export function askTitle(message: string): string {
   return `${cut.slice(0, cut.lastIndexOf(" ") > 40 ? cut.lastIndexOf(" ") : 80).trim()}…`;
 }
 
+/** The fewest words of conversation a free chat sends, whatever `maxChatWords` says: a question and its answers need room. */
+export const ASK_MIN_CONTEXT_WORDS = 1500;
+
 const oneLine = (x: unknown, max: number): string => (typeof x === "string" ? neutraliseRemote(x.replace(/\s+/g, " ").trim()).slice(0, max) : "");
 
 /**
@@ -101,7 +104,7 @@ export async function askTurn(eng: Engine, chatPath: string, message: string, op
   if (chat.messages[chat.messages.length - 1]?.role !== "you") throw new Error("There is no question to answer.");
 
   const attached = opts.attached ? `# Note the learner attached: ${opts.attached.name}\n${opts.attached.text}\n\n` : "";
-  const input = `${attached}${askContext(chat, s.maxChatWords)}\n\nReply to the learner's last message.\n`;
+  const input = `${attached}${askContext(chat, Math.max(s.maxChatWords, ASK_MIN_CONTEXT_WORDS))}\n\nReply to the learner's last message.\n`;
   const model = modelFor(s, "chatModel");
   const res = await eng.call({ model, effort: s.effort || undefined, system: await eng.store.skill("ask.md"), input, onSpawn: opts.onSpawn }, s);
 

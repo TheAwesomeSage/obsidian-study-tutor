@@ -102,6 +102,10 @@ export class HomeScreen implements Screen {
       if (a.unanswered) chip(main, "No reply yet", "accent");
       main.onclick = () => void v.openAsk(a.path);
       iconButton(row, "trash-2", "Delete this question", async () => {
+        if (v.study.busy && v.chatPath === a.path) {
+          new Notice("This question is being answered. Wait for the reply, or stop it, before deleting it.");
+          return;
+        }
         const ok = await confirmAction(v.app, { title: "Delete this question?", text: `"${a.title}" is moved to the trash. Nothing else changes.`, confirm: "Delete" });
         if (!ok) return;
         try {

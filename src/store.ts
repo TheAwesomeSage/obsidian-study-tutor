@@ -698,11 +698,17 @@ export class Store {
     return path;
   }
 
-  /** Free questions in the Ask folder, newest first: each one's title, and whether its last message is still unanswered. */
+  /**
+   * Free questions in the Ask folder, newest first: each one's title, and whether its last message is
+   * still unanswered. File names start with a sortable stamp, so only the newest files are read, one
+   * at a time, until `limit` chats with messages are found.
+   */
   async recentAsks(limit = 8): Promise<{ path: string; title: string; stamp: string; unanswered: boolean }[]> {
     if (!(await this.fs.exists(this.askDir))) return [];
     const out: { path: string; title: string; stamp: string; unanswered: boolean }[] = [];
-    for (const path of (await this.fs.list(this.askDir)).files.filter((f) => f.endsWith(".md"))) {
+    const files = (await this.fs.list(this.askDir)).files.filter((f) => f.endsWith(".md")).sort((a, b) => (base(a) < base(b) ? 1 : base(a) > base(b) ? -1 : 0));
+    for (const path of files) {
+      if (out.length >= limit) break;
       try {
         const chat = await this.loadChat(path);
         if (fmStr(chat.fm, "mode") !== "ask" || !chat.messages.length) continue;
@@ -712,7 +718,7 @@ export class Store {
         /* an unreadable chat is skipped */
       }
     }
-    return out.sort((a, b) => (a.stamp < b.stamp ? 1 : a.stamp > b.stamp ? -1 : a.path < b.path ? 1 : -1)).slice(0, limit);
+    return out;
   }
 
   /** Starts the next part of a chat: the summary replaces the old transcript and the last exchange is carried over. */
