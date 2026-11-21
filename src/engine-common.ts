@@ -208,7 +208,8 @@ export interface CompileResult {
 }
 
 export const MODE_NAME: Record<Mode, string> = { auto: "Adaptive", teach: "Learn", quiz: "Practise", tutor: "Master", expert: "Ask" };
-export const TEACHING: string[] = ["explain", "worked-example", "re-explain"];
+/** Actions and Master-mode moves that teach: an answer asked straight after one counts as helped. */
+export const TEACHING: string[] = ["explain", "worked-example", "re-explain", "repair-prerequisite", "model-strategy", "reteach"];
 export const ERROR_TYPES = ["conceptual", "procedural", "arithmetic", "notation", "prerequisite", "careless"];
 /** The learner is pointing back at something said before this part of the chat. */
 export const LOOKS_BACK = /\b(earlier|before|previous(ly)?|last time|you said|you told|we (did|covered|talked|discussed|went over)|remind me|go back|at the start)\b/i;

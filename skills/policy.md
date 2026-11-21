@@ -111,13 +111,14 @@ The home screen's suggestion is the decision Adaptive study would make first on 
 
 When an answer is wrong and no recorded misconception explains it, code reads why from the mark and the record, in this order, and the next move teaches to that cause:
 
-1. The wrong step needs an earlier idea (the mark names a prerequisite error), or two unaided answers in a row are wrong while a prerequisite of the concept is below level 2: one question on that prerequisite first, named.
-2. The method was sound and a slip (arithmetic, a sign, notation, carelessness) broke the result: the learner is asked to find the slip, at the step named. Without a reasoning record, a careless error counts as a slip only after an unaided success on the concept.
-3. No workable method was shown: a parallel problem is worked step by step, then the original comes back to be answered without help.
-4. Two or more unaided answers in a row are wrong with no clearer cause: the idea is taught again in a different representation, then an easier question.
-5. Otherwise one narrower question finds the failed step.
+1. The mark names a prerequisite error: the earlier idea is taught briefly, with one tiny example, and the original question is given back.
+2. The method was sound and a slip (arithmetic, a sign, notation, carelessness) broke the result: the learner is asked to recheck and find the slip themselves. Without a reasoning record, a careless error counts as a slip only after an unaided success on the concept.
+3. Two unaided answers in a row are wrong while a prerequisite of the concept has been checked and is below level 2: that prerequisite is repaired as in 1, named. A prerequisite never checked is not blamed.
+4. No workable method was shown, and either the learner says they cannot start or this is the second wrong answer in a row: a parallel problem is worked step by step, then the original comes back. A bare wrong answer on its own is probed instead, since the method may just be unwritten.
+5. Two or more unaided answers in a row are wrong with no clearer cause: the idea is taught again in a different representation, then an easier question.
+6. Otherwise one narrower question finds the failed step.
 
-Helped answers do not count toward a run, and a right answer ends one. A confirmed or suspected misconception still comes first. The move and its reason show in Details.
+Repairing a prerequisite, modelling a strategy and reteaching all teach, so the answer that follows counts as helped and moves no level by itself. A helped answer ends a run of wrong ones, and so does a right answer. A confirmed or suspected misconception still comes first. The move and its reason show in Details.
 
 ## Cold probes
 

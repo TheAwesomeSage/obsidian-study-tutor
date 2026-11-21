@@ -80,6 +80,8 @@ export function lessonDepth(p: { mode: string; action: string | null; move: Move
     if (m.move === "worked-solution") return deep("the answer is being worked through");
     if (m.move === "reteach") return deep("the idea is being taught again another way");
     if (m.move === "model-strategy") return deep("a parallel problem is being worked to show a way in");
+    // The follow-up is chosen in the reply that marks, so a reteach that may follow needs the lesson now.
+    if (m.move === "check" && m.branches?.some((b) => b.move === "reteach")) return deep("another wrong answer would be taught again another way");
     if (asked) return deep("you asked why or how");
     return ROUTINE;
   }

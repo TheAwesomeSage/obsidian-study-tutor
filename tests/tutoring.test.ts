@@ -1425,12 +1425,21 @@ test("diagnose then teach: a wrong answer no misconception explains is taught to
   // Without a reasoning record, a careless error counts as a slip only after an unaided success on the concept.
   assert.equal(diagnoseWrong(at("c", 2, { errorType: "careless" }), { attempts: [at("ok", 1, { result: "correct" })] }).reason, "SLIP_IN_SOUND_METHOD");
   assert.equal(diagnoseWrong(at("c2", 2, { errorType: "careless" })).reason, "FIND_FAILED_STEP");
-  // No method at all: model a parallel problem.
-  assert.deepEqual(Object.values(diagnoseWrong(at("n", 1, { reasoning: R({ method: "missing" }) }))), ["model-strategy", "NO_STRATEGY"]);
+  // A slip comes before a weak prerequisite, even in a run.
+  const slipped = at("s2", 3, { reasoning: R({ method: "sound", earliest_error: { step: "sign", kind: "arithmetic" } }) });
+  assert.equal(diagnoseWrong(slipped, { attempts: [first, second, slipped], weakPrerequisite: weak }).reason, "SLIP_IN_SOUND_METHOD");
+  // No way in: model a parallel problem, but only when the learner says they are stuck or it is a run;
+  // a bare wrong answer may just have left the method unwritten.
+  assert.equal(diagnoseWrong(at("n", 1, { reasoning: R({ method: "missing" }) })).reason, "FIND_FAILED_STEP");
+  assert.deepEqual(Object.values(diagnoseWrong(at("n2", 1, { answer: "I'm stuck, so 12?", reasoning: R({ method: "missing" }) }))), ["model-strategy", "NO_STRATEGY"]);
+  const bare = at("n3", 2, { reasoning: R({ method: "missing" }) });
+  assert.equal(diagnoseWrong(bare, { attempts: [first, bare] }).reason, "NO_STRATEGY");
   // A run of wrong answers with no clearer cause is retaught another way; helped answers do not make a run.
   assert.equal(diagnoseWrong(second, { attempts: [first, second] }).reason, "REPEATED_FAILURE");
   assert.equal(diagnoseWrong(second, { attempts: [{ ...first, assisted: true }, second] }).reason, "FIND_FAILED_STEP");
   assert.equal(diagnoseWrong(second, { attempts: [first, at("mid", 1, { result: "correct" }), second] }).reason, "FIND_FAILED_STEP", "a right answer between breaks the run");
+  assert.equal(diagnoseWrong({ ...second, assisted: true }, { attempts: [first, second], weakPrerequisite: weak }).reason, "FIND_FAILED_STEP", "a helped answer makes no run");
+  assert.equal(diagnoseWrong(second, { attempts: [at("w0", 0, { reasoning: R({ method: "flawed" }) }), { ...first, assisted: true }, second] }).reason, "FIND_FAILED_STEP", "a helped answer ends the run before it");
   // A misconception still comes first.
   const m: any = { id: "M1", description: "drops the exponent", status: "confirmed", evidence: ["x"], concept: "calc/derivatives" };
   assert.equal(afterMark(second, [m], { askedUnder: "", targets: "", discriminates: "", pattern: "M1", attempts: [first, second], weakPrerequisite: weak }).reason, "CONFIRMED_MISCONCEPTION");
@@ -1439,16 +1448,24 @@ test("diagnose then teach: a wrong answer no misconception explains is taught to
   assert.deepEqual(weakPrerequisite(3, { 1: 1, 2: 0, 3: 2 }, { 1: "Limits", 2: "Slopes", 3: "Derivatives" }, { 3: [1, 2] }), { n: 2, name: "Slopes", level: 0 });
   assert.equal(weakPrerequisite(3, { 1: 3, 2: 2 }, { 1: "Limits", 2: "Slopes", 3: "Derivatives" }, { 3: [1, 2] }), null);
   assert.equal(weakPrerequisite(null, {}, {}, {}), null);
+  assert.equal(weakPrerequisite(3, { 1: null, 2: 2 }, { 1: "Limits", 2: "Slopes", 3: "Derivatives" }, { 3: [1, 2] }), null, "an idea never checked is not blamed");
 
-  // Before the mark, the model gets the diagnosis branches; a run in progress makes "another way" a reteach.
+  // Before the mark, the model gets the branches code's rule can reach, in its order.
+  const other = (c: ReturnType<typeof chooseMove>) => c.branches!.find((b) => b.when === "wrong in another way")!;
   const check = chooseMove(input({ intent: "attempt", pending: true, attempts: [first], weakPrerequisite: weak }));
-  const reasons = check.branches!.map((b) => b.reason);
-  assert.ok(["PREREQUISITE_GAP", "SLIP_IN_SOUND_METHOD", "NO_STRATEGY", "REPEATED_FAILURE"].every((r) => reasons.includes(r as any)), reasons.join());
   assert.match(check.branches!.find((b) => b.reason === "PREREQUISITE_GAP")!.when, /needs "Limits"/);
-  assert.ok(!chooseMove(input({ intent: "attempt", pending: true })).branches!.some((b) => b.reason === "REPEATED_FAILURE"), "no run, no reteach branch");
+  assert.ok(check.branches!.some((b) => b.reason === "SLIP_IN_SOUND_METHOD"));
+  assert.equal(other(check).move, "repair-prerequisite", "in a run with a weak prerequisite, another wrong answer repairs it");
+  const run = chooseMove(input({ intent: "attempt", pending: true, attempts: [first] }));
+  assert.deepEqual([other(run).reason, run.branches!.some((b) => b.reason === "NO_STRATEGY")], ["REPEATED_FAILURE", true]);
+  const fresh = chooseMove(input({ intent: "attempt", pending: true }));
+  assert.equal(other(fresh).reason, "FIND_FAILED_STEP", "no run, no reteach");
+  assert.match(fresh.branches!.find((b) => b.reason === "NO_STRATEGY")!.when, /cannot start/);
+  assert.equal(other(chooseMove(input({ intent: "attempt", pending: true, attempts: [{ ...first, assisted: true }] }))).reason, "FIND_FAILED_STEP", "a helped answer starts no run");
 
   // Each new move tells the model how to teach to the cause.
-  assert.match(moveBrief({ move: "repair-prerequisite", reason: "PREREQUISITE_GAP", evidence: ["b"], misconception: null, prerequisite: "Limits" }), /gap in an earlier idea: "Limits"[\s\S]*one short question on that earlier idea/);
+  assert.match(moveBrief({ move: "repair-prerequisite", reason: "PREREQUISITE_GAP", evidence: ["b"], misconception: null, prerequisite: "Limits" }), /gap in an earlier idea: "Limits"[\s\S]*one tiny example[\s\S]*original question back in full/);
+  assert.match(moveBrief({ move: "probe", reason: "SLIP_IN_SOUND_METHOD", evidence: [], misconception: null }), /find the slip themselves\. Do not point at it/);
   assert.match(moveBrief({ move: "model-strategy", reason: "NO_STRATEGY", evidence: [], misconception: null }), /Work one parallel problem[\s\S]*original question back/);
   assert.match(moveBrief({ move: "reteach", reason: "REPEATED_FAILURE", evidence: [], misconception: null }), /different representation from before/);
   assert.match(moveLine({ move: "repair-prerequisite", reason: "PREREQUISITE_GAP", evidence: [], misconception: null, prerequisite: "Limits" }), /PREREQUISITE_GAP: the wrong step needs an earlier idea that is not secure yet, "Limits"/);
@@ -1464,18 +1481,30 @@ test("diagnose then teach in a Master-mode chat: a wrong step that needs a weak 
   await t.engine.turn(t.dir, chat, "");
   await tick();
   assert.match(t.calls[0].input, /Tutor move:/);
-  t.replies.push(`The limit step is where it went wrong. What does $\lim_{h\to0} 3h$ equal?\n${tag({ result: "incorrect", error_type: "prerequisite", next_move: "repair-prerequisite" })}\n${session({ pendingQuestion: "What does $\lim_{h\to0} 3h$ equal?" })}`);
+  t.replies.push(`The limit step is where it went wrong: as $h\to0$, $3xh\to0$. Differentiate $x^3$ from first principles?\n${tag({ result: "incorrect", error_type: "prerequisite", next_move: "repair-prerequisite" })}\n${session({ pendingQuestion: "Differentiate $x^3$ from first principles?" })}`);
   const r = await t.engine.turn(t.dir, chat, "I don't know how to take the limit, so 3x^2 + 3xh");
   assert.match(t.calls[1].input, /wrong because the step needs "Limits", an earlier idea → repair-prerequisite \[PREREQUISITE_GAP\]/, "the model is offered the diagnosis before it marks");
   assert.deepEqual([r.move?.move, r.move?.reason, r.move?.prerequisite], ["repair-prerequisite", "PREREQUISITE_GAP", "Limits"]);
   const s = JSON.parse(String((await t.store.loadChat(chat)).fm.session));
   assert.deepEqual([s.action, s.move.reason], ["repair-prerequisite", "PREREQUISITE_GAP"]);
+  assert.equal(s.askedUnder, "repair-prerequisite", "the original question, given back, is a new step asked under the repair");
+  // The answer after the repair is recorded on the concept, as helped, so it moves no level alone.
+  t.replies.push(`Right.\n${tag({ result: "correct", assisted: false })}\n${session({ pendingQuestion: "" })}`);
+  const after = await t.engine.turn(t.dir, chat, "3x^2, since 3xh and h^2 vanish");
+  assert.equal(after.attempt?.result, "correct");
+  assert.equal(after.attempt?.assisted, true);
 });
 
 test("diagnose then teach: reteaching and modelling a strategy load the full lesson, a prerequisite repair does not", async () => {
+  const { TEACHING } = await import("../src/engine-common");
+  assert.ok(["repair-prerequisite", "model-strategy", "reteach"].every((x) => TEACHING.includes(x)), "an answer straight after a teaching move counts as helped");
   const { lessonDepth } = await import("../src/lessondepth");
   const m = (move: any, reason: any) => ({ move, reason, evidence: [], misconception: null });
   assert.equal(lessonDepth({ mode: "tutor", action: null, move: m("reteach", "REPEATED_FAILURE"), said: "", intent: "none" as any }).level, "lesson");
   assert.equal(lessonDepth({ mode: "tutor", action: null, move: m("model-strategy", "NO_STRATEGY"), said: "", intent: "none" as any }).level, "lesson");
   assert.notEqual(lessonDepth({ mode: "tutor", action: null, move: m("repair-prerequisite", "PREREQUISITE_GAP"), said: "", intent: "none" as any }).level, "lesson");
+  // The follow-up is picked in the reply that marks, so a check that may lead to a reteach loads the lesson then.
+  const check = (b: any[]) => ({ ...m("check", "ANSWER_TO_CHECK"), branches: b });
+  assert.equal(lessonDepth({ mode: "tutor", action: null, move: check([{ when: "", move: "reteach", reason: "REPEATED_FAILURE" }]), said: "", intent: "attempt" as any }).level, "lesson");
+  assert.equal(lessonDepth({ mode: "tutor", action: null, move: check([{ when: "", move: "probe", reason: "FIND_FAILED_STEP" }]), said: "", intent: "attempt" as any }).level, "card");
 });
