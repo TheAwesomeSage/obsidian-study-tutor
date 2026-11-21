@@ -738,11 +738,12 @@ export function schedule(prev: CardSched | undefined, grade: Grade, today: strin
   return reviewCard(prev, grade, today, using);
 }
 
-/** Due cards first, then unseen cards up to today's remaining allowance. */
+/** Due cards first, then unseen cards up to today's remaining allowance. Families kept for assessment are never new cards. */
 export function reviewQueue(questions: Question[], s: LearnerState, today: string, newPerDay: number): Question[] {
   const due = questions.filter((q) => s.cards[q.id] && s.cards[q.id].due <= today);
   const used = s.newDate === today ? s.newCount : 0;
-  const fresh = questions.filter((q) => !s.cards[q.id]).slice(0, Math.max(0, newPerDay - used));
+  const kept = reservedQuestions(questions);
+  const fresh = questions.filter((q) => !s.cards[q.id] && !kept.has(q.id)).slice(0, Math.max(0, newPerDay - used));
   return [...due, ...fresh];
 }
 
@@ -857,7 +858,8 @@ function srBlocks(md: string): { front: string; tail: string }[] {
  */
 export function buildSrNote(questions: Question[], tag: string, existing = ""): string {
   const kept = new Map(srBlocks(existing).map((b) => [srKey(b.front), b.tail]));
-  const cards = questions.map((q) => {
+  const held = reservedQuestions(questions);
+  const cards = questions.filter((q) => !held.has(q.id)).map((q) => {
     const front = srSafe(q.question) + (q.options.length ? "\n" + q.options.map((o) => `- ${srSafe(o)}`).join("\n") : "");
     const back = srSafe(answerText(q)) + (q.explanation ? "\n" + srSafe(q.explanation) : "");
     const tail = kept.get(srKey(front));

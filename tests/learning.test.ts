@@ -1152,6 +1152,16 @@ test("question families: practice never uses a family kept for assessment, and a
   assert.deepEqual(placed.map((x) => x.id), ["P2"]);
 });
 
+test("question families: a family kept for assessment is never a new review card or a Spaced Repetition card", () => {
+  const q = (id: string, subskill: number, family: string, task = "application"): F.Question => ({ id, subskill, type: "short", question: id, options: [], answer: "1", explanation: "", family, task });
+  const bank = [q("Q1", 1, "a"), q("Q2", 1, "b"), q("Q3", 1, "c"), q("Q4", 1, "d", "transfer")];
+  const s = F.newState(F.parseTopic(CARD(NAMES)), 4);
+  assert.deepEqual(F.reviewQueue(bank, s, "2026-11-17", 10).map((x) => x.id), ["Q1", "Q2", "Q3"]);
+  s.cards["Q4"] = F.schedule(undefined, "good", "2026-11-01");
+  assert.ok(F.reviewQueue(bank, s, "2026-11-17", 10).some((x) => x.id === "Q4"), "a family already met may be reviewed");
+  assert.ok(!F.buildSrNote(bank, "t").includes("Q4"));
+});
+
 /** A topic whose one bank question has a generator with worked steps and a known mistake. No model call is allowed. */
 async function motion() {
   const gen = { v: 1, params: { u: { min: 1, max: 9 }, a: { min: 1, max: 5 }, t: { min: 2, max: 8 } },

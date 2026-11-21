@@ -4,6 +4,7 @@ What changed in each version of Study Tutor, newest first.
 
 ## Unreleased
 
+- Questions kept for the transfer check no longer appear as new review cards or in the Spaced Repetition note, so they are still unseen when the check comes.
 - **A mark can no longer say more than the judgement behind it.** Every grading path (the question bank's grading call, the tutor's mark in conversation, a regrade after a dispute) now goes through one set of rules in `src/grading.ts`:
   - An answer the grader says it could not check is left ungraded, whatever overall mark came with it.
   - A right final answer, even one SymPy checked, is no longer counted fully correct when the rubric asks for a method or assumptions nobody could judge. It is recorded as partly right and kept out of the evidence either way.
