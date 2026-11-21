@@ -207,7 +207,7 @@ export class StudyScreen implements Screen {
 
   private record(): SessionRecord | null {
     const v = this.view;
-    return v.chat && v.state ? sessionFor(v.chat, v.state, v.mode) : null;
+    return v.chat && v.state && !v.free ? sessionFor(v.chat, v.state, v.mode) : null;
   }
 
   /** The question waiting for an answer, from the session record, a bank card, or the last tutor message. */
@@ -239,6 +239,14 @@ export class StudyScreen implements Screen {
     const h = this.headEl;
     h.empty();
     button(h, { label: "Home", icon: "arrow-left", tone: "ghost", title: "Back to home. Your session stays as it is.", onClick: () => v.go("home") });
+    if (v.free) {
+      // A free question has no topic, mode or guide's step: its title, its transcript, and a way to delete it.
+      h.createSpan({ cls: "st-study-topic st-ellipsis", text: fmStr(v.chat!.fm, "title") || "Free question" });
+      const end = h.createDiv({ cls: "st-study-end" });
+      if (v.chatPath) iconButton(end, "file-text", "Open this chat's transcript as a note", () => void v.app.workspace.openLinkText(v.chatPath!, "", true));
+      if (v.chatPath) iconButton(end, "trash-2", "Delete this question", () => void this.deleteSession()).disabled = this.busy;
+      return;
+    }
     const title = h.createEl("button", { cls: "st-study-topic", attr: { "aria-label": `Topic: ${v.topic?.title ?? ""}. Open the topic overview.` } });
     title.createSpan({ cls: "st-ellipsis", text: v.topic?.title ?? "" });
     title.onclick = () => v.go("topic");
@@ -290,6 +298,17 @@ export class StudyScreen implements Screen {
     const v = this.view;
     const path = v.chatPath;
     if (!path || this.busy) return;
+    if (v.free) {
+      const ok = await confirmAction(v.app, { title: "Delete this question?", text: "The conversation is moved to the trash. Nothing else changes.", confirm: "Delete" });
+      if (!ok) return;
+      try {
+        await v.deleteChat(path);
+        v.go("home");
+      } catch (e) {
+        new Notice(`Study Tutor: the question could not be deleted. ${(e as Error).message}`);
+      }
+      return;
+    }
     const ok = await confirmAction(v.app, {
       title: "Delete this session?",
       text: "The conversation, its earlier parts and its session notes are moved to the trash, and a new session starts in the same mode. Your answers, levels and saved activities are kept.",
@@ -374,7 +393,7 @@ export class StudyScreen implements Screen {
         if (prev) button(sum, { label: "Open the earlier transcript", icon: "file-text", tone: "ghost", onClick: () => void v.app.workspace.openLinkText(`${prev[1]}.md`, "", true) });
       }
     }
-    const who = modeInfo(v.mode).who;
+    const who = v.free ? "Tutor" : modeInfo(v.mode).who;
     for (let i = this.shownCount; i < messages.length; i++) {
       const m = messages[i];
       const box = list.createDiv({ cls: `st-msg is-${m.role}` });
@@ -404,6 +423,19 @@ export class StudyScreen implements Screen {
     const probe = chat ? fmStr(chat.fm, "probe") === "yes" : false;
     const info = modeInfo(v.mode);
     const lastMsg = chat?.messages[chat.messages.length - 1];
+
+    if (v.free) {
+      // A free question: no level, step, activity or Continue. Only the reply, or a way to get it.
+      tail.createDiv({ cls: "st-notice st-ask-banner", text: "Free question. Nothing here counts toward a level." });
+      if (this.busy) this.thinking(tail);
+      else if (this.error) this.problem(tail);
+      else if (lastMsg?.role === "you") {
+        const box = tail.createDiv({ cls: "st-notice" });
+        box.createSpan({ text: "This message has not been answered yet." });
+        button(box, { label: "Get the reply", icon: "refresh-cw", onClick: () => void this.send("") });
+      }
+      return;
+    }
 
     if (!chat || (!chat.messages.length && !chat.summary)) {
       if (this.busy) return void this.thinking(tail);
@@ -618,8 +650,9 @@ export class StudyScreen implements Screen {
 
   private syncComposer(): void {
     const v = this.view;
-    const question = this.openQuestionText();
-    const asking = v.mode === "expert";
+    const question = v.free ? "" : this.openQuestionText();
+    // A free question gets no topic help (hints, explanations, skip, visuals) and no confidence: nothing is marked.
+    const asking = v.mode === "expert" || v.free;
     // A cold probe gives no help, so nothing that asks for a hint, an explanation or an activity is offered.
     const probe = v.chat ? fmStr(v.chat.fm, "probe") === "yes" : false;
     const NO_HELP = "No help during a cold probe";
@@ -643,7 +676,7 @@ export class StudyScreen implements Screen {
       if (probe) { activity.title = NO_HELP; activity.setAttribute("aria-label", NO_HELP); }
     }
 
-    this.input.placeholder = asking ? "Ask a question…  (Enter to send, Shift+Enter for a new line)" : question ? "Your answer…  (Enter to send, Shift+Enter for a new line)" : "Message…  (Enter to send, Shift+Enter for a new line)";
+    this.input.placeholder = v.free ? "Ask a follow-up…  (Enter to send, Shift+Enter for a new line)" : asking ? "Ask a question…  (Enter to send, Shift+Enter for a new line)" : question ? "Your answer…  (Enter to send, Shift+Enter for a new line)" : "Message…  (Enter to send, Shift+Enter for a new line)";
     const active = v.app.workspace.getActiveFile();
     const canAttach = active instanceof TFile && active.extension === "md" && !active.path.startsWith(v.plugin.store.root + "/");
     if (!canAttach) this.attach = false;
@@ -706,7 +739,7 @@ export class StudyScreen implements Screen {
     const v = this.view;
     const st = v.state;
     const n = st?.focus;
-    if (!st || n === null || n === undefined || !(n in st.names) || !v.dir) return;
+    if (!st || v.free || n === null || n === undefined || !(n in st.names) || !v.dir) return;
     if (this.bankOptions?.dir !== v.dir) {
       const dir = v.dir;
       this.bankOptions = { dir, options: null };
@@ -745,9 +778,56 @@ export class StudyScreen implements Screen {
     return text ? { name: f.basename, text: text.split(/\s+/).slice(0, 3000).join(" ") } : undefined;
   }
 
+  /** A turn of a free question (engine-ask.ts): one model call, nothing marked, no learner state. */
+  private async sendAsk(message: string): Promise<void> {
+    const v = this.view;
+    const chatPath = v.chatPath;
+    if (!chatPath || !v.chat) return;
+    const text = message.trim();
+    this.busy = true;
+    this.error = "";
+    this.stopped = false;
+    this.last = null;
+    try {
+      const attached = await this.attachedNote();
+      this.attach = false;
+      const turn = v.plugin.engine.askTurn(chatPath, text, { attached, onSpawn: (kill) => (this.kill = kill) });
+      if (text) {
+        v.chat.messages.push({ role: "you", text });
+        if (this.el) this.input.value = "";
+        delete v.plugin.data.drafts[chatPath];
+      }
+      this.sync();
+      const r = await turn;
+      v.sessionUsage = addUsage(v.sessionUsage, r.usage);
+      if (v.chatPath === chatPath) await v.openChat(chatPath);
+    } catch (e) {
+      this.error = (e as Error).message || String(e);
+      this.stopped = this.error === "Stopped.";
+      if (v.chatPath === chatPath) {
+        try {
+          v.chat = await v.plugin.store.loadChat(chatPath);
+          const saved = v.chat.messages[v.chat.messages.length - 1];
+          if (text && !(saved?.role === "you" && saved.text === text) && this.el && !this.input.value) {
+            this.input.value = text;
+            this.keepDraft();
+          }
+        } catch {
+          /* keep what is on screen */
+        }
+      }
+    } finally {
+      this.busy = false;
+      this.kill = null;
+      this.sync();
+      if (this.el && !this.error) this.input.focus();
+    }
+  }
+
   /** Sends a message. An empty message starts a chat, continues, or retries the last turn. */
   async send(message: string): Promise<void> {
     const v = this.view;
+    if (!this.busy && v.free) return this.sendAsk(message);
     if (this.busy || !v.dir || !v.topic) return;
     const dir = v.dir;
     const text = message.trim();

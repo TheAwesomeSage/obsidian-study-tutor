@@ -13,6 +13,8 @@ const MINUTES = [10, 25, 45];
 export class HomeScreen implements Screen {
   private el: HTMLElement | null = null;
   private filter = "";
+  /** What is typed in the Ask anything box, not yet sent. */
+  private asking = "";
 
   constructor(private view: TutorView) {}
 
@@ -48,6 +50,33 @@ export class HomeScreen implements Screen {
     }
   }
 
+  /**
+   * One box for a question or a goal, answered straight away with no topic, placement or setup.
+   * The text typed is kept across redraws until it is sent.
+   */
+  private askBox(parent: HTMLElement): void {
+    const v = this.view;
+    const box = parent.createEl("section", { cls: "st-ask", attr: { "aria-label": "Ask anything" } });
+    box.createEl("h3", { cls: "st-panel-title", text: "Ask anything" });
+    const input = box.createEl("textarea", { cls: "st-input st-ask-input", attr: { rows: "2", placeholder: "Ask a question or describe what you want to learn", "aria-label": "Ask a question or describe what you want to learn" } });
+    input.value = this.asking;
+    const row = box.createDiv({ cls: "st-actions" });
+    const submit = () => {
+      const text = input.value.trim();
+      if (!text) return input.focus();
+      this.asking = "";
+      void v.startAsk(text);
+    };
+    button(row, { label: "Ask", icon: "send", tone: "primary", onClick: submit });
+    input.oninput = () => (this.asking = input.value);
+    input.onkeydown = (e) => {
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        submit();
+      }
+    };
+  }
+
   private render(): void {
     const el = this.el;
     if (!el) return;
@@ -56,8 +85,9 @@ export class HomeScreen implements Screen {
     const page = el.createDiv({ cls: "st-page st-home" });
 
     if (!v.topics.length) {
-      const box = emptyState(page, { icon: "graduation-cap", title: "Start with a topic", text: "A topic is compiled once from your notes, a syllabus, or just a subject name. Study Tutor then teaches, quizzes and tracks what you can actually do, one concept at a time." });
+      const box = emptyState(page, { icon: "graduation-cap", title: "Start with a topic", text: "A topic is compiled once from your notes, a syllabus, or just a subject name. Study Tutor then teaches, quizzes and tracks what you can actually do, one concept at a time. Or just ask: a question or a goal gets an answer straight away." });
       button(box, { label: "New topic", icon: "plus", tone: "primary", onClick: () => v.plugin.openNewTopic() });
+      this.askBox(box);
       return;
     }
 
@@ -105,6 +135,9 @@ export class HomeScreen implements Screen {
     }
 
     void this.showProbeDue(now);
+
+    // ----- a question or a goal, answered straight away with no topic needed -----
+    this.askBox(page);
 
     // ----- ways in -----
     const ways = page.createEl("section", { cls: "st-ways", attr: { "aria-label": "Study modes" } });

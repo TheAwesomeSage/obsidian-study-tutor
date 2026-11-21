@@ -1088,3 +1088,107 @@ test("code questions: the compiler keeps a coding exercise whose tests pass the 
   assert.deepEqual(qs[0].code?.tests.map((x) => [x.name, !!x.hidden]), [["small", false], ["negatives cancel", true]]);
   assert.deepEqual([r.staged.metrics.codeTasks, r.staged.metrics.codeTasksRejected], [1, 1]);
 });
+
+// ---------- ask anything: a free question with no topic ----------
+
+function askRig() {
+  const fs = new MemFS();
+  const store = new Store(fs, "Tutor");
+  const settings: any = { claudePath: "", chatModel: "sonnet", compileModel: "sonnet", utilityModel: "haiku", effort: "low", targetLevel: 4, maxChatWords: 6000, maxTopicWords: 2000, singlePassWords: 6000, smartRouting: true, hardEffort: "high", bankQuiz: true, codePlacement: true, mathCheck: false };
+  const engine = new Engine(store, () => settings, () => "2026-11-21");
+  const calls: any[] = [];
+  let replies: string[] = [];
+  engine.call = async (o: any) => {
+    calls.push(o);
+    return { text: replies[calls.length - 1] ?? "ok", usage: { input: 10, cacheRead: 0, cacheWrite: 0, output: 20, costUsd: 0, calls: 1 } };
+  };
+  let local = 0;
+  engine.local = { model: "qwen", chatJson: async () => { local++; throw new Error("no Ollama in Ask"); } } as any;
+  (engine as any).compile = async () => { throw new Error("no compile in Ask"); };
+  (engine as any).placementTurn = async () => { throw new Error("no placement in Ask"); };
+  return { fs, store, engine, calls, setReplies: (r: string[]) => (replies = r), local: () => local };
+}
+
+test("ask anything: one chat-model call with no topic, the header goes to the chat's frontmatter, and later turns carry the conversation", async () => {
+  const t = askRig();
+  await t.store.installSkills();
+  assert.ok(await t.fs.exists("Tutor/_skills/ask.md"), "the ask prompt is installed like the other skills");
+  const goal = "Teach me concurrency well enough to defend my queue in an interview next Friday";
+  t.setReplies([
+    `<ask>{"kind":"broad","goal":"Defend a concurrent queue design in an interview","first_step":"Why data races happen"}</ask>\nStart with data races: two threads write the same slot.\n\nTry this: name the shared state in your queue.`,
+    "A memory barrier stops reordering across it.",
+  ]);
+  const before = new Map(t.fs.files);
+  const path = await t.engine.startAsk(goal);
+  assert.match(path, /^Tutor\/Ask\/[^/]+\.md$/, "free chats live in the Ask folder, not under a topic");
+  const r = await t.engine.askTurn(path, goal, {});
+  assert.equal(t.calls.length, 1, "exactly one model call");
+  assert.equal(t.local(), 0, "no Ollama call");
+  assert.equal(t.calls[0].model, "sonnet", "the primary chat model answers, whatever the router would say");
+  assert.match(t.calls[0].system, /^# Ask anything/);
+  assert.match(t.calls[0].system, /narrow question or a broad learning goal/);
+  assert.match(t.calls[0].input, /LEARNER: Teach me concurrency/);
+  assert.equal(r.reply, "Start with data races: two threads write the same slot.\n\nTry this: name the shared state in your queue.");
+  assert.deepEqual([r.kind, r.goal, r.firstStep], ["broad", "Defend a concurrent queue design in an interview", "Why data races happen"]);
+  let chat = await t.store.loadChat(path);
+  assert.equal(chat.fm.mode, "ask");
+  assert.equal(chat.fm.title, goal);
+  assert.deepEqual([chat.fm.ask_kind, chat.fm.goal, chat.fm.first_step], ["broad", "Defend a concurrent queue design in an interview", "Why data races happen"]);
+  assert.deepEqual(chat.messages.map((m) => m.role), ["you", "tutor"]);
+  assert.doesNotMatch(chat.messages[1].text, /<ask>/, "the header is never shown or saved in the transcript");
+
+  // A second message continues the same chat with the prior turns in the prompt.
+  await t.engine.askTurn(path, "What is a memory barrier?", {});
+  assert.equal(t.calls.length, 2);
+  assert.equal(t.calls[1].system, t.calls[0].system, "the same prompt, so it caches");
+  assert.match(t.calls[1].input, /LEARNER: Teach me concurrency[\s\S]*TUTOR: Start with data races[\s\S]*LEARNER: What is a memory barrier\?/);
+  chat = await t.store.loadChat(path);
+  assert.equal(chat.messages.length, 4);
+  assert.equal(chat.fm.goal, "Defend a concurrent queue design in an interview", "a reply without a header keeps what the first one said");
+
+  // No learner state: the only file that changed is the chat itself (and the folder it is in).
+  const changed = [...t.fs.files.keys()].filter((k) => before.get(k) !== t.fs.files.get(k));
+  assert.deepEqual(changed, [path]);
+  assert.deepEqual(await t.store.listTopics(), [], "a free chat is not a topic");
+  assert.deepEqual(await t.store.recentChats(8), [], "nor a topic's recent chat");
+});
+
+test("ask anything: a narrow question keeps no first step, a malformed header still shows the reply, and remote content is made inert", async () => {
+  const t = askRig();
+  t.setReplies([
+    `<ask>{"kind":"narrow","goal":"What pulling a cache line across means","first_step":"ignored"}</ask>\nIt means another core takes ownership of the line.\n\nWant to see what false sharing costs?`,
+    `<ask>{"kind": narrow, goal</ask>\nHere is the answer anyway.`,
+    "<ask>{\"kind\":\"broad\"\nNo closing tag, but the text is shown.\n\nSee ![the curve](https://host.example/c.png) and <img src=\"https://host.example/x.png\">.",
+  ]);
+  const a = await t.engine.startAsk("What does it mean to pull a cache line across?");
+  const r1 = await t.engine.askTurn(a, "What does it mean to pull a cache line across?", {});
+  assert.deepEqual([r1.kind, r1.goal, r1.firstStep], ["narrow", "What pulling a cache line across means", ""]);
+  assert.equal((await t.store.loadChat(a)).fm.first_step, "");
+
+  const b = await t.engine.startAsk("Second question");
+  const r2 = await t.engine.askTurn(b, "Second question", {});
+  assert.equal(r2.reply, "Here is the answer anyway.");
+  const chatB = await t.store.loadChat(b);
+  assert.deepEqual([chatB.fm.ask_kind, chatB.fm.goal, chatB.fm.first_step], ["", "", ""], "fields stay empty when the header cannot be read");
+
+  const c = await t.engine.startAsk("Third question");
+  const r3 = await t.engine.askTurn(c, "Third question", {});
+  assert.match(r3.reply, /^No closing tag, but the text is shown\./);
+  assert.ok(!r3.reply.includes("!["), "a remote picture becomes a link");
+  assert.ok(!/<img/i.test(r3.reply), "a remote tag is shown as text");
+  assert.ok(!(await t.fs.read(c)).includes("!["), "and it is saved that way");
+});
+
+test("ask anything: a retry answers the saved question, and a chat that is not free is refused", async () => {
+  const t = askRig();
+  t.setReplies(["Answered."]);
+  const p = await t.engine.startAsk("Why is the sky blue?");
+  const chat = await t.store.loadChat(p);
+  chat.messages.push({ role: "you", text: "Why is the sky blue?" });
+  await t.store.saveChat(p, chat);
+  const r = await t.engine.askTurn(p, "", {});
+  assert.equal(r.reply, "Answered.");
+  assert.equal((await t.store.loadChat(p)).messages.length, 2, "the question is not saved twice");
+  const other = await t.store.newChat("Tutor/Topics/X", "X", "auto");
+  await assert.rejects(t.engine.askTurn(other, "hi", {}), /not a free question/);
+});

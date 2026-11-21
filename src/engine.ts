@@ -40,6 +40,7 @@ import * as compileFns from "./engine-compile";
 import * as expansionFns from "./engine-expansion";
 import * as markFns from "./engine-marks";
 import * as probeFns from "./engine-probe";
+import * as askFns from "./engine-ask";
 import { probeStatus as probeStatusOf, type ProbeStatus } from "./probe";
 
 // The types, helpers and rules that used to sit in this file are still exported from it.
@@ -931,6 +932,16 @@ export class Engine {
   /** See `startProbe` in engine-probe.ts. */
   startProbe(...a: Rest<typeof probeFns.startProbe>): ReturnType<typeof probeFns.startProbe> {
     return probeFns.startProbe(this, ...a);
+  }
+
+  /** See `startAsk` in engine-ask.ts: a free question's chat, with no topic. */
+  startAsk(...a: Rest<typeof askFns.startAsk>): ReturnType<typeof askFns.startAsk> {
+    return askFns.startAsk(this, ...a);
+  }
+
+  /** See `askTurn` in engine-ask.ts: one model call, no compile, placement, Ollama or learner state. */
+  askTurn(...a: Rest<typeof askFns.askTurn>): ReturnType<typeof askFns.askTurn> {
+    return askFns.askTurn(this, ...a);
   }
 
   /** Whether a cold probe is due for a topic, and how past probes went. Changes nothing. */

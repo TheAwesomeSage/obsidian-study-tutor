@@ -165,6 +165,10 @@ export class Store {
   get topicsDir(): string {
     return `${this.root}/Topics`;
   }
+  /** Free questions asked with no topic. Outside Topics, so no topic listing ever reads them. */
+  get askDir(): string {
+    return `${this.root}/Ask`;
+  }
 
   async ensureDir(path: string): Promise<void> {
     let cur = "";
@@ -672,12 +676,25 @@ export class Store {
     }
   }
 
-  async newChat(dir: string, topicTitle: string, mode: Mode, now: Date = new Date()): Promise<string> {
+  /** `folder/stamp name.md`, numbered when that file already exists. */
+  private async freshChatPath(folder: string, name: string, now: Date): Promise<string> {
     const p = (n: number) => String(n).padStart(2, "0");
-    const stamp = `${ymd(now)} ${p(now.getHours())}${p(now.getMinutes())}`;
-    let path = `${dir}/chats/${stamp} ${mode}.md`;
-    for (let i = 2; await this.fs.exists(path); i++) path = `${dir}/chats/${stamp} ${mode} (${i}).md`;
+    const stem = `${folder}/${ymd(now)} ${p(now.getHours())}${p(now.getMinutes())} ${name}`;
+    let path = `${stem}.md`;
+    for (let i = 2; await this.fs.exists(path); i++) path = `${stem} (${i}).md`;
+    return path;
+  }
+
+  async newChat(dir: string, topicTitle: string, mode: Mode, now: Date = new Date()): Promise<string> {
+    const path = await this.freshChatPath(`${dir}/chats`, mode, now);
     await this.saveChat(path, { fm: { tutor: "chat", topic: topicTitle, mode, part: 1, previous: "", next: "", created: ymd(now) }, summary: "", messages: [] });
+    return path;
+  }
+
+  /** A free question's chat, in the Ask folder. Its header fields start empty until the first reply fills them. */
+  async newAskChat(title: string, now: Date = new Date()): Promise<string> {
+    const path = await this.freshChatPath(this.askDir, safeName(title).slice(0, 50).trim() || "Question", now);
+    await this.saveChat(path, { fm: { tutor: "chat", mode: "ask", title, ask_kind: "", goal: "", first_step: "", part: 1, previous: "", next: "", created: ymd(now) }, summary: "", messages: [] });
     return path;
   }
 

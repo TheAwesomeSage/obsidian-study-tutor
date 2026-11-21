@@ -701,6 +701,25 @@
 .study-tutor .st-time {
   margin-left: auto;
 }
+/* Ask anything: a question or a goal, answered with no topic. */
+.study-tutor .st-ask {
+  display: flex;
+  flex-direction: column;
+  gap: var(--st-2);
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+}
+.study-tutor .st-empty .st-ask {
+  margin-top: var(--st-4);
+}
+.study-tutor .st-ask-input {
+  width: 100%;
+  resize: vertical;
+}
+.study-tutor .st-ask .st-actions {
+  justify-content: flex-end;
+}
 .study-tutor .st-ways {
   display: flex;
   flex-direction: column;

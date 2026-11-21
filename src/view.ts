@@ -14,6 +14,7 @@ import { TopicInfo, topicInfo } from "./overview";
 import { DEFAULT_WEIGHTS, V1_WEIGHTS, replay } from "./policy";
 import { ReviewScreen } from "./review";
 import { ChatRef, TopicRef } from "./store";
+import { isAskChat } from "./engine-ask";
 import { StudyScreen } from "./study";
 import { TopicScreen } from "./topicscreen";
 import { MODE_INFO, iconButton } from "./ui";
@@ -94,6 +95,10 @@ export class TutorView extends ItemView {
   }
   get study(): StudyScreen {
     return this.screens.study as StudyScreen;
+  }
+  /** The open chat is a free question, which belongs to no topic and needs none. */
+  get free(): boolean {
+    return isAskChat(this.chat);
   }
 
   /** Backend gate/explicit request only. Topic and graph navigation never call this. */
@@ -238,6 +243,8 @@ export class TutorView extends ItemView {
   async openChat(path: string, remember = true): Promise<void> {
     this.chat = await this.plugin.store.loadChat(path);
     this.chatPath = path;
+    // A free question has no study mode and is never a topic's chat, so it is not remembered as one.
+    if (this.free) return;
     const m = fmStr(this.chat.fm, "mode", "tutor") as Mode;
     this.mode = MODE_INFO.some((p) => p.mode === m) ? m : "tutor";
     // A finished cold probe can be reread, but it is no longer the topic's chat.
@@ -272,7 +279,7 @@ export class TutorView extends ItemView {
   async newChat(mode: Mode): Promise<void> {
     if (!this.dir || !this.topic) return;
     this.mode = mode;
-    if (this.chat && this.chatPath && !this.chat.messages.length && !this.chat.summary) {
+    if (this.chat && this.chatPath && !this.free && !this.chat.messages.length && !this.chat.summary) {
       this.chat.fm.mode = mode;
       await this.plugin.store.saveChat(this.chatPath, this.chat);
     } else await this.openChat(await this.plugin.store.newChat(this.dir, this.topic.title, mode));
@@ -297,11 +304,11 @@ export class TutorView extends ItemView {
         this.state.focus = o.focus;
         await this.plugin.store.saveState(this.dir, this.state);
       }
-      // A cold probe is in quiz mode too, but is never continued as practice.
-      const probe = !!this.chat && fmStr(this.chat.fm, "probe") === "yes";
+      // A cold probe is in quiz mode too, but is never continued as practice; a free question is never continued as study.
+      const probe = !!this.chat && (fmStr(this.chat.fm, "probe") === "yes" || this.free);
       if (o.chatPath) await this.openChat(o.chatPath);
       else if (o.mode && !(this.chat && !probe && this.mode === o.mode && !o.focus)) await this.newChat(o.mode);
-      else if (!this.chat) await this.newChat(o.mode ?? this.mode);
+      else if (!this.chat || this.free) await this.newChat(o.mode ?? this.mode);
     } catch (e) {
       new Notice(`Study Tutor: ${(e as Error).message}`);
     }
@@ -321,6 +328,28 @@ export class TutorView extends ItemView {
       new Notice(`Study Tutor: ${(e as Error).message}`);
     }
     this.screens[this.screen].refresh?.();
+  }
+
+  /**
+   * Asks a free question from Home: a new chat in the Ask folder, opened on the study screen with
+   * the message sent as its first turn. It needs no topic, and the open topic stays as it was.
+   */
+  async startAsk(message: string): Promise<void> {
+    const text = message.trim();
+    if (!text) return;
+    if (this.study.busy) {
+      this.show("study");
+      return;
+    }
+    try {
+      const path = await this.plugin.engine.startAsk(text);
+      await this.openChat(path);
+    } catch (e) {
+      new Notice(`Study Tutor: ${(e as Error).message}`);
+      return;
+    }
+    this.show("study");
+    void this.study.send(text);
   }
 
   /** Acts on a suggested step: the review screen, or a chat in the right mode on the right concept. */
@@ -363,8 +392,8 @@ export class TutorView extends ItemView {
       this.screen = screen;
       return;
     }
-    // Study, review and the topic page need a topic. Without one, home explains what to do.
-    if (!this.dir && (screen === "study" || screen === "review" || screen === "topic")) screen = "home";
+    // Study, review and the topic page need a topic, except a free question on the study screen. Without one, home explains what to do.
+    if (!this.dir && ((screen === "study" && !this.free) || screen === "review" || screen === "topic")) screen = "home";
     this.mounted?.unmount?.();
     if (this.rendered) this.removeChild(this.rendered);
     this.rendered = this.addChild(new Component());
@@ -390,7 +419,7 @@ export class TutorView extends ItemView {
       setIcon(b.createSpan({ cls: "st-nav-icon" }), item.icon);
       b.createSpan({ cls: "st-nav-label", text: item.label });
       if (item.screen === "review" && due) b.createSpan({ cls: "st-badge", text: String(due), attr: { "aria-label": `${due} due` } });
-      b.disabled = !this.dir && (item.screen === "study" || item.screen === "review");
+      b.disabled = !this.dir && ((item.screen === "study" && !this.free) || item.screen === "review");
       b.onclick = () => this.show(item.screen);
     }
 
