@@ -939,6 +939,11 @@ export class Engine {
     return askFns.startAsk(this, ...a);
   }
 
+  /** See `linkAskCourse` in engine-ask.ts: a free chat remembers the course it grew into. */
+  linkAskCourse(...a: Rest<typeof askFns.linkAskCourse>): ReturnType<typeof askFns.linkAskCourse> {
+    return askFns.linkAskCourse(this, ...a);
+  }
+
   /** See `askTurn` in engine-ask.ts: one model call, no compile, placement, Ollama or learner state. */
   askTurn(...a: Rest<typeof askFns.askTurn>): ReturnType<typeof askFns.askTurn> {
     return askFns.askTurn(this, ...a);

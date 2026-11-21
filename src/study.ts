@@ -18,6 +18,7 @@ import { moveLine } from "./tutormove";
 import { reasoningLines } from "./reasoning";
 import { conclusive, markLine } from "./grading";
 import { isBankId } from "./bankvariants";
+import { askCourse, askCourseSeed } from "./engine-ask";
 import { coverageOf, coverageSummary } from "./coverage";
 import { codeRunSummary, codeTestRows } from "./codequestions";
 import { expansionLine } from "./expansion";
@@ -433,7 +434,7 @@ export class StudyScreen implements Screen {
         const box = tail.createDiv({ cls: "st-notice" });
         box.createSpan({ text: "This message has not been answered yet." });
         button(box, { label: "Get the reply", icon: "refresh-cw", onClick: () => void this.send("") });
-      }
+      } else if (lastMsg?.role === "tutor" && chat) this.courseOffer(tail, chat);
       return;
     }
 
@@ -776,6 +777,28 @@ export class StudyScreen implements Screen {
     if (!(f instanceof TFile) || f.extension !== "md" || f.path.startsWith(v.plugin.store.root + "/")) return undefined;
     const text = splitFrontmatter(await v.app.vault.cachedRead(f)).body.trim();
     return text ? { name: f.basename, text: text.split(/\s+/).slice(0, 3000).join(" ") } : undefined;
+  }
+
+  /**
+   * Under a free chat's reply: open the course it grew into, or make one from it. A broad goal is
+   * offered as the main next step, with the first step it would start from; a narrow question
+   * gets a quiet button only.
+   */
+  private courseOffer(tail: HTMLElement, chat: NonNullable<TutorView["chat"]>): void {
+    const v = this.view;
+    const course = askCourse(chat);
+    if (course && v.overview.some((t) => t.dir === course)) {
+      const box = tail.createDiv({ cls: "st-notice st-ask-course" });
+      box.createSpan({ text: "This question has a course." });
+      button(box, { label: "Open the course", icon: "book-open", tone: "primary", onClick: () => void v.selectTopic(course).then(() => v.go("topic")) });
+      return;
+    }
+    const broad = fmStr(chat.fm, "ask_kind") === "broad";
+    const step = fmStr(chat.fm, "first_step");
+    const box = tail.createDiv({ cls: "st-notice st-ask-course" });
+    if (broad) box.createSpan({ text: step ? `This is worth learning properly. A course would plan it step by step and start with ${step}.` : "This is worth learning properly. A course would plan it step by step." });
+    const seed = askCourseSeed(chat);
+    button(box, { label: "Make this a course", icon: "graduation-cap", tone: broad ? "primary" : undefined, onClick: () => v.chatPath && v.plugin.openNewTopic({ ...seed, fromAsk: v.chatPath }) });
   }
 
   /** A turn of a free question (engine-ask.ts): one model call, nothing marked, no learner state. */

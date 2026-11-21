@@ -1186,3 +1186,67 @@ test("ask anything: Home will not delete a question while its reply is being wri
   view.study.busy = false;
   await view.onClose();
 });
+test("grow a question into a course: a broad reply offers Make this a course with the seed, compiling links the chat, and the chat then opens the course", async () => {
+  const fs = new MemFS();
+  const leaves: any[] = [];
+  let plugin: any = null;
+  const app = makeApp(fs, leaves, [], () => plugin);
+  plugin = new (StudyTutorPlugin as any)(app, { id: "study-tutor" }) as StudyTutorPlugin;
+  await plugin.onload();
+  await tick();
+  const replies = [
+    `<ask>{"kind":"broad","goal":"Defend a concurrent queue in an interview","first_step":"Data races"}</ask>\nFirst learn data races.`,
+    `<ask>{"kind":"narrow","goal":"What a mutex is","first_step":""}</ask>\nA mutex lets one thread in at a time.`,
+  ];
+  let n = 0;
+  plugin.engine.call = async () => ({ text: replies[n++] ?? "ok", usage: { input: 1, cacheRead: 0, cacheWrite: 0, output: 1, costUsd: 0, calls: 1 } });
+  const seeds: any[] = [];
+  plugin.openNewTopic = (seed: any) => seeds.push(seed);
+
+  const view: any = await plugin.activateView();
+  const root = view.contentEl;
+  $(root, ".st-ask textarea").value = "Teach me concurrency for my interview";
+  button($(root, ".st-ask"), "Ask").click();
+  await tick(80);
+  const offer = $(root, ".st-ask-course");
+  assert.ok(offer, "a broad reply offers a course");
+  assert.match(offer.textContent, /start with Data races/);
+  const make = button(offer, "Make this a course");
+  assert.ok(make.classList.contains("mod-cta") || make.className.includes("primary"), "a broad goal makes it the main next step");
+  make.click();
+  const chatPath = view.chatPath;
+  assert.deepEqual(seeds, [{ title: "Defend a concurrent queue in an interview", goal: 'Defend a concurrent queue in an interview. The learner first asked: "Teach me concurrency for my interview". Start with: Data races.', fromAsk: chatPath }]);
+
+  // Compiling with the seed records where the course came from and links the chat to it.
+  plugin.engine.compile = async (req: any) => {
+    const out = parseCompileOutput(COMPILED);
+    const dir = await plugin.store.saveCompiled({ title: req.title, fm: { source: req.mode, subject: out.subject, goal: req.goal, ...req.fm }, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
+    return { dir, subskills: 1, questions: 1, usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, costUsd: 0, calls: 0 }, agents: 0 };
+  };
+  const res = await plugin.compileTopic({ title: seeds[0].title, kind: "subject", folder: "", goal: seeds[0].goal, fromAsk: chatPath });
+  assert.ok(res, "the course compiled");
+  const topic = await plugin.store.loadTopic(res.dir);
+  assert.equal(topic.fm.from_ask, chatPath);
+  assert.equal(topic.fm.goal, seeds[0].goal);
+  assert.equal((await plugin.store.loadChat(chatPath)).fm.course, res.dir);
+
+  // Back in the free chat, the offer is now to open the course.
+  await view.openAsk(chatPath);
+  await tick(40);
+  assert.match($(root, ".st-ask-course").textContent, /This question has a course/);
+  button($(root, ".st-ask-course"), "Open the course").click();
+  await tick(60);
+  assert.equal(root.getAttribute("data-screen"), "topic");
+  assert.equal(view.dir, res.dir);
+
+  // A narrow question gets a quiet button and no pitch.
+  view.go("home");
+  await tick(20);
+  $(root, ".st-ask textarea").value = "What is a mutex?";
+  button($(root, ".st-ask"), "Ask").click();
+  await tick(80);
+  const quiet = $(root, ".st-ask-course");
+  assert.doesNotMatch(quiet.textContent, /worth learning properly/);
+  assert.ok(button(quiet, "Make this a course"));
+  await view.onClose();
+});

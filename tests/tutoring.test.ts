@@ -25,6 +25,7 @@ import type { CodeRunReport, CodeRunner, CodeTask, CodeTestStatus } from "../src
 import { markCodeRun, notRun, parseCodeTask } from "../src/codequestions";
 import { gradingLabel } from "../src/evidence";
 import { compileCourse } from "../src/compiler";
+import { SEED_GOAL_CHARS, askCourse, askCourseSeed } from "../src/engine-ask";
 
 // ---------- fixtures ----------
 
@@ -1270,4 +1271,36 @@ test("ask anything: recent questions read only the newest files they need", asyn
   const asks = await store.recentAsks(3);
   assert.deepEqual(asks.map((a) => a.title), ["Question 9", "Question 8", "Question 7"]);
   assert.equal(reads, 4, "the empty newest chat and the three it returns, not all eleven files");
+});
+test("grow a question into a course: the seed names the goal, the opening question and the first step, and the chat links to the course", async () => {
+
+  const t = askRig();
+  const question = "Teach me concurrency well enough to defend my queue in an interview next Friday";
+  t.setReplies([`<ask>{"kind":"broad","goal":"Defend a concurrent queue design in an interview","first_step":"Why data races happen"}</ask>\nStart with data races.`]);
+  const path = await t.engine.startAsk(question);
+  await t.engine.askTurn(path, question, {});
+  let chat = await t.store.loadChat(path);
+  const seed = askCourseSeed(chat);
+  assert.equal(seed.title, "Defend a concurrent queue design in an interview");
+  assert.equal(seed.goal, `Defend a concurrent queue design in an interview. The learner first asked: "${question}". Start with: Why data races happen.`);
+  assert.equal(askCourse(chat), "", "not a course yet");
+
+  // Linking records the course on the chat and changes nothing else.
+  const before = new Map(t.fs.files);
+  await t.engine.linkAskCourse(path, "Tutor/Topics/Concurrency");
+  chat = await t.store.loadChat(path);
+  assert.equal(askCourse(chat), "Tutor/Topics/Concurrency");
+  assert.deepEqual([...t.fs.files.keys()].filter((k) => before.get(k) !== t.fs.files.get(k)), [path]);
+  assert.equal(chat.messages.length, 2, "the transcript is kept");
+
+  // Without a header the opening question is the goal; a topic chat cannot be linked.
+  const bare = askCourseSeed({ fm: { mode: "ask", title: "Why is the sky blue?" }, summary: "", messages: [{ role: "you", text: "Why is the sky blue?\nand red at sunset" }] } as any);
+  assert.deepEqual(bare, { title: "Why is the sky blue?", goal: "Why is the sky blue? and red at sunset." });
+  const other = await t.store.newChat("Tutor/Topics/X", "X", "tutor");
+  await assert.rejects(t.engine.linkAskCourse(other, "Tutor/Topics/X"), /not a free question/);
+
+  // Model-written goal text is made inert and bounded before it reaches the dialog or the compile prompt.
+  const long = askCourseSeed({ fm: { mode: "ask", goal: "Learn ![x](https://host.example/a.png) queues", first_step: "x".repeat(400) }, summary: "", messages: [{ role: "you", text: "q ".repeat(500) }] } as any);
+  assert.ok(!long.goal.includes("!["), "a remote picture cannot load from the goal");
+  assert.ok(long.goal.length <= SEED_GOAL_CHARS);
 });

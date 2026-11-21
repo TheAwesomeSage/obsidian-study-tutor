@@ -82,6 +82,36 @@ export function askContext(chat: Chat, maxWords: number): string {
   return out.join("\n").trim();
 }
 
+/** The most a course seed's goal says: the compile prompt is told the goal, not taught from it. */
+export const SEED_GOAL_CHARS = 600;
+
+/**
+ * What a free chat gives a new course: a title and a goal for the New topic dialog. The goal is the
+ * reply header's goal, or else the opening question, with the opening question and the first step
+ * named so the course starts there. The conversation itself is not sent: the tutor's replies are
+ * not evidence, and the compiler treats its material as sources to cite.
+ */
+export function askCourseSeed(chat: Chat): { title: string; goal: string } {
+  const first = chat.messages.find((m) => m.role === "you")?.text ?? "";
+  const goal = oneLine(fmStr(chat.fm, "goal"), 200);
+  const step = oneLine(fmStr(chat.fm, "first_step"), 200);
+  const asked = oneLine(first, 300);
+  const title = askTitle(neutraliseRemote(goal || first || fmStr(chat.fm, "title")));
+  const parts = [goal || asked, goal && asked && asked !== goal ? `The learner first asked: "${asked}"` : "", step ? `Start with: ${step}` : ""].filter(Boolean);
+  return { title, goal: parts.map((x) => (/[.?!]$/.test(x) ? x : `${x}.`)).join(" ").slice(0, SEED_GOAL_CHARS) };
+}
+
+/** The course a free chat grew into, if it was made into one. */
+export const askCourse = (chat: Chat | null | undefined): string => (chat ? fmStr(chat.fm, "course") : "");
+
+/** Records on a free chat the course it grew into, so the chat can open it. Nothing else changes. */
+export async function linkAskCourse(eng: Engine, chatPath: string, dir: string): Promise<void> {
+  const chat = await eng.store.loadChat(chatPath);
+  if (!isAskChat(chat)) throw new Error("This is not a free question chat.");
+  chat.fm.course = dir;
+  await eng.store.saveChat(chatPath, chat);
+}
+
 /** Starts a free chat titled from the learner's message. The message itself is sent by `askTurn`. */
 export async function startAsk(eng: Engine, message: string): Promise<string> {
   return eng.store.newAskChat(askTitle(message));

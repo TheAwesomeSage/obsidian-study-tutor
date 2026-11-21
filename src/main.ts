@@ -374,8 +374,9 @@ export default class StudyTutorPlugin extends Plugin {
     return leaf.view instanceof TutorView ? leaf.view : null;
   }
 
-  openNewTopic(): void {
-    new NewTopicModal(this.app, this).open();
+  /** Opens the New topic dialog. A seed (from a free chat) fills in the title and goal and links the course back to that chat. */
+  openNewTopic(seed?: TopicSeed): void {
+    new NewTopicModal(this.app, this, seed).open();
   }
 
   /** Reads the source notes itself, so the model needs no tools. */
@@ -426,12 +427,16 @@ export default class StudyTutorPlugin extends Plugin {
     return { mode, material, fm, truncated };
   }
 
-  async compileTopic(p: { title: string; kind: SourceKind; folder: string; goal: string; research?: boolean; existingDir?: string; sources?: string[] }): Promise<CompileResult | null> {
+  async compileTopic(p: { title: string; kind: SourceKind; folder: string; goal: string; research?: boolean; existingDir?: string; sources?: string[]; fromAsk?: string }): Promise<CompileResult | null> {
     return this.runCompilation(async (signal, progress) => {
       progress("Gathering notes…");
       const g = await this.gather(p.kind, p.folder, p.sources);
-      const req = { title: p.title, mode: g.mode, goal: p.goal, material: g.material, fm: g.fm, existingDir: p.existingDir, research: p.research, truncated: g.truncated, signal };
-      return p.existingDir && !g.truncated ? this.engine.refresh({ ...req, existingDir: p.existingDir }, progress) : this.engine.compile(req, progress);
+      const fm = p.fromAsk ? { ...g.fm, from_ask: p.fromAsk } : g.fm;
+      const req = { title: p.title, mode: g.mode, goal: p.goal, material: g.material, fm, existingDir: p.existingDir, research: p.research, truncated: g.truncated, signal };
+      const res = await (p.existingDir && !g.truncated ? this.engine.refresh({ ...req, existingDir: p.existingDir }, progress) : this.engine.compile(req, progress));
+      // The free chat it grew from can open the course from now on. A chat deleted meanwhile changes nothing.
+      if (p.fromAsk) await this.engine.linkAskCourse(p.fromAsk, res.dir).catch(() => undefined);
+      return res;
     });
   }
 
@@ -531,25 +536,36 @@ class ExpandTopicModal extends Modal {
   onClose(): void { this.contentEl.empty(); }
 }
 
+/** What a free chat hands the New topic dialog. */
+export interface TopicSeed {
+  title: string;
+  goal: string;
+  /** The free chat's path, linked to the course once it is compiled. */
+  fromAsk: string;
+}
+
 class NewTopicModal extends Modal {
   constructor(
     app: App,
     private plugin: StudyTutorPlugin,
+    private seed?: TopicSeed,
   ) {
     super(app);
   }
 
   onOpen(): void {
     const active = this.app.workspace.getActiveFile();
-    let title = active && active.extension === "md" ? active.basename : "";
-    let kind: SourceKind = active ? "links" : "subject";
+    const seed = this.seed;
+    let title = seed?.title ?? (active && active.extension === "md" ? active.basename : "");
+    // A course grown from a question teaches the subject unless the learner picks notes.
+    let kind: SourceKind = active && !seed ? "links" : "subject";
     let folder = active?.parent && active.parent.path !== "/" ? active.parent.path : "";
-    let goal = "";
+    let goal = seed?.goal ?? "";
     // Web research is offered by default only when there are no notes to teach from.
     const noNotes = (k: SourceKind) => k === "spec" || k === "subject";
     let research = noNotes(kind);
     let researchToggle: { setValue(v: boolean): unknown } | null = null;
-    this.titleEl.setText("New topic");
+    this.titleEl.setText(seed ? "Make this a course" : "New topic");
     const { contentEl } = this;
 
     new Setting(contentEl).setName("Title").addText((t) => t.setValue(title).onChange((v) => (title = v)));
@@ -573,7 +589,7 @@ class NewTopicModal extends Modal {
     new Setting(contentEl)
       .setName("Goal (optional)")
       .setDesc("Level or purpose, for example: first-year university course, exam in June.")
-      .addText((t) => t.onChange((v) => (goal = v)));
+      .addText((t) => t.setValue(goal).onChange((v) => (goal = v)));
     new Setting(contentEl)
       .setName("Research on the web")
       .setDesc("Searches through Brave and reads selected public pages. Requires BRAVE_SEARCH_API_KEY in Obsidian's environment. Without it, compilation uses available notes and reports research gaps.")
@@ -591,7 +607,7 @@ class NewTopicModal extends Modal {
             return;
           }
           this.close();
-          void this.plugin.compileTopic({ title: title.trim(), kind, folder, goal, research });
+          void this.plugin.compileTopic({ title: title.trim(), kind, folder, goal, research, fromAsk: seed?.fromAsk });
         }),
     );
   }
