@@ -1106,7 +1106,7 @@ function askRig() {
   engine.local = { model: "qwen", chatJson: async () => { local++; throw new Error("no Ollama in Ask"); } } as any;
   (engine as any).compile = async () => { throw new Error("no compile in Ask"); };
   (engine as any).placementTurn = async () => { throw new Error("no placement in Ask"); };
-  return { fs, store, engine, calls, setReplies: (r: string[]) => (replies = r), local: () => local };
+  return { fs, store, engine, settings, calls, setReplies: (r: string[]) => (replies = r), local: () => local };
 }
 
 test("ask anything: one chat-model call with no topic, the header goes to the chat's frontmatter, and later turns carry the conversation", async () => {
@@ -1191,4 +1191,60 @@ test("ask anything: a retry answers the saved question, and a chat that is not f
   assert.equal((await t.store.loadChat(p)).messages.length, 2, "the question is not saved twice");
   const other = await t.store.newChat("Tutor/Topics/X", "X", "auto");
   await assert.rejects(t.engine.askTurn(other, "hi", {}), /not a free question/);
+});
+
+test("ask anything: a long free chat sends the opening message and the latest ones within maxChatWords, and keeps the whole transcript on disk", async () => {
+  const t = askRig();
+  t.settings.maxChatWords = 500;
+  t.setReplies(["Latest answer."]);
+  const p = await t.engine.startAsk("GOALMARK teach me queues");
+  const chat = await t.store.loadChat(p);
+  chat.messages.push({ role: "you", text: "GOALMARK teach me queues" });
+  const filler = (k: string) => `${k} ` + Array.from({ length: 99 }, (_, i) => `w${i}`).join(" ");
+  for (let i = 0; i < 30; i++) chat.messages.push({ role: i % 2 ? "you" : "tutor", text: filler(`MSG${i}X`) });
+  await t.store.saveChat(p, chat);
+  await t.engine.askTurn(p, "LATESTQ what next?", {});
+  const input: string = t.calls[0].input;
+  assert.match(input, /LEARNER: GOALMARK teach me queues/, "the first message, with the goal, is always sent");
+  assert.match(input, /LEARNER: LATESTQ what next\?/);
+  assert.match(input, /MSG29X/, "the most recent messages are sent");
+  assert.doesNotMatch(input, /MSG0X|MSG1X|MSG10X/, "older ones are left out");
+  assert.match(input, /\[\d+ earlier messages omitted\]/);
+  const sent = (input.match(/\bw\d+\b/g) ?? []).length;
+  assert.ok(sent <= 500, `at most maxChatWords of messages are sent (${sent})`);
+  assert.equal((await t.store.loadChat(p)).messages.length, 33, "the whole transcript stays on disk: 32 messages and the reply");
+
+  // A short chat is sent whole, with no marker.
+  const u = askRig();
+  u.setReplies(["ok"]);
+  const q = await u.engine.startAsk("short");
+  await u.engine.askTurn(q, "short", {});
+  assert.doesNotMatch(u.calls[0].input, /omitted/);
+});
+
+test("ask anything: the opening header sets the goal, a later header never overwrites it, and only a header at the start is read", async () => {
+  const t = askRig();
+  t.setReplies([
+    `<ask>{"kind":"broad","goal":"Learn concurrency for an interview","first_step":"Data races"}</ask>\nStart with data races.`,
+    `<ask>{"kind":"narrow","goal":"What a mutex is","first_step":""}</ask>\nA mutex is a lock.`,
+  ]);
+  const p = await t.engine.startAsk("Teach me concurrency");
+  await t.engine.askTurn(p, "Teach me concurrency", {});
+  const r = await t.engine.askTurn(p, "What is a mutex?", {});
+  assert.equal(r.reply, "A mutex is a lock.", "a later header is still stripped");
+  const chat = await t.store.loadChat(p);
+  assert.deepEqual([chat.fm.ask_kind, chat.fm.goal, chat.fm.first_step], ["broad", "Learn concurrency for an interview", "Data races"]);
+
+  const u = askRig();
+  u.setReplies([
+    `Answer first.\n<ask>{"kind":"broad","goal":"Late goal","first_step":"x"}</ask>`,
+    `<ask>{"kind":"broad" Here is the reply, on the same line.`,
+  ]);
+  const a = await u.engine.startAsk("one");
+  const ra = await u.engine.askTurn(a, "one", {});
+  assert.equal(ra.reply, "Answer first.", "a header that is not at the start is stripped from the text");
+  assert.equal((await u.store.loadChat(a)).fm.ask_kind, "", "but not read");
+  const b = await u.engine.startAsk("two");
+  const rb = await u.engine.askTurn(b, "two", {});
+  assert.equal(rb.reply, "Here is the reply, on the same line.", "an unclosed header does not swallow the reply");
 });

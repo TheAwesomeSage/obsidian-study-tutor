@@ -64,8 +64,10 @@ export class HomeScreen implements Screen {
     const submit = () => {
       const text = input.value.trim();
       if (!text) return input.focus();
-      this.asking = "";
-      void v.startAsk(text);
+      // The text stays in the box unless the question was really sent (not while another reply is being written).
+      void v.startAsk(text).then((sent) => {
+        if (sent) this.asking = "";
+      });
     };
     button(row, { label: "Ask", icon: "send", tone: "primary", onClick: submit });
     input.oninput = () => (this.asking = input.value);
@@ -75,6 +77,41 @@ export class HomeScreen implements Screen {
         submit();
       }
     };
+  }
+
+  /** Past free questions, newest first, read from the Ask folder once the page is drawn. Nothing shows until there is one. */
+  private async recentQuestions(parent: HTMLElement): Promise<void> {
+    const v = this.view;
+    let asks: Awaited<ReturnType<typeof v.plugin.store.recentAsks>>;
+    try {
+      asks = await v.plugin.store.recentAsks(5);
+    } catch {
+      return;
+    }
+    if (this.el === null || !parent.isConnected || !asks.length) return;
+    const box = parent.createEl("section", { cls: "st-recent-asks", attr: { "aria-label": "Recent questions" } });
+    box.createEl("h3", { cls: "st-panel-title", text: "Recent questions" });
+    const list = box.createDiv({ cls: "st-list", attr: { role: "list" } });
+    for (const a of asks) {
+      const row = list.createDiv({ cls: "st-row-item", attr: { role: "listitem" } });
+      const main = row.createEl("button", { cls: "st-row-main", attr: { "aria-label": `Reopen the question: ${a.title}` } });
+      const top = main.createDiv({ cls: "st-row-top" });
+      setIcon(top.createSpan({ cls: "st-row-icon" }), "message-circle");
+      top.createSpan({ cls: "st-row-title", text: a.title });
+      top.createSpan({ cls: "st-meta st-row-when", text: stampLabel(a.stamp) });
+      if (a.unanswered) chip(main, "No reply yet", "accent");
+      main.onclick = () => void v.openAsk(a.path);
+      iconButton(row, "trash-2", "Delete this question", async () => {
+        const ok = await confirmAction(v.app, { title: "Delete this question?", text: `"${a.title}" is moved to the trash. Nothing else changes.`, confirm: "Delete" });
+        if (!ok) return;
+        try {
+          await v.deleteChat(a.path);
+          this.render();
+        } catch (e) {
+          new Notice(`Study Tutor: the question could not be deleted. ${(e as Error).message}`);
+        }
+      });
+    }
   }
 
   private render(): void {
@@ -88,6 +125,7 @@ export class HomeScreen implements Screen {
       const box = emptyState(page, { icon: "graduation-cap", title: "Start with a topic", text: "A topic is compiled once from your notes, a syllabus, or just a subject name. Study Tutor then teaches, quizzes and tracks what you can actually do, one concept at a time. Or just ask: a question or a goal gets an answer straight away." });
       button(box, { label: "New topic", icon: "plus", tone: "primary", onClick: () => v.plugin.openNewTopic() });
       this.askBox(box);
+      void this.recentQuestions(box);
       return;
     }
 
@@ -137,7 +175,9 @@ export class HomeScreen implements Screen {
     void this.showProbeDue(now);
 
     // ----- a question or a goal, answered straight away with no topic needed -----
-    this.askBox(page);
+    const asked = page.createDiv({ cls: "st-ask-wrap" });
+    this.askBox(asked);
+    void this.recentQuestions(asked);
 
     // ----- ways in -----
     const ways = page.createEl("section", { cls: "st-ways", attr: { "aria-label": "Study modes" } });
@@ -160,7 +200,7 @@ export class HomeScreen implements Screen {
     tile("book-open", "Learn", "Lessons with worked examples", () => void v.startStudy({ mode: "teach" }));
     tile("zap", "Practise", "Quiz from the question bank", () => void v.startStudy({ mode: "quiz" }));
     tile("layers", "Review", due ? "Flashcards are due" : "Flashcards, no tokens", () => v.go("review"), due ? String(due) : "");
-    tile("message-circle", "Ask", "Direct answers from your notes", () => void v.startStudy({ mode: "expert" }));
+    tile("message-circle", "Ask about this topic", "Direct answers from this topic's notes", () => void v.startStudy({ mode: "expert" }));
     tile("git-fork", "Knowledge graph", "Concepts and how they connect", () => v.go("graph"));
     const work = workloadForecast(v.overview.map((t) => t.state), v.today, { countCards: !v.plugin.usesSr() });
     ways.createDiv({ cls: "st-meta st-forecast", text: workloadLine(work), attr: { title: work.days.map((d) => `${d.day}: ${d.cards + d.checks} (${d.minutes} min)`).join("\n") } });

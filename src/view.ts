@@ -334,22 +334,39 @@ export class TutorView extends ItemView {
    * Asks a free question from Home: a new chat in the Ask folder, opened on the study screen with
    * the message sent as its first turn. It needs no topic, and the open topic stays as it was.
    */
-  async startAsk(message: string): Promise<void> {
+  async startAsk(message: string): Promise<boolean> {
     const text = message.trim();
-    if (!text) return;
+    if (!text) return false;
     if (this.study.busy) {
-      this.show("study");
-      return;
+      new Notice("Wait for the current reply, or stop it, before asking another question.");
+      return false;
     }
     try {
       const path = await this.plugin.engine.startAsk(text);
       await this.openChat(path);
     } catch (e) {
       new Notice(`Study Tutor: ${(e as Error).message}`);
-      return;
+      return false;
     }
     this.show("study");
     void this.study.send(text);
+    return true;
+  }
+
+  /** Reopens a free question from Home's Recent questions, as it was left. */
+  async openAsk(path: string): Promise<void> {
+    if (this.study.busy) {
+      new Notice("Wait for the current reply, or stop it, before opening another question.");
+      return;
+    }
+    try {
+      await this.openChat(path);
+    } catch (e) {
+      new Notice(`Study Tutor: ${(e as Error).message}`);
+      return;
+    }
+    this.show("study");
+    this.study.refresh();
   }
 
   /** Acts on a suggested step: the review screen, or a chat in the right mode on the right concept. */

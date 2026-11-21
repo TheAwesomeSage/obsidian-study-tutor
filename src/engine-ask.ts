@@ -6,7 +6,7 @@
 
 import type { Usage } from "./claude";
 import { modelFor } from "./model-provider";
-import { Chat, chatForPrompt, fmStr } from "./formats";
+import { Chat, fmStr, words } from "./formats";
 import { neutraliseRemote } from "./safemd";
 import type { TurnOpts } from "./engine-common";
 import type { Engine } from "./engine";
@@ -37,13 +37,15 @@ export function askTitle(message: string): string {
 const oneLine = (x: unknown, max: number): string => (typeof x === "string" ? neutraliseRemote(x.replace(/\s+/g, " ").trim()).slice(0, max) : "");
 
 /**
- * Takes the `<ask>{json}</ask>` header out of a reply. The header is removed wherever it is and
- * however damaged (an unclosed one at the start is dropped up to the end of its line); `header` is
- * null unless it held valid JSON with a known kind.
+ * Takes the `<ask>{json}</ask>` header out of a reply. Only a header at the very start is read;
+ * every closed one is removed from the text wherever it is. An unclosed one at the start loses only
+ * the tag and the JSON-looking part after it on that line, never the reply. `header` is null unless
+ * it held valid JSON with a known kind.
  */
 export function readAskHeader(raw: string): { text: string; header: { kind: AskKind; goal: string; firstStep: string } | null } {
-  const body = /<ask>([\s\S]*?)<\/ask>/.exec(raw)?.[1] ?? null;
-  const text = body === null ? raw.replace(/^\s*<ask>[^\n]*(\n|$)/, "") : raw.replace(/`{0,3}\s*<ask>[\s\S]*?<\/ask>\s*`{0,3}/g, "\n");
+  const body = /^\s*`{0,3}\s*<ask>([\s\S]*?)<\/ask>/.exec(raw)?.[1] ?? null;
+  let text = raw.replace(/`{0,3}[ \t]*<ask>[\s\S]*?<\/ask>[ \t]*`{0,3}/g, "\n");
+  text = text.replace(/^\s*<ask>[ \t]*(\{(?:[ \t]*"[^"\n]*"[ \t]*[:,]?)*[ \t]*\}?)?/, "");
   let header: { kind: AskKind; goal: string; firstStep: string } | null = null;
   try {
     const v = body === null ? null : JSON.parse(body);
@@ -52,6 +54,30 @@ export function readAskHeader(raw: string): { text: string; header: { kind: AskK
     header = null;
   }
   return { text: text.trim(), header };
+}
+
+/**
+ * The conversation as the model sees it: the opening message (it holds the goal) and then as many
+ * of the latest messages as fit in `maxWords`, counted from the end, with a marker where earlier
+ * ones were left out. The latest message is always sent. The file keeps the whole transcript.
+ */
+export function askContext(chat: Chat, maxWords: number): string {
+  const msgs = chat.messages;
+  const line = (m: Chat["messages"][number]) => `${m.role === "you" ? "LEARNER" : "TUTOR"}: ${m.text.trim()}`;
+  if (!msgs.length) return "";
+  const kept: number[] = [];
+  let used = words(msgs[0].text);
+  for (let i = msgs.length - 1; i > 0; i--) {
+    const w = words(msgs[i].text);
+    if (kept.length && used + w > maxWords) break;
+    kept.unshift(i);
+    used += w;
+  }
+  const omitted = msgs.length - 1 - kept.length;
+  const out = ["## Messages", line(msgs[0]), ""];
+  if (omitted > 0) out.push(`[${omitted} earlier message${omitted === 1 ? "" : "s"} omitted]`, "");
+  for (const i of kept) out.push(line(msgs[i]), "");
+  return out.join("\n").trim();
 }
 
 /** Starts a free chat titled from the learner's message. The message itself is sent by `askTurn`. */
@@ -75,7 +101,7 @@ export async function askTurn(eng: Engine, chatPath: string, message: string, op
   if (chat.messages[chat.messages.length - 1]?.role !== "you") throw new Error("There is no question to answer.");
 
   const attached = opts.attached ? `# Note the learner attached: ${opts.attached.name}\n${opts.attached.text}\n\n` : "";
-  const input = `${attached}${chatForPrompt(chat)}\n\nReply to the learner's last message.\n`;
+  const input = `${attached}${askContext(chat, s.maxChatWords)}\n\nReply to the learner's last message.\n`;
   const model = modelFor(s, "chatModel");
   const res = await eng.call({ model, effort: s.effort || undefined, system: await eng.store.skill("ask.md"), input, onSpawn: opts.onSpawn }, s);
 
@@ -84,7 +110,8 @@ export async function askTurn(eng: Engine, chatPath: string, message: string, op
   // The chat is read again: the call can take a while, and the file is the record.
   const saved = await eng.store.loadChat(chatPath);
   saved.messages.push({ role: "tutor", text: reply });
-  if (header) Object.assign(saved.fm, { ask_kind: header.kind, goal: header.goal, first_step: header.firstStep });
+  // Only the first header that can be read sets the goal: a follow-up's header never replaces the opening one.
+  if (header && !fmStr(saved.fm, "ask_kind")) Object.assign(saved.fm, { ask_kind: header.kind, goal: header.goal, first_step: header.firstStep });
   await eng.store.saveChat(chatPath, saved);
   return {
     reply,

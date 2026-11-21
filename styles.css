@@ -710,8 +710,18 @@
   min-width: 0;
   text-align: left;
 }
-.study-tutor .st-empty .st-ask {
+.study-tutor .st-empty .st-ask,
+.study-tutor .st-empty .st-recent-asks {
   margin-top: var(--st-4);
+}
+.study-tutor .st-ask-wrap,
+.study-tutor .st-recent-asks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--st-3);
+  width: 100%;
+  min-width: 0;
+  text-align: left;
 }
 .study-tutor .st-ask-input {
   width: 100%;

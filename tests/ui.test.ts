@@ -148,7 +148,7 @@ test("home, study, review, topic page and graph work together from the normal en
   // Home suggests exactly what Adaptive study would do first (0.6): one diagnostic question, not a separate ranking.
   assert.match($(root, ".st-next").textContent, /Suggested next.*Diagnosis · Linear maps.*no evidence on Definition of a linear map yet, so one question finds your starting point.*Start: Diagnosis/s);
   assert.equal($(root, ".st-resume"), null, "nothing to resume yet");
-  assert.deepEqual($$(root, ".st-tile-label").map((e: any) => e.textContent), ["Adaptive study", "Learn", "Practise", "Review", "Ask", "Knowledge graph"]);
+  assert.deepEqual($$(root, ".st-tile-label").map((e: any) => e.textContent), ["Adaptive study", "Learn", "Practise", "Review", "Ask about this topic", "Knowledge graph"]);
   assert.match($(root, ".st-topics .st-row-item").textContent, /Linear maps0%.*2 concepts · 0 secured · practised not yet/s);
   assert.match($(root, ".st-recent").textContent, /Sessions you start will be listed here/);
   assert.equal($(root, ".st-topic-select").value, dir);
@@ -993,7 +993,7 @@ test("ask anything: with no topic, Home asks a question straight away, the study
   view.go("home");
   await view.reload();
   assert.equal(root.getAttribute("data-screen"), "home");
-  assert.deepEqual($$(root, ".st-tile-label").map((e: any) => e.textContent), ["Adaptive study", "Learn", "Practise", "Review", "Ask", "Knowledge graph"]);
+  assert.deepEqual($$(root, ".st-tile-label").map((e: any) => e.textContent), ["Adaptive study", "Learn", "Practise", "Review", "Ask about this topic", "Knowledge graph"]);
   assert.ok($$(root, ".st-tile").every((b: any) => !b.disabled), "a topic's tiles work");
   assert.ok(ask(), "the Ask anything box is there with a topic too");
   assert.match($(root, ".st-recent").textContent, /Sessions you start will be listed here/, "a free chat is not one of a topic's sessions");
@@ -1047,5 +1047,122 @@ test("ask anything: with a topic open, asking from Home opens a free chat, and A
   $$(root, ".st-tile")[0].click();
   await tick(40);
   assert.match(view.chatPath, /Topics\/.*\/chats\//, "Adaptive study starts a topic chat, never continues the free one");
+  await view.onClose();
+});
+
+async function askPlugin(): Promise<{ fs: MemFS; plugin: any; view: any; root: any; calls: any[] }> {
+  const fs = new MemFS();
+  const leaves: any[] = [];
+  let plugin: any = null;
+  const app = makeApp(fs, leaves, [], () => plugin);
+  plugin = new (StudyTutorPlugin as any)(app, { id: "study-tutor" }) as StudyTutorPlugin;
+  await plugin.onload();
+  await tick();
+  const calls: any[] = [];
+  plugin.engine.call = async (o: any) => {
+    calls.push(o);
+    return { text: `Reply ${calls.length}.`, usage: { input: 10, cacheRead: 0, cacheWrite: 0, output: 20, costUsd: 0, calls: 1 } };
+  };
+  const view: any = await plugin.activateView();
+  return { fs, plugin, view, root: view.contentEl, calls };
+}
+
+test("ask anything: Home lists recent questions with or without a topic, newest first, marks unanswered ones, reopens and deletes them", async () => {
+  const { fs, plugin, view, root } = await askPlugin();
+  const doc = (globalThis as any).document;
+  assert.equal($(root, ".st-recent-asks"), null, "no list before any question");
+  const older = await plugin.store.newAskChat("Why is the sky blue?", new Date(2026, 10, 20, 9, 0));
+  const chat = await plugin.store.loadChat(older);
+  chat.messages.push({ role: "you", text: "Why is the sky blue?" }, { role: "tutor", text: "Rayleigh scattering." });
+  await plugin.store.saveChat(older, chat);
+  const newer = await plugin.store.newAskChat("What is a cache line?", new Date(2026, 10, 21, 9, 0));
+  const open = await plugin.store.loadChat(newer);
+  open.messages.push({ role: "you", text: "What is a cache line?" });
+  await plugin.store.saveChat(newer, open);
+  assert.deepEqual((await plugin.store.recentAsks(8)).map((a: any) => [a.path, a.title, a.unanswered]), [[newer, "What is a cache line?", true], [older, "Why is the sky blue?", false]]);
+
+  view.go("graph");
+  view.go("home");
+  await tick(40);
+  const rows = () => $$(root, ".st-recent-asks .st-row-item");
+  assert.equal(rows().length, 2, "shown with no topic");
+  assert.match(rows()[0].textContent, /What is a cache line\?.*No reply yet/s);
+  assert.doesNotMatch(rows()[1].textContent, /No reply yet/);
+
+  // Reopening the unanswered one offers to get the reply.
+  $(rows()[0], ".st-row-main").click();
+  await tick(40);
+  assert.equal(root.getAttribute("data-screen"), "study");
+  assert.equal(view.chatPath, newer);
+  button(root, "Get the reply").click();
+  await tick(60);
+  assert.match($(root, ".st-messages").textContent, /Reply 1\./);
+
+  // With a topic, the list is still there.
+  const out = parseCompileOutput(COMPILED);
+  await plugin.store.saveCompiled({ title: "Linear maps", fm: { source: "notes", subject: out.subject, kind: "subject" }, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
+  await view.reload();
+  view.go("home");
+  await tick(40);
+  assert.equal(rows().length, 2, "shown with a topic too");
+  assert.doesNotMatch(rows()[0].textContent, /No reply yet/, "answered now");
+
+  // Delete asks first and moves the chat to the trash.
+  labelled(rows()[1], "Delete this question").click();
+  await tick();
+  doc.querySelector("button.mod-warning").click();
+  await tick(80);
+  assert.ok(!(await fs.exists(older)));
+  assert.equal(rows().length, 1);
+  await view.onClose();
+});
+
+test("ask anything: asking while a reply is being written keeps the question in the box and says why", async () => {
+  const { fs, view, root } = await askPlugin();
+  view.study.busy = true;
+  notices.length = 0;
+  const box = $(root, ".st-ask textarea");
+  box.value = "Keep me";
+  fire(box, "input");
+  button($(root, ".st-ask"), "Ask").click();
+  await tick(40);
+  assert.equal(root.getAttribute("data-screen"), "home");
+  assert.equal($(root, ".st-ask textarea").value, "Keep me", "the question stays in the box");
+  assert.ok(notices.some((n) => /Wait for the current reply/.test(n)), notices.join(" | "));
+  assert.equal([...fs.files.keys()].filter((k) => k.startsWith("Tutor/Ask/")).length, 0, "no chat is made");
+  view.study.busy = false;
+  await view.onClose();
+});
+
+test("ask anything: a failed call keeps the question, offers a retry, and the chat can be answered later", async () => {
+  const { fs, plugin, view, root, calls } = await askPlugin();
+  plugin.engine.call = async () => { throw new Error("usage limit reached"); };
+  $(root, ".st-ask textarea").value = "What is a cache line?";
+  button($(root, ".st-ask"), "Ask").click();
+  await tick(80);
+  assert.equal(root.getAttribute("data-screen"), "study");
+  assert.match($(root, ".st-notice.is-error").textContent, /That did not go through.*usage limit reached/s);
+  const path = [...fs.files.keys()].find((k) => k.startsWith("Tutor/Ask/"))!;
+  assert.match(await fs.read(path), /%%msg:you%%\n###### You\nWhat is a cache line\?/, "the question is saved");
+  assert.equal($(root, ".st-composer textarea").value, "", "the saved question is not put back in the box");
+  assert.equal($(root, ".st-send").textContent, "Send", "the composer is ready again");
+  assert.equal($(root, ".st-send").disabled, false);
+  assert.equal($$(root, ".st-msg").length, 1);
+
+  // Later, from Home: the question is marked unanswered, and reopening it offers the reply.
+  plugin.engine.call = async (o: any) => {
+    calls.push(o);
+    return { text: "A 64-byte block.", usage: { input: 1, cacheRead: 0, cacheWrite: 0, output: 1, costUsd: 0, calls: 1 } };
+  };
+  view.go("home");
+  await tick(40);
+  assert.match($(root, ".st-recent-asks").textContent, /No reply yet/);
+  $(root, ".st-recent-asks .st-row-main").click();
+  await tick(40);
+  assert.equal($(root, ".st-notice.is-error"), null, "the old error is not shown again");
+  button(root, "Get the reply").click();
+  await tick(60);
+  assert.match($(root, ".st-messages").textContent, /A 64-byte block\./);
+  assert.equal(calls.length, 1);
   await view.onClose();
 });

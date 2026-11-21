@@ -698,6 +698,23 @@ export class Store {
     return path;
   }
 
+  /** Free questions in the Ask folder, newest first: each one's title, and whether its last message is still unanswered. */
+  async recentAsks(limit = 8): Promise<{ path: string; title: string; stamp: string; unanswered: boolean }[]> {
+    if (!(await this.fs.exists(this.askDir))) return [];
+    const out: { path: string; title: string; stamp: string; unanswered: boolean }[] = [];
+    for (const path of (await this.fs.list(this.askDir)).files.filter((f) => f.endsWith(".md"))) {
+      try {
+        const chat = await this.loadChat(path);
+        if (fmStr(chat.fm, "mode") !== "ask" || !chat.messages.length) continue;
+        const m = /(\d{4}-\d{2}-\d{2} \d{4})/.exec(base(path));
+        out.push({ path, title: fmStr(chat.fm, "title") || base(path).replace(/\.md$/, ""), stamp: m ? m[1] : fmStr(chat.fm, "created"), unanswered: chat.messages[chat.messages.length - 1]?.role === "you" });
+      } catch {
+        /* an unreadable chat is skipped */
+      }
+    }
+    return out.sort((a, b) => (a.stamp < b.stamp ? 1 : a.stamp > b.stamp ? -1 : a.path < b.path ? 1 : -1)).slice(0, limit);
+  }
+
   /** Starts the next part of a chat: the summary replaces the old transcript and the last exchange is carried over. */
   async rotateChat(path: string, chat: Chat, summary: string): Promise<string> {
     const part = fmNum(chat.fm, "part", 1) + 1;
