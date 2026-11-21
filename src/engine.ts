@@ -39,6 +39,8 @@ import * as bankFns from "./engine-bank";
 import * as compileFns from "./engine-compile";
 import * as expansionFns from "./engine-expansion";
 import * as markFns from "./engine-marks";
+import * as probeFns from "./engine-probe";
+import { probeStatus as probeStatusOf, type ProbeStatus } from "./probe";
 
 // The types, helpers and rules that used to sit in this file are still exported from it.
 export * from "./engine-common";
@@ -260,6 +262,7 @@ export class Engine {
   async study(dir: string, chatPath: string, message: string, opts: TurnOpts = {}): Promise<TurnResult> {
     const s = this.settings();
     const chat = await this.store.loadChat(chatPath);
+    if (fmStr(chat.fm, "probe") === "yes") return probeFns.probeTurn(this, dir, chatPath, message, opts);
     const mode = (fmStr(chat.fm, "mode", "tutor") as Mode) || "tutor";
     const placing = fmStr(chat.fm, "placement") === "on";
     if (mode === "tutor" && s.codePlacement !== false && (!chat.messages.length || placing)) {
@@ -922,6 +925,17 @@ export class Engine {
   /** See `refresh` in engine-compile.ts. */
   refresh(...a: Rest<typeof compileFns.refresh>): ReturnType<typeof compileFns.refresh> {
     return compileFns.refresh(this, ...a);
+  }
+
+  /** See `startProbe` in engine-probe.ts. */
+  startProbe(...a: Rest<typeof probeFns.startProbe>): ReturnType<typeof probeFns.startProbe> {
+    return probeFns.startProbe(this, ...a);
+  }
+
+  /** Whether a cold probe is due for a topic, and how past probes went. Changes nothing. */
+  async probeStatus(dir: string): Promise<ProbeStatus> {
+    const state = await this.store.loadState(dir, this.settings().targetLevel);
+    return probeStatusOf(await this.store.loadSealed(dir), state, this.today(), (await this.store.loadTopic(dir)).examDate);
   }
 
   /** See `quizTurn` in engine-bank.ts. */

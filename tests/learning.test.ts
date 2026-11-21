@@ -1997,3 +1997,98 @@ test("bank marking: verdictText gives one verdict for bank and sealed answers", 
   assert.equal(verdictText(right, q, "partial", "").startsWith("**Partly right.**"), true);
   assert.equal(verdictText(right, q, "correct", "", "*Score so far: 1/5.*"), "**Correct.**\n\n*Score so far: 1/5.*");
 });
+
+// ---------- cold probes: running one ----------
+
+/** A topic with two level-3 concepts, a bank question for each, and a short sealed probe for each: 7 and 6. */
+async function probeRun(only = 2) {
+  const { PROBE_NO_HELP } = await import("../src/engine-probe");
+  const fs = new MemFS();
+  const store = new Store(fs, "Tutor", () => "2026-11-17");
+  const settings: any = { claudePath: "", chatModel: "sonnet", compileModel: "sonnet", utilityModel: "haiku", effort: "low", targetLevel: 4, maxChatWords: 600, maxTopicWords: 2000, singlePassWords: 6000, smartRouting: false, hardEffort: "high", bankQuiz: true, codePlacement: true };
+  const engine = new Engine(store, () => settings, () => "2026-11-17");
+  let calls = 0;
+  (engine as any).call = async () => { calls++; throw new Error("no model call expected"); };
+  const sec = (id: string, sub: number, task: string, q: string, a: string) => `### ${id}\nsubskill: ${sub}\ntype: short\ntask: ${task}\nquestion: ${q}\nanswer: ${a}\nexplanation: Add them.\n\n`;
+  const body = sec("Q1", 1, "application", "A cart starts at 3 m/s and speeds up at 2 m/s² for 4 s. What is its final speed in m/s?", "11")
+    + sec("Q2", 2, "application", "A lamp uses 60 W for 5 hours. How many watt-hours does it use?", "300")
+    + sec("Q3", 1, "probe", "Evaluate six plus one, written as a digit.", "7")
+    + (only > 1 ? sec("Q4", 2, "probe", "Evaluate ten minus four, written as a digit.", "6") : "");
+  const dir = await store.saveCompiled({ title: "Motion", fm: { subject: "none" }, topicBody: CARD(NAMES), questionsBody: body, target: 4 });
+  const state = await store.loadState(dir, 4);
+  for (const n of [1, 2]) {
+    state.levels[n] = 3;
+    for (const [k, day] of [["a", "2026-11-15"], ["b", "2026-11-16"]]) state.attempts.push(attempt({ id: `u${n}${k}`, skill: n, concept: state.concepts[n], timestamp: `${day}T10:00:00.000Z` }));
+  }
+  await store.saveState(dir, state);
+  return { store, engine, dir, fs, PROBE_NO_HELP, calls: () => calls };
+}
+
+test("cold probes: a probe asks sealed questions with no help, marks them by code and changes no level", async () => {
+  const { store, engine, dir, PROBE_NO_HELP, calls } = await probeRun(1);
+  const sealed = await store.loadSealed(dir);
+  assert.equal(sealed.length, 1);
+  const started = await engine.startProbe(dir);
+  assert.equal(started?.count, 1);
+  const chatPath = started!.chatPath;
+  const chat = await store.loadChat(chatPath);
+  assert.match(chat.messages[chat.messages.length - 1].text, /\*\*Cold probe\*\*/);
+  assert.equal(F.fmStr(chat.fm, "card"), sealed[0].id);
+  const before = (await store.loadState(dir, 4)).attempts.length;
+
+  for (const help of ["can I have a hint?", "show me a diagram"]) {
+    const r = await engine.study(dir, chatPath, help);
+    assert.equal(r.reply, PROBE_NO_HELP);
+    assert.equal(r.local, true);
+  }
+  assert.equal(calls(), 0);
+  assert.equal((await store.loadState(dir, 4)).attempts.length, before);
+
+  const r = await engine.study(dir, chatPath, "7");
+  assert.equal(calls(), 0);
+  assert.match(r.reply, /1\/1 right/);
+  assert.match(r.reply, /Levels are unchanged/);
+  const state = await store.loadState(dir, 4);
+  assert.equal(state.attempts.length, before + 1);
+  const a = state.attempts[state.attempts.length - 1];
+  assert.deepEqual([a.probe, a.result, a.grading, a.activity, a.taskType, a.questionId], [true, "correct", "deterministic", "probe", "transfer", sealed[0].id]);
+  assert.equal(state.levels[1], 3);
+  assert.equal(state.cards[sealed[0].id], undefined);
+  assert.deepEqual(state.misconceptions, []);
+  const done = await store.loadChat(chatPath);
+  assert.equal(F.fmStr(done.fm, "card"), "");
+  assert.equal(F.fmStr(done.fm, "probe_done"), "2026-11-17");
+  assert.equal(await engine.startProbe(dir), null, "nothing is left to ask that day");
+});
+
+test("cold probes: a probe left half done resumes with the next question and never asks an answered one again", async () => {
+  const { store, engine, dir, calls } = await probeRun(2);
+  const { chatPath, count } = (await engine.startProbe(dir))!;
+  assert.equal(count, 2);
+  const queue = F.fmList((await store.loadChat(chatPath)).fm, "probe_queue");
+  assert.equal(queue.length, 2);
+  const sealed = await store.loadSealed(dir);
+  const text = (id: string) => sealed.find((q) => q.id === id)!.question;
+  assert.equal(F.fmStr((await store.loadChat(chatPath)).fm, "card"), queue[0]);
+
+  const wrong = await engine.study(dir, chatPath, "99");
+  assert.match(wrong.reply, /\*\*Incorrect\.\*\*/);
+  assert.match(wrong.reply, /Answer: /, "the answer is shown after an attempt");
+  assert.ok(wrong.reply.includes(text(queue[1])), "the next question follows");
+  const resumed = await store.loadChat(chatPath);
+  assert.equal(F.fmStr(resumed.fm, "card"), queue[1]);
+  const again = await engine.study(dir, chatPath, "");
+  assert.ok(again.reply.includes(text(queue[1])) && !again.reply.includes(text(queue[0])));
+  assert.equal(again.local, true);
+  assert.equal((await store.loadState(dir, 4)).attempts.filter((a) => a.probe).length, 1, "asking again records nothing");
+
+  const second = queue[1] === sealed.find((q) => q.question.includes("ten minus"))?.id ? "6" : "7";
+  const last = await engine.study(dir, chatPath, second);
+  assert.match(last.reply, /1\/2 right/);
+  const state = await store.loadState(dir, 4);
+  assert.deepEqual(state.attempts.filter((a) => a.probe).map((a) => a.questionId).sort(), [...queue].sort());
+  assert.deepEqual([state.levels[1], state.levels[2]], [3, 3]);
+  assert.equal(calls(), 0);
+  const skipRun = await engine.study(dir, chatPath, "skip");
+  assert.match(skipRun.reply, /finished/);
+});
