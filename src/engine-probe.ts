@@ -18,10 +18,21 @@ export const PROBE_NO_HELP = "This is a cold probe, so there is no help until it
 /** Short messages naming help; a longer message is more likely an answer that happens to use the word. */
 const HELP_WORDS = /\b(hints?|clue|help|explain)\b/i;
 
-/** Starts a probe chat with the sealed questions that are ready, or returns null when there are none. */
+/**
+ * Starts a probe chat with the sealed questions that are ready, or returns null when there are none.
+ * A probe already under way on the topic, with a question still to answer, is returned instead of a second chat.
+ */
 export async function startProbe(eng: Engine, dir: string): Promise<{ chatPath: string; count: number } | null> {
   const state = await eng.store.loadState(dir, eng.settings().targetLevel);
-  const queue = probeQueue(await eng.store.loadSealed(dir), state, eng.today());
+  const sealed = await eng.store.loadSealed(dir);
+  const open = (await eng.store.recentChats(8, dir)).find((c) => c.openProbe);
+  if (open) {
+    const live = currentSealed(sealed, state);
+    const spent = spentSealed(live, state.attempts);
+    const left = fmList((await eng.store.loadChat(open.path)).fm, "probe_queue").filter((id) => live.some((q) => q.id === id) && !spent.has(id)).length;
+    if (left) return { chatPath: open.path, count: left };
+  }
+  const queue = probeQueue(sealed, state, eng.today());
   if (!queue.length) return null;
   const chatPath = await eng.store.newChat(dir, (await eng.store.loadTopic(dir)).title, "quiz");
   const chat = await eng.store.loadChat(chatPath);

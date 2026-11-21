@@ -92,6 +92,8 @@ export interface ChatRef {
   /** Where it was left: the open question, or the start of the last message. */
   snippet: string;
   action: string;
+  /** A cold probe with a question still open: not finished, and a sealed question asked. */
+  openProbe: boolean;
 }
 
 export interface ExternalPrereq {
@@ -736,11 +738,12 @@ export class Store {
     return out;
   }
 
-  /** The most recent chats across every topic, newest first. Only the last few files of each topic are read. */
-  async recentChats(limit = 8): Promise<ChatRef[]> {
+  /** The most recent chats across every topic, or only `dir`'s, newest first. Only the last few files of each topic are read. */
+  async recentChats(limit = 8, dir?: string): Promise<ChatRef[]> {
     const out: ChatRef[] = [];
     const flat = (t: string) => t.replace(/```[\s\S]*?(```|$)/g, " [code] ").replace(/[#*_>]+/g, "").replace(/\s+/g, " ").trim();
     for (const ref of await this.listTopics()) {
+      if (dir && ref.dir !== dir) continue;
       let files: string[] = [];
       try {
         files = (await this.listChats(ref.dir)).slice(-(limit + 4));
@@ -772,6 +775,7 @@ export class Store {
             unfinished: !!pending || !!fmStr(chat.fm, "card") || fmStr(chat.fm, "placement") === "on" || last?.role === "you" || (record.completedStep !== true && last?.role === "tutor" && /\?\s*$/.test(last.text.trim())),
             snippet: flat(pending || last?.text || chat.summary).slice(0, 180),
             action: typeof record.action === "string" ? record.action : "",
+            openProbe: fmStr(chat.fm, "probe") === "yes" && !fmStr(chat.fm, "probe_done") && !!fmStr(chat.fm, "card"),
           });
         } catch {
           /* an unreadable chat is skipped */

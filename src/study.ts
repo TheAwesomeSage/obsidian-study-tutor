@@ -574,7 +574,8 @@ export class StudyScreen implements Screen {
             const r = await v.plugin.engine.dispute(dir, a.id, v.chatPath ?? undefined);
             this.marked = r.attempt;
             this.changes = r.changes;
-            this.markedNote = "The mark no longer counts either way. " + (isBankId(a.questionId) ? "You can ask for a second opinion, or carry on." : "The tutor will look at your answer again on your next message.");
+            // A probe chat never calls the tutor, and a sealed question has no regrade: the next message answers the next question.
+            this.markedNote = a.probe ? "This answer no longer counts in the unseen-task score." : "The mark no longer counts either way. " + (isBankId(a.questionId) ? "You can ask for a second opinion, or carry on." : "The tutor will look at your answer again on your next message.");
             if (v.chatPath) v.chat = await v.plugin.store.loadChat(v.chatPath);
             await v.stateChanged(r.state);
           } catch (e) {

@@ -796,3 +796,101 @@ test("cold probes: the topic page shows the unseen-task score and starts a probe
   await tick();
   assert.equal($(root, ".st-probe-due"), null, "no card when nothing is due");
 });
+
+/** A topic with a sealed probe on each of its two concepts, both at level 3 with unaided successes before today. */
+async function probeReady(plugin: any): Promise<string> {
+  const out = parseCompileOutput(COMPILED);
+  const probes = "\n\n### Q4\nsubskill: 1\ntype: short\ntask: probe\nquestion: Does doubling every input of g(x) = 5x double every output? Answer yes or no.\nanswer: yes\nexplanation: g(2x) = 2g(x).\n\n"
+    + "### Q5\nsubskill: 2\ntype: short\ntask: probe\nquestion: How many vectors does an invertible 2 by 2 matrix send to zero?\nanswer: 1\nexplanation: Only the zero vector.\n";
+  const dir = await plugin.store.saveCompiled({ title: "Linear maps", fm: { source: "notes", subject: out.subject, kind: "subject" }, topicBody: out.topicBody, questionsBody: out.questionsBody + probes, target: 4 });
+  const state = await plugin.store.loadState(dir, 4);
+  for (const n of [1, 2]) {
+    state.levels[n] = 3;
+    for (const [k, day] of [["a", "2026-11-15"], ["b", "2026-11-16"]]) state.attempts.push({
+      v: 2, id: `u${n}${k}`, skill: n, concept: state.concepts[n], questionId: `q-${n}${k}`, question: `practice ${n}${k}`, answer: "a", activity: "independent-practice", mode: "quiz", difficulty: null,
+      result: "correct", errorType: "", note: "", confidence: null, assisted: false, assistance: [], answerExposed: false, transfer: false, seconds: null,
+      timestamp: `${day}T10:00:00.000Z`, grading: "deterministic", verification: "verified", assumptions: "",
+    });
+  }
+  await plugin.store.saveState(dir, state);
+  plugin.engine.today = () => "2026-11-17";
+  plugin.engine.call = async () => { throw new Error("no model call expected"); };
+  return dir;
+}
+
+test("cold probes: Practise never reopens a probe chat, and disputing a probe mark says it leaves the score instead of promising a tutor", async () => {
+  const fs = new MemFS();
+  const leaves: any[] = [];
+  let plugin: any = null;
+  const app = makeApp(fs, leaves, [], () => plugin);
+  plugin = new (StudyTutorPlugin as any)(app, { id: "study-tutor" }) as StudyTutorPlugin;
+  await plugin.onload();
+  await tick();
+  const dir = await probeReady(plugin);
+  const view: any = await plugin.activateView();
+  const root = view.contentEl;
+  await view.reload();
+  const sealed = await plugin.store.loadSealed(dir);
+  const answer = () => sealed.find((q: any) => q.id === view.chat.fm.card).answer;
+  const helpOn = () => {
+    assert.equal($(root, ".st-probe-banner"), null, "no probe banner");
+    const visual = $$(root, ".st-quick .st-btn").find((b: any) => b.textContent.trim() === "Visual");
+    assert.equal(visual.disabled, false, "help is offered");
+    assert.notEqual($$(root, ".st-quick .st-btn").find((b: any) => b.textContent.trim() === "Hint").getAttribute("title"), "No help during a cold probe");
+  };
+
+  await view.startProbe(dir);
+  await tick(60);
+  const probePath = view.chatPath;
+  assert.equal(view.chat.fm.probe, "yes");
+  await view.study.send(answer());
+  await tick(60);
+  assert.match($(root, ".st-feedback").textContent, /Marked correct/);
+
+  // Disputing a probe mark: the answer leaves the unseen-task score, and nothing says the tutor will look again.
+  button($(root, ".st-feedback"), "Dispute this mark").click();
+  await tick(60);
+  const note = $(root, ".st-feedback").textContent;
+  assert.match(note, /This answer no longer counts in the unseen-task score\./);
+  assert.doesNotMatch(note, /tutor will look/);
+  assert.equal($$(root, ".st-feedback button").some((b: any) => /Regrade/.test(b.textContent)), false, "no regrade for a sealed question");
+  const st = await plugin.engine.probeStatus(dir);
+  assert.equal(st.asked, 0, "the disputed answer is out of the score");
+  assert.equal((await plugin.store.loadState(dir, 4)).attempts.filter((a: any) => a.probe).length, 1, "it is still on record");
+
+  // Practise in the middle of a probe opens a normal chat with help.
+  view.go("home");
+  await tick();
+  button(root, "Practise").click();
+  await tick(60);
+  assert.notEqual(view.chatPath, probePath, "Practise does not resume the probe");
+  assert.equal(view.chat.fm.probe, undefined);
+  button(root, "Start quiz").click();
+  await tick(60);
+  assert.ok(view.chat.messages.length > 0);
+  helpOn();
+
+  // Back to the probe (starting one resumes it), finish it, then Practise again: a new normal chat, and the probe is no longer the topic's chat.
+  await view.startProbe(dir);
+  await tick(60);
+  assert.equal(view.chatPath, probePath);
+  await view.study.send(answer());
+  await tick(60);
+  assert.match(view.chat.messages[view.chat.messages.length - 1].text, /Cold probe finished/);
+  assert.equal(view.chat.fm.probe_done, "2026-11-17");
+  assert.notEqual(plugin.data.activeChat[dir], probePath, "a finished probe is not the topic's active chat");
+  view.go("home");
+  await tick();
+  button(root, "Practise").click();
+  await tick(60);
+  assert.notEqual(view.chatPath, probePath);
+  assert.equal(view.chat.fm.probe, undefined);
+  button(root, "Start quiz").click();
+  await tick(60);
+  helpOn();
+  // Reopening the topic does not pick the finished probe either, even when it is the only chat left.
+  for (const p of await plugin.store.listChats(dir)) if (p !== probePath) await view.deleteChat(p);
+  assert.deepEqual(await plugin.store.listChats(dir), [probePath]);
+  await view.reload();
+  assert.equal(view.chatPath, null);
+});

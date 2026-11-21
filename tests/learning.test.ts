@@ -2093,10 +2093,28 @@ test("cold probes: a probe left half done resumes with the next question and nev
   assert.match(skipRun.reply, /finished/);
 });
 
+test("cold probes: starting a probe while one is unfinished returns that chat instead of a second one", async () => {
+  const { store, engine, dir, calls } = await probeRun(2);
+  const a = (await engine.startProbe(dir))!;
+  const again = (await engine.startProbe(dir))!;
+  assert.deepEqual([again.chatPath, again.count], [a.chatPath, 2]);
+  assert.equal((await store.listChats(dir)).length, 1, "no second chat is made");
+  await engine.study(dir, a.chatPath, "99");
+  const resumed = (await engine.startProbe(dir))!;
+  assert.deepEqual([resumed.chatPath, resumed.count], [a.chatPath, 1], "the same chat, with one question left");
+  assert.equal((await store.loadChat(a.chatPath)).messages.filter((m) => m.role === "tutor").length, 2, "resuming adds nothing to the chat");
+  await engine.study(dir, a.chatPath, "skip");
+  assert.ok(F.fmStr((await store.loadChat(a.chatPath)).fm, "probe_done"));
+  assert.equal(await engine.startProbe(dir), null, "a finished probe is not resumed, and nothing else is left to ask");
+  assert.equal(calls(), 0);
+});
+
 test("cold probes: a question answered in one probe chat is not recorded again from another", async () => {
   const { store, engine, dir, calls } = await probeRun(1);
   const a = (await engine.startProbe(dir))!;
-  const b = (await engine.startProbe(dir))!;
+  // A second chat on the same questions, as an earlier version could start one.
+  const b = { chatPath: await store.newChat(dir, "Motion", "quiz") };
+  await store.saveChat(b.chatPath, await store.loadChat(a.chatPath));
   assert.notEqual(a.chatPath, b.chatPath);
   const sealed = (await store.loadSealed(dir))[0];
   await engine.study(dir, a.chatPath, "7");
