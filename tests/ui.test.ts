@@ -1310,6 +1310,11 @@ test("outcome check: the topic page offers it under the outcome, the check has n
   assert.match($(root, ".st-composer textarea").getAttribute("placeholder"), /^Your answer to the task/);
   $(root, ".st-composer textarea").value = "If T(u)=T(v) then T(u-v)=0, so u-v is in the kernel {0} and u=v.";
   button(root, "Send").click();
+  await tick(60);
+  assert.equal(calls.length, 0, "an answer is not marked until mark");
+  assert.equal($$(root, "button").filter((b: any) => /^Continue/.test(b.textContent.trim())).length, 0, "no Continue in a check");
+  $(root, ".st-composer textarea").value = "mark";
+  button(root, "Send").click();
   await tick(80);
   assert.equal(calls.length, 1);
   assert.match($(root, ".st-messages").textContent, /Outcome check marked:\*\* 1 of 1 met/);

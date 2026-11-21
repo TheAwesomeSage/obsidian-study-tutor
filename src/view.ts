@@ -264,8 +264,8 @@ export class TutorView extends ItemView {
     if (this.free) return;
     const m = fmStr(this.chat.fm, "mode", "tutor") as Mode;
     this.mode = MODE_INFO.some((p) => p.mode === m) ? m : "tutor";
-    // A finished cold probe can be reread, but it is no longer the topic's chat.
-    const done = !!fmStr(this.chat.fm, "probe_done");
+    // A finished cold probe or outcome check can be reread, but it is no longer the topic's chat.
+    const done = !!fmStr(this.chat.fm, "probe_done") || !!fmStr(this.chat.fm, "assess_done");
     if (done && this.dir && this.plugin.data.activeChat[this.dir] === path) {
       delete this.plugin.data.activeChat[this.dir];
       await this.plugin.save();

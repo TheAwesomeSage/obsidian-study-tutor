@@ -499,7 +499,7 @@ export class StudyScreen implements Screen {
       const box = tail.createDiv({ cls: "st-notice" });
       box.createSpan({ text: "This message has not been answered yet." });
       button(box, { label: "Get the reply", icon: "refresh-cw", onClick: () => void this.send("") });
-    } else if (v.mode !== "expert" && lastMsg?.role === "tutor" && !this.openQuestionText() && !fmStr(chat.fm, "card")) {
+    } else if (v.mode !== "expert" && !assess && lastMsg?.role === "tutor" && !this.openQuestionText() && !fmStr(chat.fm, "card")) {
       button(tail, { label: "Continue", icon: "arrow-right", tone: fmStr(chat.fm, "await_continue") === "yes" || /^\*\*Placement done|\n\*\*Placement done/.test(lastMsg.text) ? "primary" : "secondary", cls: "st-continue", onClick: () => void this.send("") });
     }
   }

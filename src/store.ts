@@ -444,11 +444,15 @@ export class Store {
     return out;
   }
 
+  /**
+   * Adds an outcome check to the log. The records sit in a fenced block, so a view of the note never
+   * renders the assessor's text; a backtick inside a record is written as a JSON escape so it cannot close the fence.
+   */
   async appendAssessment(dir: string, a: Assessment): Promise<void> {
-    const p = this.assessmentsPath(dir);
+    const lines = [...(await this.loadAssessments(dir)), a].map((r) => JSON.stringify(r).replace(/`/g, "\\u0060"));
     const head = withFrontmatter({ tutor: "assessments" }, "Outcome checks: the course's outcome task, attempted unaided and marked by a separate assessor that saw only the task and the answer. One record per line. These never change a level.\n");
-    const old = (await this.fs.exists(p)) ? await this.fs.read(p) : head;
-    await this.writeFile(p, `${old.replace(/\n*$/, "\n")}${JSON.stringify(a)}\n`);
+    const fence = "`".repeat(4);
+    await this.writeFile(this.assessmentsPath(dir), `${head}\n${fence}jsonl\n${lines.join("\n")}\n${fence}\n`);
   }
 
   /** The sealed (cold probe) questions, each with its concept. Not part of the bank: nothing practises or reviews them. */
