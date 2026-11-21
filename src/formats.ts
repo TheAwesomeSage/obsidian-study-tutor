@@ -1039,12 +1039,15 @@ export function serializeChat(c: Chat): string {
 
 export const chatWords = (c: Chat): number => c.messages.reduce((a, m) => a + words(m.text), 0);
 
+/** One message as a prompt line: `LEARNER:` or `TUTOR:` and its text. */
+export const chatLine = (m: Chat["messages"][number]): string => `${m.role === "you" ? "LEARNER" : "TUTOR"}: ${m.text.trim()}`;
+
 export function chatForPrompt(c: Chat): string {
   const out: string[] = [];
   if (c.summary.trim()) out.push("## Summary of earlier parts", c.summary.trim(), "");
   if (c.messages.length) {
     out.push("## Messages");
-    for (const m of c.messages) out.push(`${m.role === "you" ? "LEARNER" : "TUTOR"}: ${m.text.trim()}`, "");
+    for (const m of c.messages) out.push(chatLine(m), "");
   }
   return out.join("\n").trim();
 }

@@ -6,7 +6,7 @@
 
 import type { Usage } from "./claude";
 import { modelFor } from "./model-provider";
-import { Chat, fmStr, words } from "./formats";
+import { Chat, chatLine, fmStr, words } from "./formats";
 import { neutraliseRemote } from "./safemd";
 import type { TurnOpts } from "./engine-common";
 import type { Engine } from "./engine";
@@ -66,7 +66,6 @@ export function readAskHeader(raw: string): { text: string; header: { kind: AskK
  */
 export function askContext(chat: Chat, maxWords: number): string {
   const msgs = chat.messages;
-  const line = (m: Chat["messages"][number]) => `${m.role === "you" ? "LEARNER" : "TUTOR"}: ${m.text.trim()}`;
   if (!msgs.length) return "";
   const kept: number[] = [];
   let used = words(msgs[0].text);
@@ -77,9 +76,9 @@ export function askContext(chat: Chat, maxWords: number): string {
     used += w;
   }
   const omitted = msgs.length - 1 - kept.length;
-  const out = ["## Messages", line(msgs[0]), ""];
+  const out = ["## Messages", chatLine(msgs[0]), ""];
   if (omitted > 0) out.push(`[${omitted} earlier message${omitted === 1 ? "" : "s"} omitted]`, "");
-  for (const i of kept) out.push(line(msgs[i]), "");
+  for (const i of kept) out.push(chatLine(msgs[i]), "");
   return out.join("\n").trim();
 }
 

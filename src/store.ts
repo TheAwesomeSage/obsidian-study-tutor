@@ -113,6 +113,8 @@ export interface ExternalPrereq {
 const FIRST_RELEASE: Record<string, string> = { "core.md": "c8e78aa5", "mode-tutor.md": "bd93508", "mode-quiz.md": "29a50213", "compile.md": "4c586797" };
 
 const base = (p: string): string => p.split("/").pop() ?? p;
+/** The sortable `YYYY-MM-DD HHmm` stamp a chat file name starts with, or "" if it has none. */
+const stampOf = (p: string): string => /(\d{4}-\d{2}-\d{2} \d{4})/.exec(base(p))?.[1] ?? "";
 const safeName = (s: string): string => s.replace(/[\\/:*?"<>|#^[\]]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "Topic";
 
 const EVIDENCE_HEAD = "Every answer Study Tutor has marked on this topic and every change of level, one record per line.\nThis is the evidence behind the levels in state.md. Edit it only if you know what you are changing.";
@@ -712,8 +714,7 @@ export class Store {
       try {
         const chat = await this.loadChat(path);
         if (fmStr(chat.fm, "mode") !== "ask" || !chat.messages.length) continue;
-        const m = /(\d{4}-\d{2}-\d{2} \d{4})/.exec(base(path));
-        out.push({ path, title: fmStr(chat.fm, "title") || base(path).replace(/\.md$/, ""), stamp: m ? m[1] : fmStr(chat.fm, "created"), unanswered: chat.messages[chat.messages.length - 1]?.role === "you" });
+        out.push({ path, title: fmStr(chat.fm, "title") || base(path).replace(/\.md$/, ""), stamp: stampOf(path) || fmStr(chat.fm, "created"), unanswered: chat.messages[chat.messages.length - 1]?.role === "you" });
       } catch {
         /* an unreadable chat is skipped */
       }
@@ -822,13 +823,12 @@ export class Store {
             record = {};
           }
           const pending = typeof record.pendingQuestion === "string" ? record.pendingQuestion : "";
-          const m = /(\d{4}-\d{2}-\d{2} \d{4})/.exec(base(path));
           out.push({
             path,
             dir: ref.dir,
             topic: ref.title,
             mode: (fmStr(chat.fm, "mode", "tutor") as Mode) || "tutor",
-            stamp: m ? m[1] : fmStr(chat.fm, "created"),
+            stamp: stampOf(path) || fmStr(chat.fm, "created"),
             part: fmNum(chat.fm, "part", 1),
             messages: chat.messages.length,
             unfinished: !!pending || !!fmStr(chat.fm, "card") || fmStr(chat.fm, "placement") === "on" || last?.role === "you" || (record.completedStep !== true && last?.role === "tutor" && /\?\s*$/.test(last.text.trim())),
