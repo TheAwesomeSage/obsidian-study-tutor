@@ -2092,3 +2092,60 @@ test("cold probes: a probe left half done resumes with the next question and nev
   const skipRun = await engine.study(dir, chatPath, "skip");
   assert.match(skipRun.reply, /finished/);
 });
+
+test("cold probes: a question answered in one probe chat is not recorded again from another", async () => {
+  const { store, engine, dir, calls } = await probeRun(1);
+  const a = (await engine.startProbe(dir))!;
+  const b = (await engine.startProbe(dir))!;
+  assert.notEqual(a.chatPath, b.chatPath);
+  const sealed = (await store.loadSealed(dir))[0];
+  await engine.study(dir, a.chatPath, "7");
+  const before = (await store.loadState(dir, 4)).attempts.filter((x) => x.probe).length;
+  assert.equal(before, 1);
+  const r = await engine.study(dir, b.chatPath, "7");
+  assert.ok(!r.reply.includes(sealed.question), "the answered question is not asked again");
+  assert.match(r.reply, /Cold probe finished/);
+  assert.equal((await store.loadState(dir, 4)).attempts.filter((x) => x.probe).length, 1);
+  assert.equal(calls(), 0);
+});
+
+test("cold probes: plain help requests are refused locally while a bare answer is still marked", async () => {
+  const { store, engine, dir, PROBE_NO_HELP, calls } = await probeRun(1);
+  const { chatPath } = (await engine.startProbe(dir))!;
+  for (const help of ["give me a hint", "I need help", "please explain"]) assert.equal((await engine.study(dir, chatPath, help)).reply, PROBE_NO_HELP);
+  assert.equal(calls(), 0);
+  assert.equal((await store.loadState(dir, 4)).attempts.filter((x) => x.probe).length, 0);
+  assert.match((await engine.study(dir, chatPath, "7")).reply, /1\/1 right/);
+});
+
+test("cold probes: skip while a question is open records a skipped attempt and moves on", async () => {
+  const { store, engine, dir, calls } = await probeRun(2);
+  const { chatPath } = (await engine.startProbe(dir))!;
+  const r = await engine.study(dir, chatPath, "skip");
+  assert.match(r.reply, /\*\*Skipped\.\*\*/);
+  let probes = (await store.loadState(dir, 4)).attempts.filter((x) => x.probe);
+  assert.deepEqual(probes.map((x) => x.result), ["skipped"]);
+  assert.ok(F.fmStr((await store.loadChat(chatPath)).fm, "card"), "the next question is open");
+  const last = await engine.study(dir, chatPath, "skip");
+  assert.match(last.reply, /0\/2 right/);
+  probes = (await store.loadState(dir, 4)).attempts.filter((x) => x.probe);
+  assert.deepEqual(probes.map((x) => x.result), ["skipped", "skipped"]);
+  assert.equal(calls(), 0);
+});
+
+test("cold probes: a recompile that retires the open question's concept moves the probe on and records nothing for it", async () => {
+  const { store, engine, dir, calls } = await probeRun(2);
+  const { chatPath } = (await engine.startProbe(dir))!;
+  const chat = await store.loadChat(chatPath);
+  const open = F.fmStr(chat.fm, "card");
+  const sealed = await store.loadSealed(dir);
+  const concept = sealed.find((q) => q.id === open)!.concept!;
+  const fs = (store as any).fs as MemFS;
+  await fs.write(`${dir}/sealed.md`, (await fs.read(`${dir}/sealed.md`)).split(concept).join("retired-concept"));
+  assert.ok((await engine.store.loadSealed(dir)).some((q) => q.id !== open));
+  const r = await engine.study(dir, chatPath, "7");
+  assert.equal((await store.loadState(dir, 4)).attempts.filter((x) => x.probe).length, 0, "nothing recorded for the retired question");
+  assert.notEqual(F.fmStr((await store.loadChat(chatPath)).fm, "card"), open);
+  assert.ok(r.reply.length > 0);
+  assert.equal(calls(), 0);
+});

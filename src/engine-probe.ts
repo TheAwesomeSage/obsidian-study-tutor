@@ -15,6 +15,9 @@ import type { Engine } from "./engine";
 
 export const PROBE_NO_HELP = "This is a cold probe, so there is no help until it ends. Answer as best you can, or say **skip**.";
 
+/** Short messages naming help; a longer message is more likely an answer that happens to use the word. */
+const HELP_WORDS = /\b(hints?|clue|help|explain)\b/i;
+
 /** Starts a probe chat with the sealed questions that are ready, or returns null when there are none. */
 export async function startProbe(eng: Engine, dir: string): Promise<{ chatPath: string; count: number } | null> {
   const state = await eng.store.loadState(dir, eng.settings().targetLevel);
@@ -49,12 +52,12 @@ export async function probeTurn(eng: Engine, dir: string, chatPath: string, mess
 
   if (fmStr(chat.fm, "probe_done")) return say("This cold probe is finished. Start another from the topic page when one is due.");
   // A recompile can retire the open question; the probe goes on with the next one that is left.
-  if (!pending) return advance("");
+  if (!pending || spentSealed(sealed, state.attempts).has(pending.id)) return advance("");
 
   const answer = text || (last?.role === "you" ? last.text : "");
   if (!answer) return say(formatQuizQuestion(pending, state));
   // A question or a request for a visual is help, and a cold probe gives none. A block of code for a code question is an answer.
-  if ((looksLikeQuestion(answer) || readPresentationRequest(answer)) && !givesUp(answer) && !(pending.code && sentAsCode(answer))) {
+  if ((looksLikeQuestion(answer) || readPresentationRequest(answer) || (answer.length < 60 && HELP_WORDS.test(answer))) && !givesUp(answer) && !(pending.code && sentAsCode(answer))) {
     if (text) chat.messages.push({ role: "you", text });
     return say(PROBE_NO_HELP);
   }
