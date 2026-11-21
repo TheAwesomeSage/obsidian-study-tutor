@@ -1303,4 +1303,9 @@ test("grow a question into a course: the seed names the goal, the opening questi
   const long = askCourseSeed({ fm: { mode: "ask", goal: "Learn ![x](https://host.example/a.png) queues", first_step: "x".repeat(400) }, summary: "", messages: [{ role: "you", text: "q ".repeat(500) }] } as any);
   assert.ok(!long.goal.includes("!["), "a remote picture cannot load from the goal");
   assert.ok(long.goal.length <= SEED_GOAL_CHARS);
+  // A long question gives way: the goal and the first step are never cut.
+  const tight = askCourseSeed({ fm: { mode: "ask", goal: "g".repeat(200), first_step: "Begin with locks and atomics" }, summary: "", messages: [{ role: "you", text: "word ".repeat(200) }] } as any);
+  assert.ok(tight.goal.length <= SEED_GOAL_CHARS);
+  assert.ok(tight.goal.endsWith("Start with: Begin with locks and atomics."), tight.goal);
+  assert.ok(tight.goal.startsWith("g".repeat(200)));
 });

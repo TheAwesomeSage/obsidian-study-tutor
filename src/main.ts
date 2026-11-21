@@ -431,13 +431,14 @@ export default class StudyTutorPlugin extends Plugin {
     return this.runCompilation(async (signal, progress) => {
       progress("Gathering notes…");
       const g = await this.gather(p.kind, p.folder, p.sources);
-      const fm = p.fromAsk ? { ...g.fm, from_ask: p.fromAsk } : g.fm;
+      const origin = p.fromAsk ?? (p.existingDir ? fmStr((await this.store.loadTopic(p.existingDir).catch(() => null))?.fm ?? {}, "from_ask") : "");
+      const fm = origin ? { ...g.fm, from_ask: origin } : g.fm;
       const req = { title: p.title, mode: g.mode, goal: p.goal, material: g.material, fm, existingDir: p.existingDir, research: p.research, truncated: g.truncated, signal };
       const res = await (p.existingDir && !g.truncated ? this.engine.refresh({ ...req, existingDir: p.existingDir }, progress) : this.engine.compile(req, progress));
       // The free chat it grew from can open the course from now on. A chat deleted meanwhile changes nothing.
       if (p.fromAsk) await this.engine.linkAskCourse(p.fromAsk, res.dir).catch(() => undefined);
       return res;
-    });
+    }, p.fromAsk);
   }
 
   async compileExpansion(request: ExpansionRequest, existingDir?: string): Promise<CompileResult | null> {
@@ -448,7 +449,8 @@ export default class StudyTutorPlugin extends Plugin {
     });
   }
 
-  private async runCompilation(run: (signal: AbortSignal, progress: (msg: string) => void) => Promise<CompileResult>): Promise<CompileResult | null> {
+  /** `keepChat`: the free chat a course grew from. If it is still open, it stays open when the compile ends. */
+  private async runCompilation(run: (signal: AbortSignal, progress: (msg: string) => void) => Promise<CompileResult>, keepChat?: string): Promise<CompileResult | null> {
     if (this.activeCompile) {
       new Notice("Study Tutor: a compilation is already running.");
       return null;
@@ -488,7 +490,8 @@ export default class StudyTutorPlugin extends Plugin {
       // Keep the flashcard note in step with the new question bank; existing schedules are kept.
       if (this.usesSr()) await this.store.exportFlashcards(res.dir);
       const view = await this.activateView();
-      await view?.reload();
+      if (view && keepChat && view.chatPath === keepChat) await view.refreshAround(keepChat);
+      else await view?.reload();
       return res;
     } catch (e) {
       notice.hide();

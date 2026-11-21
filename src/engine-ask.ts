@@ -95,9 +95,12 @@ export function askCourseSeed(chat: Chat): { title: string; goal: string } {
   const first = chat.messages.find((m) => m.role === "you")?.text ?? "";
   const goal = oneLine(fmStr(chat.fm, "goal"), 200);
   const step = oneLine(fmStr(chat.fm, "first_step"), 200);
-  const asked = oneLine(first, 300);
   const title = askTitle(neutraliseRemote(goal || first || fmStr(chat.fm, "title")));
-  const parts = [goal || asked, goal && asked && asked !== goal ? `The learner first asked: "${asked}"` : "", step ? `Start with: ${step}` : ""].filter(Boolean);
+  const stepPart = step ? `Start with: ${step}` : "";
+  // The opening question gets the room the goal and the first step leave, so neither is ever cut.
+  const room = SEED_GOAL_CHARS - goal.length - stepPart.length - 40;
+  const asked = oneLine(first, Math.max(0, goal ? room : room + 40));
+  const parts = [goal || asked, goal && asked && asked !== goal ? `The learner first asked: "${asked}"` : "", stepPart].filter(Boolean);
   return { title, goal: parts.map((x) => (/[.?!]$/.test(x) ? x : `${x}.`)).join(" ").slice(0, SEED_GOAL_CHARS) };
 }
 

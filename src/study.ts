@@ -796,7 +796,7 @@ export class StudyScreen implements Screen {
     const broad = fmStr(chat.fm, "ask_kind") === "broad";
     const step = fmStr(chat.fm, "first_step");
     const box = tail.createDiv({ cls: "st-notice st-ask-course" });
-    if (broad) box.createSpan({ text: step ? `This is worth learning properly. A course would plan it step by step and start with ${step}.` : "This is worth learning properly. A course would plan it step by step." });
+    if (broad) box.createSpan({ text: step ? `This is worth learning properly. A course would plan it step by step, starting with: ${step.replace(/[.\s]+$/, "")}.` : "This is worth learning properly. A course would plan it step by step." });
     const seed = askCourseSeed(chat);
     button(box, { label: "Make this a course", icon: "graduation-cap", tone: broad ? "primary" : undefined, onClick: () => v.chatPath && v.plugin.openNewTopic({ ...seed, fromAsk: v.chatPath }) });
   }

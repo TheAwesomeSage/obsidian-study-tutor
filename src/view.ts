@@ -153,6 +153,23 @@ export class TutorView extends ItemView {
     this.show(this.screen);
   }
 
+  /**
+   * Re-reads the topic list and progress while a free chat stays open, for example when a course it
+   * grew into has just been compiled. A reply still being written is left alone; the chat is
+   * reread only when none is.
+   */
+  async refreshAround(chatPath: string): Promise<void> {
+    try {
+      this.topics = await this.plugin.store.listTopics();
+    } catch {
+      this.topics = [];
+    }
+    await this.loadOverview();
+    if (this.chatPath === chatPath && !this.study.busy) await this.openChat(chatPath).catch(() => undefined);
+    this.renderNav();
+    await this.mounted?.refresh?.();
+  }
+
   /** Progress for every topic and the recent chats. One topic that cannot be read does not hide the others. */
   async loadOverview(): Promise<void> {
     const store = this.plugin.store;

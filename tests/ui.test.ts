@@ -1186,7 +1186,7 @@ test("ask anything: Home will not delete a question while its reply is being wri
   view.study.busy = false;
   await view.onClose();
 });
-test("grow a question into a course: a broad reply offers Make this a course with the seed, compiling links the chat, and the chat then opens the course", async () => {
+test("grow a question into a course: a broad reply offers Make this a course, the dialog is filled in, compiling links the chat and keeps it open, and the chat then opens the course", async () => {
   const fs = new MemFS();
   const leaves: any[] = [];
   let plugin: any = null;
@@ -1200,44 +1200,72 @@ test("grow a question into a course: a broad reply offers Make this a course wit
   ];
   let n = 0;
   plugin.engine.call = async () => ({ text: replies[n++] ?? "ok", usage: { input: 1, cacheRead: 0, cacheWrite: 0, output: 1, costUsd: 0, calls: 1 } });
-  const seeds: any[] = [];
-  plugin.openNewTopic = (seed: any) => seeds.push(seed);
+  const reqs: any[] = [];
+  let fail = true;
+  plugin.engine.compile = async (req: any) => {
+    reqs.push(req);
+    if (fail) throw new Error("the model is unavailable");
+    const out = parseCompileOutput(COMPILED);
+    const dir = await plugin.store.saveCompiled({ title: req.title, fm: { source: req.mode, subject: out.subject, goal: req.goal, ...req.fm }, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
+    return { dir, subskills: 1, questions: 1, usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, costUsd: 0, calls: 0 }, agents: 0 };
+  };
 
   const view: any = await plugin.activateView();
   const root = view.contentEl;
   $(root, ".st-ask textarea").value = "Teach me concurrency for my interview";
   button($(root, ".st-ask"), "Ask").click();
   await tick(80);
+  const chatPath = view.chatPath;
   const offer = $(root, ".st-ask-course");
   assert.ok(offer, "a broad reply offers a course");
-  assert.match(offer.textContent, /start with Data races/);
+  assert.match(offer.textContent, /starting with: Data races\./);
   const make = button(offer, "Make this a course");
-  assert.ok(make.classList.contains("mod-cta") || make.className.includes("primary"), "a broad goal makes it the main next step");
-  make.click();
-  const chatPath = view.chatPath;
-  assert.deepEqual(seeds, [{ title: "Defend a concurrent queue in an interview", goal: 'Defend a concurrent queue in an interview. The learner first asked: "Teach me concurrency for my interview". Start with: Data races.', fromAsk: chatPath }]);
+  assert.ok(make.classList.contains("mod-cta"), "a broad goal makes it the main next step");
 
-  // Compiling with the seed records where the course came from and links the chat to it.
-  plugin.engine.compile = async (req: any) => {
-    const out = parseCompileOutput(COMPILED);
-    const dir = await plugin.store.saveCompiled({ title: req.title, fm: { source: req.mode, subject: out.subject, goal: req.goal, ...req.fm }, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
-    return { dir, subskills: 1, questions: 1, usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, costUsd: 0, calls: 0 }, agents: 0 };
+  // The real dialog opens with the seed filled in and teaches the subject by default.
+  const dialog = () => [...root.ownerDocument.body.children].filter((e: any) => e.querySelector?.(".setting-item")).pop() as any;
+  const fill = () => {
+    make.click();
+    const d = dialog();
+    const inputs = $$(d, "input:not([type=checkbox])");
+    return { d, title: inputs[0].value, goal: inputs[2].value, kind: $(d, "select").value, research: $(d, "input[type=checkbox]").checked };
   };
-  const res = await plugin.compileTopic({ title: seeds[0].title, kind: "subject", folder: "", goal: seeds[0].goal, fromAsk: chatPath });
-  assert.ok(res, "the course compiled");
-  const topic = await plugin.store.loadTopic(res.dir);
-  assert.equal(topic.fm.from_ask, chatPath);
-  assert.equal(topic.fm.goal, seeds[0].goal);
-  assert.equal((await plugin.store.loadChat(chatPath)).fm.course, res.dir);
+  let f = fill();
+  assert.equal(f.title, "Defend a concurrent queue in an interview");
+  assert.equal(f.goal, 'Defend a concurrent queue in an interview. The learner first asked: "Teach me concurrency for my interview". Start with: Data races.');
+  assert.equal(f.kind, "subject");
+  assert.equal(f.research, true, "with no notes, research is offered as for any subject topic");
 
-  // Back in the free chat, the offer is now to open the course.
-  await view.openAsk(chatPath);
-  await tick(40);
+  // A failed compile links nothing, and the chat stays open.
+  button(f.d, "Compile").click();
+  await tick(60);
+  assert.equal(reqs.length, 1);
+  assert.equal(reqs[0].fm.from_ask, chatPath);
+  assert.equal((await plugin.store.loadChat(chatPath)).fm.course, undefined);
+
+  // A compile that works links the chat, and the open chat now offers the course without leaving it.
+  fail = false;
+  f = fill();
+  button(f.d, "Compile").click();
+  await tick(80);
+  const [dir] = (await plugin.store.listTopics()).map((t: any) => t.dir);
+  assert.equal((await plugin.store.loadTopic(dir)).fm.from_ask, chatPath);
+  assert.equal((await plugin.store.loadChat(chatPath)).fm.course, dir);
+  assert.equal(root.getAttribute("data-screen"), "study", "the learner is not pulled out of the chat");
+  assert.equal(view.chatPath, chatPath);
   assert.match($(root, ".st-ask-course").textContent, /This question has a course/);
   button($(root, ".st-ask-course"), "Open the course").click();
   await tick(60);
   assert.equal(root.getAttribute("data-screen"), "topic");
-  assert.equal(view.dir, res.dir);
+  assert.equal(view.dir, dir);
+
+  // A link to a topic that is gone offers to make the course again.
+  const chat = await plugin.store.loadChat(chatPath);
+  chat.fm.course = "Tutor/Topics/Gone";
+  await plugin.store.saveChat(chatPath, chat);
+  await view.openAsk(chatPath);
+  await tick(40);
+  assert.ok(button($(root, ".st-ask-course"), "Make this a course"));
 
   // A narrow question gets a quiet button and no pitch.
   view.go("home");
@@ -1247,6 +1275,6 @@ test("grow a question into a course: a broad reply offers Make this a course wit
   await tick(80);
   const quiet = $(root, ".st-ask-course");
   assert.doesNotMatch(quiet.textContent, /worth learning properly/);
-  assert.ok(button(quiet, "Make this a course"));
+  assert.ok(!button(quiet, "Make this a course").classList.contains("mod-cta"));
   await view.onClose();
 });
