@@ -620,7 +620,8 @@ test("saved courses reopen, unchanged refresh costs nothing, and expansion leave
  */
 const PROBE_TEXT = "A tap fills a 12 litre bucket at 3 litres a minute. How many minutes does it take?";
 function probing(auditProbe = true): Model {
-  const call = fake({ audit: (input: any, reply: any) => ({ rows: reply.rows.map((r: any) => ({ ...r, questions: input.questions.filter((q: any) => auditProbe || q.task !== "probe").map((q: any) => q.id) })) }) });
+  // The stub lists only ids the audit input names for a lesson, so a probe left out of that input is dropped.
+  const call = fake({ audit: (input: any, reply: any) => { const listed = new Set(input.lessons.flatMap((l: any) => [...l.questions, ...(l.probes ?? [])])); return { rows: reply.rows.map((r: any) => ({ ...r, questions: input.questions.filter((q: any) => (auditProbe || q.task !== "probe") && listed.has(q.id)).map((q: any) => q.id) })) }; } });
   return async o => {
     const r = await call(o);
     const units = (r.structured as { units?: any[] } | undefined)?.units;

@@ -866,6 +866,8 @@ test("cold probes: Practise never reopens a probe chat, and disputing a probe ma
   await view.study.send(answer());
   await tick(60);
   assert.match($(root, ".st-feedback").textContent, /Marked correct/);
+  assert.match($(root, ".st-feedback").textContent, /This counts toward the unseen-task score only\./);
+  assert.doesNotMatch($(root, ".st-feedback").textContent, /unaided evidence/, "a probe answer is not called evidence for a level");
 
   // Disputing a probe mark: the answer leaves the unseen-task score, and nothing says the tutor will look again.
   button($(root, ".st-feedback"), "Dispute this mark").click();

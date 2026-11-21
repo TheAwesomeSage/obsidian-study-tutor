@@ -6,6 +6,7 @@ What changed in each version of Study Tutor, newest first.
 
 - **Cold probes measure transfer to unseen work.** The compile now writes one extra question per lesson to `sealed.md`, kept out of the question bank, flashcards and review so they stay unseen. A cold probe asks up to six of them with no help; the topic page shows the unseen-task score (after 3 answers) and tags a concept "not transferring" when its latest probe answer was wrong at level 4 or higher.
   - The coverage audit checks each sealed question like any other, but a sealed question never counts as assessing its objective. Lesson groups saved by an earlier version are synthesised again on the next compile, so that compile asks for the probes.
+  - The audit is now told each lesson's probe ids, so it cannot leave a probe out as outside its lesson. After a probe answer, "How this was checked" says it counts toward the unseen-task score only, not "unaided evidence".
   - A recompile keeps an old sealed question, with its id, over a reworded copy of it, and drops one that a new bank question nearly copies. `sealed.md` counts these with the other near-copies it dropped.
   - Home says when a probe is due on any topic, and which topic it is for (first one, every 14 days, or weekly in the last 7 days before an exam). Starting a probe while one is unfinished goes back to it.
   - Practise always opens a normal chat rather than continuing a probe, and a finished probe is no longer the chat its topic reopens on.

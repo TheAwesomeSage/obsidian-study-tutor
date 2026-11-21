@@ -147,7 +147,7 @@ const SYNTHESIS = obj({ overview: str, subject: str, units: arr(obj({
   visualKind: str, visualReason: str,
 }), 6) });
 const AUDIT = obj({ rows: arr(obj({ objective: str, sources: arr(str, 8), teaching: bool, questions: arr(str, 24), gap: str }), 12) });
-const AUDIT_PROMPT = `Audit every supplied objective by its exact ID. Sources must support its explanation; a title, mere mention or syllabus clause is not supporting evidence. An uncertain selector flag means inspect the original text yourself. Mark teaching true if a supplied lesson genuinely teaches the objective with a usable worked example or application and any needed assumptions. List the IDs of questions aligned to that objective and answerable from that lesson. If all three are sufficient leave gap empty. ${REFERENCE_RULE}`;
+const AUDIT_PROMPT = `Audit every supplied objective by its exact ID. Sources must support its explanation; a title, mere mention or syllabus clause is not supporting evidence. An uncertain selector flag means inspect the original text yourself. Mark teaching true if a supplied lesson genuinely teaches the objective with a usable worked example or application and any needed assumptions. List the IDs of questions aligned to that objective and answerable from that lesson; a lesson's probes are questions too, so judge each probe by the same test and list it when it passes. If all three are sufficient leave gap empty. ${REFERENCE_RULE}`;
 
 export class CompileCancelled extends Error {
   /** Lesson groups finished and saved before the cancellation, once compilation reached them. */
@@ -711,7 +711,7 @@ export async function compileCourse(p: {
     }
     lessons.push(...groupLessons);
     // Lessons and questions derive deterministically from the synthesis, so a reused synthesis gives a stable audit key.
-    const auditInput = { objectives: cohort, packet, inspected: inspectedHere, lessons: groupLessons, questions: validQuestions };
+    const auditInput = { objectives: cohort, packet, inspected: inspectedHere, lessons: groupLessons.map(l => ({ ...l, probes: groupProbes.get(l.objective) ?? [] })), questions: validQuestions };
     const auditKey = stageKey("audit", AUDIT_VERSION, AUDIT_PROMPT, AUDIT, auditInput);
     let audit = await reuse<{ rows: AuditRow[] }>(auditKey, AUDIT);
     if (audit && synthReused) {

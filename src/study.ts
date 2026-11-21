@@ -546,7 +546,7 @@ export class StudyScreen implements Screen {
     const more = box.createEl("details", { cls: "st-feedback-more" });
     more.createEl("summary", { text: "How this was checked" });
     if (a.assumptions) more.createDiv({ cls: "st-meta", text: `Basis: ${a.assumptions}.` });
-    more.createDiv({ cls: "st-meta", text: a.assisted || a.answerExposed ? "Because help was given or the answer had been seen, this does not count as unaided evidence." : a.grading === "self" ? "A self-rating does not count as evidence for a level." : a.result === "ungraded" ? "An unmarked answer changes nothing." : !conclusive(a) ? "The breakdown could not back this mark, so it does not count as evidence either way." : "This counts as unaided evidence." });
+    more.createDiv({ cls: "st-meta", text: a.probe ? "This counts toward the unseen-task score only." : a.assisted || a.answerExposed ? "Because help was given or the answer had been seen, this does not count as unaided evidence." : a.grading === "self" ? "A self-rating does not count as evidence for a level." : a.result === "ungraded" ? "An unmarked answer changes nothing." : !conclusive(a) ? "The breakdown could not back this mark, so it does not count as evidence either way." : "This counts as unaided evidence." });
     const ml = markLine(a);
     if (ml) more.createDiv({ cls: "st-meta st-reasoning", text: ml });
     if (a.note) more.createDiv({ cls: "st-meta", text: a.note });
