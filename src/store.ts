@@ -12,6 +12,7 @@ import { SEAL_SIMILARITY, splitSealed, type SealedSection } from "./sealed";
 import { SessionRecord, sessionMarkdown } from "./session";
 import type { ActivityRecord } from "./configure";
 import type { CoursePackage } from "./coursepkg";
+import type { Assessment } from "./engine-assess";
 import { passageWindow, type SourceRevision } from "./compile-sources";
 import { Misconception, parseMisconception, reconcile } from "./misconceptions";
 import { ExpansionRecord, parseExpansion } from "./expansion";
@@ -419,6 +420,35 @@ export class Store {
 
   sealedPath(dir: string): string {
     return `${dir}/sealed.md`;
+  }
+
+  /** Outcome checks, one JSON record per line, apart from the practice evidence. */
+  assessmentsPath(dir: string): string {
+    return `${dir}/assessments.md`;
+  }
+
+  /** Every outcome check on a topic, oldest first. A line that cannot be read is skipped. */
+  async loadAssessments(dir: string): Promise<Assessment[]> {
+    const p = this.assessmentsPath(dir);
+    if (!(await this.fs.exists(p))) return [];
+    const out: Assessment[] = [];
+    for (const line of (await this.fs.read(p)).split("\n")) {
+      if (!line.startsWith("{")) continue;
+      try {
+        const a = JSON.parse(line) as Assessment;
+        if (typeof a.t === "string" && Array.isArray(a.criteria)) out.push(a);
+      } catch {
+        /* a damaged line is skipped */
+      }
+    }
+    return out;
+  }
+
+  async appendAssessment(dir: string, a: Assessment): Promise<void> {
+    const p = this.assessmentsPath(dir);
+    const head = withFrontmatter({ tutor: "assessments" }, "Outcome checks: the course's outcome task, attempted unaided and marked by a separate assessor that saw only the task and the answer. One record per line. These never change a level.\n");
+    const old = (await this.fs.exists(p)) ? await this.fs.read(p) : head;
+    await this.writeFile(p, `${old.replace(/\n*$/, "\n")}${JSON.stringify(a)}\n`);
   }
 
   /** The sealed (cold probe) questions, each with its concept. Not part of the bank: nothing practises or reviews them. */

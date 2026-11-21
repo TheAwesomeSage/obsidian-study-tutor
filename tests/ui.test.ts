@@ -1279,3 +1279,42 @@ test("grow a question into a course: a broad reply offers Make this a course, th
   assert.ok(!button(quiet, "Make this a course").classList.contains("mod-cta"));
   await view.onClose();
 });
+
+test("outcome check: the topic page offers it under the outcome, the check has no help controls, and the page then shows the last result", async () => {
+  const fs = new MemFS();
+  const leaves: any[] = [];
+  let plugin: any = null;
+  const app = makeApp(fs, leaves, [], () => plugin);
+  plugin = new (StudyTutorPlugin as any)(app, { id: "study-tutor" }) as StudyTutorPlugin;
+  await plugin.onload();
+  await tick();
+  const out = parseCompileOutput(COMPILED);
+  const dir = await plugin.store.saveCompiled({ title: "Linear maps", fm: { source: "notes", subject: out.subject, kind: "subject" }, topicBody: out.topicBody.replace("## Subskills", "## Outcome\n\nShow a map with kernel {0} is injective.\n\nDone well when:\n- Uses T(u)=T(v) implies T(u-v)=0\n\n## Subskills"), questionsBody: out.questionsBody, target: 4 });
+  const calls: any[] = [];
+  plugin.engine.call = async (o: any) => {
+    calls.push(o);
+    return { text: "", structured: { criteria: [{ criterion: "c", verdict: "met", evidence: "T(u-v)=0" }], summary: "Clear and complete." }, usage: { input: 1, cacheRead: 0, cacheWrite: 0, output: 1, costUsd: 0, calls: 1 }, model: "m" };
+  };
+  const view: any = await plugin.activateView();
+  const root = view.contentEl;
+  await view.selectTopic(dir);
+  view.go("topic");
+  await tick(40);
+  assert.doesNotMatch(root.textContent, /Last outcome check/);
+  button($(root, ".st-outcome-check"), "Check the outcome").click();
+  await tick(60);
+  assert.equal(root.getAttribute("data-screen"), "study");
+  assert.match(root.textContent, /Outcome check: on your own, marked by a separate assessor, levels unchanged\./);
+  assert.equal($$(root, ".st-quick .st-btn").length, 0, "no hint, explain, skip or visual buttons");
+  assert.ok($(root, ".st-conf").classList.contains("is-hidden"));
+  assert.match($(root, ".st-composer textarea").getAttribute("placeholder"), /^Your answer to the task/);
+  $(root, ".st-composer textarea").value = "If T(u)=T(v) then T(u-v)=0, so u-v is in the kernel {0} and u=v.";
+  button(root, "Send").click();
+  await tick(80);
+  assert.equal(calls.length, 1);
+  assert.match($(root, ".st-messages").textContent, /Outcome check marked:\*\* 1 of 1 met/);
+  view.go("topic");
+  await tick(60);
+  assert.match(root.textContent, /Last outcome check \d{4}-\d{2}-\d{2}: 1 of 1 met\./);
+  await view.onClose();
+});

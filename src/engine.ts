@@ -41,6 +41,7 @@ import * as expansionFns from "./engine-expansion";
 import * as markFns from "./engine-marks";
 import * as probeFns from "./engine-probe";
 import * as askFns from "./engine-ask";
+import * as assessFns from "./engine-assess";
 import { probeStatus as probeStatusOf, type ProbeStatus } from "./probe";
 
 // The types, helpers and rules that used to sit in this file are still exported from it.
@@ -264,6 +265,7 @@ export class Engine {
     const s = this.settings();
     const chat = await this.store.loadChat(chatPath);
     if (fmStr(chat.fm, "probe") === "yes") return probeFns.probeTurn(this, dir, chatPath, message, opts);
+    if (fmStr(chat.fm, "assess") === "outcome") return assessFns.assessTurn(this, dir, chatPath, message, opts);
     const mode = (fmStr(chat.fm, "mode", "tutor") as Mode) || "tutor";
     const placing = fmStr(chat.fm, "placement") === "on";
     if (mode === "tutor" && s.codePlacement !== false && (!chat.messages.length || placing)) {
@@ -932,6 +934,11 @@ export class Engine {
   /** See `startProbe` in engine-probe.ts. */
   startProbe(...a: Rest<typeof probeFns.startProbe>): ReturnType<typeof probeFns.startProbe> {
     return probeFns.startProbe(this, ...a);
+  }
+
+  /** See `startAssessment` in engine-assess.ts: an outcome check, marked by a separate assessor. */
+  startAssessment(...a: Rest<typeof assessFns.startAssessment>): ReturnType<typeof assessFns.startAssessment> {
+    return assessFns.startAssessment(this, ...a);
   }
 
   /** See `startAsk` in engine-ask.ts: a free question's chat, with no topic. */

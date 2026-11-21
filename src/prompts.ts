@@ -13,6 +13,7 @@ import utilityMd from "../skills/utility.md";
 import subjectsMd from "../skills/subjects.md";
 import policyMd from "../skills/policy.md";
 import askMd from "../skills/ask.md";
+import assessMd from "../skills/assess.md";
 import { Chat, LearnerState, Mode, SourceMode, Topic, chatForPrompt, stateForPrompt, words } from "./formats";
 
 export function splitSubjects(md: string): Record<string, string> {
@@ -38,6 +39,7 @@ export const BUNDLED: Record<string, string> = {
   "compile.md": compileMd,
   "utility.md": utilityMd,
   "ask.md": askMd,
+  "assess.md": assessMd,
   // Documentation of the rules the code enforces. It is never sent to a model.
   "policy.md": policyMd,
   ...Object.fromEntries(Object.entries(splitSubjects(subjectsMd)).map(([name, text]) => [`subjects/${name}.md`, text])),

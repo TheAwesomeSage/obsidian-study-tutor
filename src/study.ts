@@ -422,6 +422,7 @@ export class StudyScreen implements Screen {
     tail.empty();
     const chat = v.chat;
     const probe = chat ? fmStr(chat.fm, "probe") === "yes" : false;
+    const assess = chat ? fmStr(chat.fm, "assess") === "outcome" : false;
     const info = modeInfo(v.mode);
     const lastMsg = chat?.messages[chat.messages.length - 1];
 
@@ -451,11 +452,12 @@ export class StudyScreen implements Screen {
     }
 
     if (probe) tail.createDiv({ cls: "st-notice st-probe-banner", text: "Cold probe: sealed questions, no help, levels unchanged." });
+    if (assess) tail.createDiv({ cls: "st-notice st-probe-banner st-assess-banner", text: "Outcome check: on your own, marked by a separate assessor, levels unchanged." });
     if (this.changes.length) chip(tail, `Progress updated: ${this.changes.join("; ")}`, "good", "trending-up");
     if (this.marked) this.feedback(tail, this.marked);
     this.expansionChip(tail);
     const activity = this.activity;
-    if (activity && !probe && activity.dir === v.dir && activity.chatPath === v.chatPath) {
+    if (activity && !probe && !assess && activity.dir === v.dir && activity.chatPath === v.chatPath) {
       const out = activity.outcome;
       const card = tail.createDiv({ cls: "st-notice st-activity-offer" });
       card.createDiv({ cls: "st-meta", text: out.decision.reason });
@@ -652,8 +654,10 @@ export class StudyScreen implements Screen {
   private syncComposer(): void {
     const v = this.view;
     const question = v.free ? "" : this.openQuestionText();
+    // An outcome check is one task marked by the assessor: no hints, explanations, skip button, visuals or confidence.
+    const assess = v.chat ? fmStr(v.chat.fm, "assess") === "outcome" : false;
     // A free question gets no topic help (hints, explanations, skip, visuals) and no confidence: nothing is marked.
-    const asking = v.mode === "expert" || v.free;
+    const asking = v.mode === "expert" || v.free || assess;
     // A cold probe gives no help, so nothing that asks for a hint, an explanation or an activity is offered.
     const probe = v.chat ? fmStr(v.chat.fm, "probe") === "yes" : false;
     const NO_HELP = "No help during a cold probe";
@@ -677,7 +681,7 @@ export class StudyScreen implements Screen {
       if (probe) { activity.title = NO_HELP; activity.setAttribute("aria-label", NO_HELP); }
     }
 
-    this.input.placeholder = v.free ? "Ask a follow-up…  (Enter to send, Shift+Enter for a new line)" : asking ? "Ask a question…  (Enter to send, Shift+Enter for a new line)" : question ? "Your answer…  (Enter to send, Shift+Enter for a new line)" : "Message…  (Enter to send, Shift+Enter for a new line)";
+    this.input.placeholder = assess ? "Your answer to the task…  (Enter to send, Shift+Enter for a new line)" : v.free ? "Ask a follow-up…  (Enter to send, Shift+Enter for a new line)" : asking ? "Ask a question…  (Enter to send, Shift+Enter for a new line)" : question ? "Your answer…  (Enter to send, Shift+Enter for a new line)" : "Message…  (Enter to send, Shift+Enter for a new line)";
     const active = v.app.workspace.getActiveFile();
     const canAttach = active instanceof TFile && active.extension === "md" && !active.path.startsWith(v.plugin.store.root + "/");
     if (!canAttach) this.attach = false;

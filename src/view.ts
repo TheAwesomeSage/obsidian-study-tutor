@@ -229,7 +229,7 @@ export class TutorView extends ItemView {
       if (path) await this.openChat(path, false);
       // A finished cold probe is not the chat a topic reopens on. (openChat set the chat, which TypeScript cannot see.)
       const opened = this.chat as Chat | null;
-      if (opened && fmStr(opened.fm, "probe_done")) {
+      if (opened && (fmStr(opened.fm, "probe_done") || fmStr(opened.fm, "assess_done"))) {
         this.chat = null;
         this.chatPath = null;
       }
@@ -322,7 +322,7 @@ export class TutorView extends ItemView {
         await this.plugin.store.saveState(this.dir, this.state);
       }
       // A cold probe is in quiz mode too, but is never continued as practice; a free question is never continued as study.
-      const probe = !!this.chat && (fmStr(this.chat.fm, "probe") === "yes" || this.free);
+      const probe = !!this.chat && (fmStr(this.chat.fm, "probe") === "yes" || fmStr(this.chat.fm, "assess") === "outcome" || this.free);
       if (o.chatPath) await this.openChat(o.chatPath);
       else if (o.mode && !(this.chat && !probe && this.mode === o.mode && !o.focus)) await this.newChat(o.mode);
       else if (!this.chat || this.free) await this.newChat(o.mode ?? this.mode);
@@ -331,6 +331,20 @@ export class TutorView extends ItemView {
     }
     this.show("study");
     if (o.begin && this.chat && !this.chat.messages.length && this.mode !== "expert") void this.study.send("");
+  }
+
+  /** Opens an outcome check on a topic (a new one, or the one not marked yet). */
+  async startAssessment(dir: string): Promise<void> {
+    try {
+      const chatPath = await this.plugin.engine.startAssessment(dir);
+      if (chatPath) {
+        await this.startStudy({ dir, chatPath });
+        return;
+      }
+      new Notice("This topic has no outcome yet. Recompile it to plan one.");
+    } catch (e) {
+      new Notice(`Study Tutor: ${(e as Error).message}`);
+    }
   }
 
   /** Starts a cold probe on a topic and opens it. When nothing is ready any more, the screen is only redrawn. */

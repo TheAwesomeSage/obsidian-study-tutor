@@ -7,6 +7,7 @@ import { MIN_ESTIMATE_N, missingFor } from "./evidence";
 import { fmStr, mastery } from "./formats";
 import { isActive, misconceptionLine } from "./misconceptions";
 import { ago } from "./overview";
+import { assessmentLine } from "./engine-assess";
 import { PROBE_MIN_SHOWN, type ProbeStatus } from "./probe";
 import type { Screen, TutorView } from "./view";
 import { MODE_INFO, button, chip, emptyState, iconButton, levelPips, panel, pct, progressBar } from "./ui";
@@ -52,6 +53,14 @@ export class TopicScreen implements Screen {
     }
   }
 
+  /** The latest outcome check, once the log is read. */
+  private async showAssessments(page: HTMLElement, box: HTMLElement, dir: string): Promise<void> {
+    const all = await this.view.plugin.store.loadAssessments(dir).catch(() => []);
+    if (this.el === null || !page.isConnected || !all.length) return;
+    const last = all[all.length - 1];
+    box.createSpan({ cls: "st-meta st-assess-last", text: `Last outcome check ${last.t.slice(0, 10)}: ${assessmentLine(last)}${all.length > 1 ? ` (${all.length} checks so far)` : ""}.` });
+  }
+
   private render(): void {
     const el = this.el;
     const v = this.view;
@@ -94,6 +103,9 @@ export class TopicScreen implements Screen {
       const goal = panel(page, "What this course builds to");
       goal.tools.createSpan({ cls: "st-meta", text: "The task you should manage on your own at the end." });
       v.md(goal.body.createDiv({ cls: "st-outcome" }), topic.outcome);
+      const check = goal.body.createDiv({ cls: "st-actions st-outcome-check" });
+      button(check, { label: "Check the outcome", icon: "clipboard-check", tone: "secondary", title: "Try the task on your own. A separate assessor marks it; levels are unchanged.", onClick: () => void v.startAssessment(dir) });
+      void this.showAssessments(page, check, dir);
     }
 
     // ----- concepts -----
