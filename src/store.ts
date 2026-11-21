@@ -8,6 +8,7 @@ import { SrStats, buildSrNote, srStats } from "./formats";
 import { parseMistakeCard } from "./families";
 import { Chat, Frontmatter, LearnerState, Mode, Prereqs, Question, Topic, fmNum, fmStr, newState, parseChat, parseQuestions, parseState, parseTopic, serializeChat, serializeState, textHash, withFrontmatter, ymd } from "./formats";
 import type { PolicyCase } from "./policy";
+import { splitSealed, type SealedSection } from "./sealed";
 import { SessionRecord, sessionMarkdown } from "./session";
 import type { ActivityRecord } from "./configure";
 import type { CoursePackage } from "./coursepkg";
@@ -408,6 +409,46 @@ export class Store {
     return (await this.fs.exists(p)) ? parseQuestions(await this.fs.read(p)) : [];
   }
 
+  sealedPath(dir: string): string {
+    return `${dir}/sealed.md`;
+  }
+
+  /** The sealed (cold probe) questions, each with its concept. Not part of the bank: nothing practises or reviews them. */
+  async loadSealed(dir: string): Promise<Question[]> {
+    const p = this.sealedPath(dir);
+    return (await this.fs.exists(p)) ? parseQuestions(await this.fs.read(p)) : [];
+  }
+
+  /**
+   * The sealed sections after a compile: the new body's, then the old ones whose concept is still
+   * live and got no new probe, moved to that concept's new subskill number. Each carries its concept.
+   */
+  private async mergeSealed(dir: string, fresh: SealedSection[], graph: TopicGraph): Promise<string[]> {
+    const live = new Map(graph.concepts.filter((c) => !c.retired).map((c) => [c.n, c.id]));
+    const byId = new Map([...live].map(([n, id]) => [id, n]));
+    const out = new Map<string, string>();
+    const put = (id: string, concept: string, sub: number, section: string) => {
+      if (out.has(id)) return;
+      const lines = section.replace(/\r\n/g, "\n").split("\n").filter((l) => !/^(concept|subskill):/i.test(l));
+      lines.splice(1, 0, `subskill: ${sub}`, `concept: ${concept}`);
+      out.set(id, lines.join("\n").replace(/\s*$/, "\n"));
+    };
+    const withNew = new Set<string>();
+    for (const f of fresh) {
+      const concept = live.get(f.subskill);
+      if (!concept) continue;
+      withNew.add(concept);
+      put(f.id, concept, f.subskill, f.section);
+    }
+    const file = this.sealedPath(dir);
+    const old = (await this.fs.exists(file)) ? (await this.fs.read(file)).split(/^(?=### P[0-9a-f]+[ \t]*\r?$)/m) : [];
+    for (const part of old) {
+      const q = parseQuestions(part)[0];
+      if (q?.concept && !withNew.has(q.concept) && byId.has(q.concept)) put(q.id, q.concept, byId.get(q.concept)!, part);
+    }
+    return [...out.values()];
+  }
+
   // ----- learner state: levels in state.md, the evidence behind them in evidence.md -----
 
   private evidencePath(dir: string): string {
@@ -527,7 +568,11 @@ export class Store {
     const topic = parseTopic(topicMd);
     const { graph, remap } = syncTopicGraph(base(dir), topic, oldGraph);
     await this.writeFile(`${dir}/topic.md`, topicMd);
-    await this.writeFile(`${dir}/questions.md`, withFrontmatter({ tutor: "questions", topic: p.title }, p.questionsBody + "\n"));
+    // Probe questions leave the bank here, the one place compile and refresh both write it, so no reader of questions.md sees them.
+    const split = splitSealed(p.questionsBody);
+    const sealed = await this.mergeSealed(dir, split.sealed, graph);
+    await this.writeFile(`${dir}/questions.md`, withFrontmatter({ tutor: "questions", topic: p.title }, split.bank + "\n"));
+    if (sealed.length || (await this.fs.exists(this.sealedPath(dir)))) await this.writeFile(this.sealedPath(dir), withFrontmatter({ tutor: "sealed", topic: p.title, dropped: split.dropped }, sealed.join("\n")));
     await this.writeFile(this.graphPath(dir), serializeTopicGraph(topic.title, graph));
     const next = newState(topic, p.target, previous, previous && oldGraph ? remap : undefined);
     for (const c of graph.concepts) if (!c.retired) next.concepts[c.n] = c.id;

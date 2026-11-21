@@ -475,7 +475,9 @@ export default class StudyTutorPlugin extends Plugin {
       const stats = res.metrics;
       const activity = stats ? `\n${stats.searches} search attempts · ${stats.pages} pages requested · ${stats.cacheHits} cache hits · Ollama ${(stats.localMs / 1000).toFixed(1)}s (${stats.localCalls} calls)${stats.generators || stats.generatorsRejected ? ` · question generators: ${stats.generators ?? 0} kept, ${stats.generatorsRejected ?? 0} dropped` : ""}${stats.codeTasks || stats.codeTasksRejected ? ` · code tasks: ${stats.codeTasks ?? 0} kept, ${stats.codeTasksRejected ?? 0} dropped` : ""}` : "";
       const where = stats ? strategyLine(stats, MODEL_PROVIDERS[providerFor(this.opts)]) : "";
-      new Notice(`${res.status === "partial" ? "Partial topic saved" : "Topic ready"}: ${res.subskills} subskills, ${res.questions} questions.${res.preservedCourse ? " The previous topic was kept." : ""}${how ? `\n${how}` : ""}${res.coverage ? `\n${res.coverage}` : ""}${activity}${where ? `\n${where}` : ""}\nModel: ${usageLine(res.usage)} in ${res.usage.calls} call(s)`, 12000);
+      const nSealed = (await this.store.loadSealed(res.dir)).length;
+      const sealedNote = nSealed > 0 ? ` ${nSealed} sealed for cold probes.` : "";
+      new Notice(`${res.status === "partial" ? "Partial topic saved" : "Topic ready"}: ${res.subskills} subskills, ${res.questions} questions.${sealedNote}${res.preservedCourse ? " The previous topic was kept." : ""}${how ? `\n${how}` : ""}${res.coverage ? `\n${res.coverage}` : ""}${activity}${where ? `\n${where}` : ""}\nModel: ${usageLine(res.usage)} in ${res.usage.calls} call(s)`, 12000);
       this.data.activeTopic = res.preservedCourse ?? res.dir;
       await this.save();
       // Keep the flashcard note in step with the new question bank; existing schedules are kept.

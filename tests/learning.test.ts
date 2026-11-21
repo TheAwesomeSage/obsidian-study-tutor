@@ -1739,3 +1739,74 @@ test("cold probes: a probe is sealed under any heading the question parser accep
     assert.equal(F.parseQuestions(r.sealed[0].section)[0].task, "probe");
   }
 });
+
+const sealedSec = (id: string, sub: number, task: string, q: string) =>
+  `### ${id}\nsubskill: ${sub}\ntype: short\ntask: ${task}\nquestion: ${q}\nanswer: 1\n\n`;
+
+test("cold probes: questions.md never holds a sealed question, so no bank reader, review or flashcard export can show it", async () => {
+  const probe = "Why does a wider base make a pyramid more stable?";
+  const body =
+    sealedSec("Q1", 1, "application", "Find the slope of the line through two points.") +
+    sealedSec("Q2", 1, "probe", probe) +
+    sealedSec("Q3", 2, "application", "A ball is thrown up at 5 m/s. How high does it rise?") +
+    sealedSec("Q4", 2, "probe", "A ball is thrown up at 8 m/s. How high does it rise?");
+  const store = new Store(new MemFS(), "Tutor");
+  const dir = await store.saveCompiled({ title: "Calculus", fm: { subject: "none" }, topicBody: CARD(NAMES), questionsBody: body, target: 4 });
+  const bank = await store.loadQuestions(dir);
+  assert.ok(bank.every((x) => x.task !== "probe"));
+  assert.deepEqual(bank.map((x) => x.id), ["Q1", "Q3"]);
+  const sealed = await store.loadSealed(dir);
+  assert.equal(sealed.length, 1);
+  assert.equal(sealed[0].concept, (await store.loadState(dir, 4)).concepts[1]);
+  assert.equal(sealed[0].subskill, 1);
+  const fs = (store as any).fs as MemFS;
+  assert.ok(!(await fs.read(`${dir}/questions.md`)).includes(probe));
+  assert.ok((await fs.read(`${dir}/sealed.md`)).includes(probe));
+  assert.ok(!F.buildSrNote(bank, "t").includes(probe));
+  const state = await store.loadState(dir, 4);
+  assert.ok(!JSON.stringify(F.reviewQueue(bank, state, "2026-11-21", 50)).includes(probe));
+});
+
+test("cold probes: a recompile keeps sealed questions with their concept, a new probe replaces the old one, and a retired concept loses its own", async () => {
+  const names: [string, string][] = [["Slopes", "none"], ["Projectiles", "none"], ["Stability", "none"]];
+  const one = (sub: number, probe: string) => sealedSec(`Q${sub}`, sub, "application", `Practice item number ${sub} about something else entirely.`) + sealedSec(`Q${sub + 10}`, sub, "probe", probe);
+  const p1 = "Why does a wider base make a pyramid more stable?";
+  const p2 = "How would a bridge engineer decide where to put the supports?";
+  const p3 = "Explain why a spinning top stays upright for a while.";
+  const store = new Store(new MemFS(), "Tutor");
+  const fs = (store as any).fs as MemFS;
+  const dir = await store.saveCompiled({ title: "Calculus", fm: { subject: "none" }, topicBody: CARD(names), questionsBody: one(1, p1) + one(2, p2) + one(3, p3), target: 4 });
+  const first = await store.loadSealed(dir);
+  assert.equal(first.length, 3);
+  const st1 = await store.loadState(dir, 4);
+  const [c1, c2, c3] = [1, 2, 3].map((n) => st1.concepts[n]);
+  const id = (c: string) => first.find((x) => x.concept === c)!.id;
+  const oldC2 = id(c2);
+  const p1b = "What makes a tall narrow tower topple in a strong wind?";
+  // Swap the first two subskills, give only the old subskill 1 a new probe, and drop the third subskill.
+  const swapped: [string, string][] = [["Projectiles", "none"], ["Slopes", "none"]];
+  await store.saveCompiled({
+    title: "Calculus", fm: { subject: "none" }, topicBody: CARD(swapped), target: 4, existingDir: dir,
+    questionsBody: sealedSec("Q1", 1, "application", "Practice item number 1 about something else entirely.") + sealedSec("Q2", 2, "application", "Practice item number 2 about something else entirely.") + sealedSec("Q12", 2, "probe", p1b),
+  });
+  const after = await store.loadSealed(dir);
+  const st2 = await store.loadState(dir, 4);
+  assert.equal(st2.concepts[1], c2);
+  assert.equal(st2.concepts[2], c1);
+  const ofC2 = after.filter((x) => x.concept === c2);
+  assert.deepEqual(ofC2.map((x) => [x.id, x.subskill]), [[oldC2, 1]]);
+  const ofC1 = after.filter((x) => x.concept === c1);
+  assert.equal(ofC1.length, 1);
+  assert.notEqual(ofC1[0].id, id(c1));
+  assert.equal(ofC1[0].subskill, 2);
+  assert.equal(after.filter((x) => x.concept === c3).length, 0);
+  assert.equal(after.length, 2);
+  assert.ok(!(await fs.read(`${dir}/sealed.md`)).includes(p3));
+  // A topic saved without probes has none, and no file is made for it.
+  const plain = await store.saveCompiled({ title: "Plain", fm: {}, topicBody: CARD([["Slopes", "none"]]).replace("# Calculus", "# Plain"), questionsBody: sealedSec("Q1", 1, "application", "Find it."), target: 4 });
+  assert.deepEqual(await store.loadSealed(plain), []);
+  assert.ok(!(await fs.exists(`${plain}/sealed.md`)));
+  // Retiring every concept empties the file instead of leaving old questions behind.
+  await store.saveCompiled({ title: "Calculus", fm: { subject: "none" }, topicBody: CARD([["Brand new", "none"]]), target: 4, existingDir: dir, questionsBody: sealedSec("Q1", 1, "application", "Find it.") });
+  assert.deepEqual(await store.loadSealed(dir), []);
+});
