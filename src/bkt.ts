@@ -95,7 +95,7 @@ export const mcqOptions = (questions: Question[]): Record<string, number> => Obj
  */
 export function bktTrace(attempts: Attempt[], skill: number, opts: { params?: BktParams; options?: Record<string, number> } = {}): BktTrace {
   const params = opts.params ?? BKT_DEFAULTS;
-  const mine = attempts.filter((a) => a.skill === skill).sort(byTime).slice(-BKT_HISTORY);
+  const mine = attempts.filter((a) => a.skill === skill && !a.probe).sort(byTime).slice(-BKT_HISTORY);
   const steps: BktStepRecord[] = [];
   let pKnown = params.pInit;
   let prev = skillEvidence([], skill);

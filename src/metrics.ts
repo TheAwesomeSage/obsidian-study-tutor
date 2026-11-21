@@ -36,7 +36,7 @@ export interface MetricsInput {
 
 export interface MetricsSummary {
   compile: { packages: number; staged: number; totals: Record<string, number>; elapsedMs: Stat };
-  attempts: { total: number; byGrading: Record<string, number>; markedByCode: number; markedByModel: number; selfRated: number; ungraded: number; disputed: number; assisted: number; answerSeen: number; independent: number; seconds: Stat };
+  attempts: { total: number; byGrading: Record<string, number>; markedByCode: number; markedByModel: number; selfRated: number; ungraded: number; disputed: number; assisted: number; answerSeen: number; independent: number; probes: number; probeCorrect: number; seconds: Stat };
   activities: { records: number; byStatus: Record<string, number>; localCalls: number; repairs: number; claudeCalls: number; firstPassValid: number; firstPassKnown: number; wallMs: Stat; localMs: Stat; loadMs: Stat; promptTokens: number; evalTokens: number };
   decisions: { total: number; bank: number; placement: number; model: number; byVersion: Record<string, number> };
   /** BKT (shadow) against the existing estimate, over every unaided answer. */
@@ -65,7 +65,9 @@ export function summariseMetrics(input: MetricsInput): MetricsSummary {
   const totals: Record<string, number> = {};
   for (const m of metrics) for (const [k, v] of Object.entries(m)) if (typeof v === "number" && Number.isFinite(v) && k !== "elapsedMs") totals[k] = (totals[k] ?? 0) + v;
 
-  const all = Object.values(input.attempts).flat();
+  const every = Object.values(input.attempts).flat();
+  const probed = every.filter((a) => a.probe && a.verification !== "disputed" && a.result !== "ungraded");
+  const all = every.filter((a) => !a.probe);
   const kept = all.filter((a) => a.verification !== "disputed");
   const graded = kept.filter((a) => a.result !== "ungraded");
   let independent = 0;
@@ -89,6 +91,8 @@ export function summariseMetrics(input: MetricsInput): MetricsSummary {
       assisted: graded.filter((a) => a.assisted).length,
       answerSeen: graded.filter((a) => a.answerExposed).length,
       independent,
+      probes: probed.length,
+      probeCorrect: probed.filter((a) => a.result === "correct").length,
       seconds: stat(graded.map((a) => a.seconds ?? NaN)),
     },
     activities: {
@@ -170,6 +174,7 @@ export function metricsReport(s: MetricsSummary): string {
     `- Attempts: ${a.total} (${a.ungraded} unmarked, ${a.disputed} disputed).`,
     `- Marked by code: ${a.markedByCode}; by a model: ${a.markedByModel}; self-rated: ${a.selfRated}. By method: ${Object.entries(a.byGrading).map(([k, v]) => `${k} ${v}`).join(", ") || "none"}.`,
     `- With help: ${a.assisted}; after seeing the answer: ${a.answerSeen}; unaided data points: ${a.independent}.`,
+    `- Cold probes: ${a.probes} answers, ${a.probeCorrect} correct.`,
     `- Seconds from question to answer: ${a.seconds.n ? `median ${a.seconds.median}, 90th percentile ${a.seconds.p90} (n = ${a.seconds.n})` : "none recorded"}.`,
     "",
     "## Activity configurations (local model)",

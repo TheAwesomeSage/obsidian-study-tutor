@@ -87,7 +87,7 @@ export async function presentationFor(eng: Engine, p: { dir: string; topic: Topi
   // model are all unchanged. Anything else is a miss, and the old record stays on disk.
   const saved = await savedFor(eng, p.dir, conceptId, refs, modelName, catalog, descriptors);
   const e = evidenceOf(p.state, n);
-  const lastWrong = [...p.state.attempts].reverse().find((a) => a.skill === n && a.result !== "correct" && a.result !== "ungraded");
+  const lastWrong = [...p.state.attempts].reverse().find((a) => a.skill === n && !a.probe && a.result !== "correct" && a.result !== "ungraded");
   // Modules are shortlisted against the card and the source passages the activity would rest on.
   const context = [sk.section, ...refs.map((r) => r.excerpt)].join("\n");
   const decision = choosePresentation(
@@ -380,7 +380,7 @@ export async function activityReport(eng: Engine, dir: string): Promise<{ offere
   let pending = 0;
   for (const use of log.filter((e) => e.event === "generated" || e.event === "reused" || e.event === "opened")) {
     const n = Number(Object.entries(state.concepts).find(([, id]) => id === use.conceptId)?.[0] ?? 0);
-    const next = state.attempts.filter((a) => a.skill === n && a.timestamp > use.t && !a.assisted && !a.answerExposed && a.result !== "ungraded" && a.verification !== "disputed").sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1))[0];
+    const next = state.attempts.filter((a) => a.skill === n && !a.probe && a.timestamp > use.t && !a.assisted && !a.answerExposed && a.result !== "ungraded" && a.verification !== "disputed").sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1))[0];
     if (!next) pending++;
     else if (next.result === "correct") resolved++;
     else unresolved++;

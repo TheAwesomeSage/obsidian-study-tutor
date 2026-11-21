@@ -535,7 +535,7 @@ export class Engine {
     if (focusSkill && mode !== "expert") {
       const bank = await this.store.loadQuestions(dir);
       const cover = coverageOf(topic, bank, state, focusSkill.n);
-      const lastAttempt = [...state.attempts].reverse().find((a) => a.skill === focusSkill.n && a.result !== "ungraded");
+      const lastAttempt = [...state.attempts].reverse().find((a) => a.skill === focusSkill.n && !a.probe && a.result !== "ungraded");
       const lastIdea = lastAttempt ? cover.find((i) => i.id === ideaOf({ question: lastAttempt.question }, cover)) ?? null : null;
       const typical = secondsPerItem(state.attempts);
       const [builtId, builtN] = fmStr(chat.fm, "built").split(":");

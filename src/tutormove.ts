@@ -147,7 +147,7 @@ export function afterMark(a: Attempt, ms: Misconception[], ctx: { askedUnder: st
 
 /** The latest attempt on the concept that can count as evidence, and the latest one of any kind (it may have been disputed). */
 function latest(attempts: Attempt[], concept: string): { usable: Attempt | null; any: Attempt | null } {
-  const mine = attempts.filter((a) => a.concept === concept).sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
+  const mine = attempts.filter((a) => a.concept === concept && !a.probe).sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
   // A disputed answer is passed over: the one before it is the evidence that stands.
   const usable = (a: Attempt): boolean => a.result === "ungraded" || a.result === "skipped" || countable(a);
   return { usable: [...mine].reverse().find(usable) ?? null, any: mine[mine.length - 1] ?? null };

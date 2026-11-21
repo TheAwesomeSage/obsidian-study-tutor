@@ -1816,3 +1816,50 @@ test("cold probes: the compile notice counts bank questions only, not the sealed
   assert.equal(F.parseQuestions(body).length, 4);
   assert.equal(bankCount(body), 3);
 });
+
+test("cold probes: a probe answer is recorded but moves no level, estimate, BKT value or delayed check", async () => {
+  const B = await import("../src/bkt");
+  const s = F.newState(F.parseTopic(CARD(NAMES)), 4);
+  for (const [id, hour] of [["p1", "10"], ["p2", "11"]]) {
+    const a = attempt({ id, timestamp: `2026-11-14T${hour}:00:00.000Z` });
+    s.attempts = recordAttempt(s.attempts, a);
+    applyAttempt(s, a);
+  }
+  assert.equal(s.levels[1], 3);
+  const e0 = skillEvidence(s.attempts, 1);
+  const a = attempt({ id: "probe1", probe: true, taskType: "transfer", family: "unmet-family", timestamp: "2026-11-17T10:00:00.000Z" });
+  s.attempts = recordAttempt(s.attempts, a);
+  assert.deepEqual(skillEvidence(s.attempts, 1), e0);
+  assert.deepEqual(applyAttempt(s, a), []);
+  assert.equal(s.levels[1], 3);
+  assert.equal(B.bktShadow(s.attempts, 1)?.observations, B.bktShadow(s.attempts.filter((x) => !x.probe), 1)?.observations);
+  assert.equal(normaliseAttempt(JSON.parse(JSON.stringify(a)))?.probe, true);
+  assert.equal(normaliseAttempt({ ...JSON.parse(JSON.stringify(a)), probe: "true" })?.probe, undefined, "only a boolean true marks a probe");
+  assert.equal(normaliseAttempt(JSON.parse(JSON.stringify(attempt({ id: "old" }))))?.probe, undefined, "older evidence has no probe field");
+
+  // A wrong probe answer at level 4 leaves the level there.
+  s.levels[1] = 4;
+  const wrong = attempt({ id: "probe2", probe: true, result: "incorrect", timestamp: "2026-11-18T10:00:00.000Z" });
+  s.attempts = recordAttempt(s.attempts, wrong);
+  assert.deepEqual(applyAttempt(s, wrong), []);
+  assert.equal(s.levels[1], 4);
+  assert.deepEqual(skillEvidence(s.attempts, 1), e0);
+});
+
+test("cold probes: the metrics report counts probe answers apart from unaided practice", async () => {
+  const M = await import("../src/metrics");
+  const base = [attempt({ id: "a" })];
+  const without = M.summariseMetrics({ packages: [], attempts: { Calculus: base } });
+  const s = M.summariseMetrics({ packages: [], attempts: { Calculus: [...base, attempt({ id: "pr", probe: true, timestamp: "2026-11-12T10:00:00.000Z" }), attempt({ id: "pw", probe: true, result: "incorrect", timestamp: "2026-11-12T11:00:00.000Z" })] } });
+  assert.deepEqual([s.attempts.probes, s.attempts.probeCorrect], [2, 1]);
+  assert.equal(s.attempts.independent, without.attempts.independent);
+  assert.equal(s.shadow.n, without.shadow.n);
+  assert.match(M.metricsReport(s), /Cold probes: 2 answers, 1 correct\./);
+});
+
+test("cold probes: a probe answer is never evidence for or against a misconception", async () => {
+  const M = await import("../src/misconceptions");
+  const wrong = attempt({ id: "pw", probe: true, result: "incorrect" });
+  assert.equal(M.countable(wrong), false);
+  assert.equal(M.countable(attempt({ id: "w", result: "incorrect" })), true);
+});

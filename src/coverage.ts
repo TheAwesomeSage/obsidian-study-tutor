@@ -83,7 +83,7 @@ export function coverageOf(topic: Pick<Topic, "subskills" | "objectives">, quest
   const at = (id: string | null) => out.find((i) => i.id === id);
   for (const [id, idea] of byQuestion) at(idea)?.questions.push(id);
   for (const a of state.attempts) {
-    if (a.skill !== n || a.result === "ungraded" || a.result === "skipped") continue;
+    if (a.probe || a.skill !== n || a.result === "ungraded" || a.result === "skipped") continue;
     const id = byQuestion.get(baseQuestionId(a.questionId)) ?? ideaOf({ question: a.question }, ideas);
     const idea = at(id);
     if (!idea) continue;

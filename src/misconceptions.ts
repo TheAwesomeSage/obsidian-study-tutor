@@ -117,8 +117,8 @@ function matches(rec: Misconception, concept: string, p: { id?: string; descript
   return norm(rec.description) === norm(p.description) || similarity(rec.description, p.description) >= 0.5;
 }
 
-/** An attempt that can count as evidence either way: marked, not disputed, not a self-rating, and a mark its breakdown backs. */
-export const countable = (a: Attempt | undefined): a is Attempt => !!a && a.result !== "ungraded" && a.result !== "skipped" && a.verification !== "disputed" && a.grading !== "self" && conclusive(a);
+/** An attempt that can count as evidence either way: marked, not disputed, not a self-rating, not a cold probe, and a mark its breakdown backs. */
+export const countable = (a: Attempt | undefined): a is Attempt => !!a && !a.probe && a.result !== "ungraded" && a.result !== "skipped" && a.verification !== "disputed" && a.grading !== "self" && conclusive(a);
 const shows = (a: Attempt | undefined): boolean => countable(a) && (a.result === "incorrect" || a.result === "partial");
 const corrects = (a: Attempt | undefined): boolean => countable(a) && a.result === "correct" && !a.assisted && !a.answerExposed;
 

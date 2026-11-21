@@ -107,6 +107,11 @@ export interface Attempt {
    * here, after marking), or, when the code could not be run, why not. Absent for other questions.
    */
   code?: CodeRunRecord;
+  /**
+   * A cold-probe answer: a sealed question, never practised, that measures transfer. A ruler, not
+   * a lever: it is recorded, and levels, estimates, BKT, card schedules and misconceptions ignore it.
+   */
+  probe?: boolean;
 }
 
 /** One change of level, with what caused it. Every change is logged so it can be explained later. */
@@ -194,6 +199,7 @@ export function normaliseAttempt(raw: unknown): Attempt | null {
     ...(mark ? { mark } : {}),
     ...(Array.isArray(r.objectives) ? { objectives: r.objectives.filter((x): x is string => typeof x === "string" && OBJECTIVE_REF.test(x)).slice(0, 12) } : {}),
     ...(code ? { code } : {}),
+    ...(r.probe === true ? { probe: true } : {}),
   };
 }
 
@@ -299,7 +305,7 @@ export const PREDICTION_TARGET = "the next unassisted first answer on this conce
  * the same question counts again, as delayed retrieval.
  */
 export function skillEvidence(attempts: Attempt[], skill: number, revision?: { at: string; why: string; refs?: string[] }): SkillEvidence {
-  const mine = attempts.filter((a) => a.skill === skill).sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
+  const mine = attempts.filter((a) => a.skill === skill && !a.probe).sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
   const e: SkillEvidence = { graded: 0, correctAny: 0, partialAny: 0, independent: 0, independentCorrect: 0, independentDays: 0, delayedTransfer: false, recentFailures: 0, lapse: false, delayedLapse: false, estimate: null, brier: null, rated: 0, calibrationGap: null, last: null, lastResult: null, errors: {}, assistedCount: 0, exposedCount: 0, selfCount: 0, ungraded: 0, disputed: 0, inconclusive: 0, lastIndependent: null, lastIndependentSuccess: null, firstIndependentDay: null, nextCheck: null, streakDays: 0, teachBack: false, edgeCase: false, untyped: 0, families: 0, recheck: null };
   const exposedOn = new Map<string, string>();
   const correctQs = new Set<string>();

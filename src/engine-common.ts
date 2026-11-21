@@ -230,7 +230,7 @@ export function equivalenceKind(detail: string): { grading: Grading; assumptions
  */
 export function applyAttempt(s: LearnerState, a: Attempt): string[] {
   const out: string[] = [];
-  if (!(a.skill in s.names) || a.result === "ungraded" || a.verification === "disputed" || a.grading === "self") return out;
+  if (a.probe || !(a.skill in s.names) || a.result === "ungraded" || a.verification === "disputed" || a.grading === "self") return out;
   const m = mastery(s, a.skill);
   const current = s.levels[a.skill] ?? null;
   const push = (line: string | null) => {
