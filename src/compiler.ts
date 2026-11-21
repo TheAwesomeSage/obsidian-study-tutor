@@ -120,12 +120,12 @@ const LOCAL_VERSION = "passage-selector-1";
 // Checkpoint versions of the lesson stages. Bump one whenever that stage's prompt, schema or the
 // validation and use of its reply changes. The keys also digest the prompt and schema, so a missed
 // bump there still invalidates old entries; a change in validation is caught only by the bump.
-const SYNTHESIS_VERSION = "synthesis-3";
+const SYNTHESIS_VERSION = "synthesis-4";
 /** How a short numeric question describes its numbers, so code can make new ones (families.ts). */
 const GENERATOR_RULE = `For a short question whose answer is one number computed from values in the question, set generator to a one-line JSON family spec so code can make fresh numbers; otherwise use the empty string. The spec: {"v":${FAMILY_SPEC_VERSION},"params":{"u":{"min":1,"max":9,"step":1}},"where":["conditions such as a!=0"],"template":"the question with {u} for each value and {=expr} for a computed one","answer":"expression over the params","dp":decimal places when the answer is rounded,"steps":["worked steps, same placeholders"],"mistakes":[{"label":"a common mistake","expr":"the value it gives","step":index of the step it breaks,"says":"what that step says when the mistake is made"}],"tests":[{"params":{"u":3},"answer":the question's own answer}]}. Expressions use + - * / ^, parentheses, pi, e and sqrt, abs, sin, cos, tan, exp, ln, log10, min, max, round, floor, ceil only. Keep bounds realistic for the context, and include the question as written as the first test.`;
 /** How a programming objective gets a coding exercise whose tests code can run (codequestions.ts). */
 const CODE_RULE = `When an objective is about writing code (a programming language, data structures, algorithms, concurrency, systems or numerical programming), one of its questions may be a coding exercise: type "code", the task in question, a complete reference solution in answer, and code set to a one-line JSON task. For any other question leave code empty. The task: {"language":"python, cpp or c","entry":"Python only: the function each test calls; leave it out for a program that reads standard input","tests":[{"name":"a short label","stdin":"the program's input","args":[JSON values, entry tasks only],"expected":"the exact expected output, or for an entry task the return value as JSON text","hidden":true for a test kept back until the answer is marked,"compare":"trim, exact, tokens or float"}],"timeLimitMs":2000,"concurrent":true only when it uses threads or shared state,"starter":"optional starting code"}. Tests are data, never code: write 3 to 8, at least one visible and the edge cases hidden, each expected value worked out from the task and checked against your reference solution. Use the rubric only for what tests cannot check, such as a required complexity bound.`;
-const AUDIT_VERSION = "audit-1";
+const AUDIT_VERSION = "audit-2";
 const MAX_LOCAL = 8;
 const BATCH_CHARS = 16_000;
 const OBJECTIVES_PER_SYNTHESIS = 6;
@@ -142,7 +142,8 @@ const DRAFT_QUESTION = obj({ type: { ...str, enum: ["short", "mcq", "open", "cod
 const DRAFT_QUESTION_CODE: Schema = { ...DRAFT_QUESTION, properties: { ...(DRAFT_QUESTION.properties as Record<string, Schema>), code: str } };
 const SYNTHESIS = obj({ overview: str, subject: str, units: arr(obj({
   objective: str, name: str, prerequisites: arr(str, 6), claims: arr(str, 6), example: str, misconceptions: arr(str, 4), details: str, passages: arr(str, 8),
-  questions: arr(DRAFT_QUESTION_CODE, 4),
+  // 2–3 aligned questions and one probe, with one to spare.
+  questions: arr(DRAFT_QUESTION_CODE, 5),
   visualKind: str, visualReason: str,
 }), 6) });
 const AUDIT = obj({ rows: arr(obj({ objective: str, sources: arr(str, 8), teaching: bool, questions: arr(str, 24), gap: str }), 12) });
@@ -627,12 +628,14 @@ export async function compileCourse(p: {
 
   const lessons: DetailedLesson[] = [], availability: ObjectiveAvailability[] = [];
   const sections: string[] = [], questionSections: string[] = [];
+  /** Probe questions the coverage audit listed for their objective's lesson. */
+  const sealedChecked = new Set<string>();
   const skillNumbers = new Map<string, number>();
   let subject = "none", overview = "";
   const teachable = inventory.filter(o => !o.unmapped);
   const cohorts = groups(teachable, OBJECTIVES_PER_SYNTHESIS);
   const prerequisites = new Map<number, number[]>();
-  const synthPrompt = `Write structured teaching units, one per supplied objective that you can teach. Use the exact supplied objective ID in each unit. Keep claims and the compact worked example concise; use details for the full lesson, including definitions, assumptions, and a worked example with reasoning. Reference only verified passage IDs from that objective's packet. If a source is insufficient, leave it uncited. Write 2–3 aligned questions with an answer and explanation; use a rubric for open questions, an empty options array for other than multiple choice, and one fresh application when useful. Task is a short label such as "application" or "transfer"; difficulty is 1–5. ${GENERATOR_RULE} ${CODE_RULE} Choose visualKind only if an existing diagram, simulation or game helps; otherwise use the empty string. List prerequisites by objective ID from this group or earlier topics only when required. Omit outside material. ${REFERENCE_RULE}\n\nUse pedagogical guidance from the saved compilation skill where compatible. Its legacy output formatting does not apply:\n${p.skill.split(/^FORMAT[ \t]*$/m)[0].slice(0, 1800)}`;
+  const synthPrompt = `Write structured teaching units, one per supplied objective that you can teach. Use the exact supplied objective ID in each unit. Keep claims and the compact worked example concise; use details for the full lesson, including definitions, assumptions, and a worked example with reasoning. Reference only verified passage IDs from that objective's packet. If a source is insufficient, leave it uncited. Write 2–3 aligned questions with an answer and explanation; use a rubric for open questions, an empty options array for other than multiple choice, and one fresh application when useful. Then write exactly one more question per unit with task "probe": a fresh problem in a setting unlike every other question of the unit, the transfer one included, still answerable from the lesson. The app seals it away for cold probes, so the learner never practises it. Any other task is a short label such as "application" or "transfer"; difficulty is 1–5. ${GENERATOR_RULE} ${CODE_RULE} Choose visualKind only if an existing diagram, simulation or game helps; otherwise use the empty string. List prerequisites by objective ID from this group or earlier topics only when required. Omit outside material. ${REFERENCE_RULE}\n\nUse pedagogical guidance from the saved compilation skill where compatible. Its legacy output formatting does not apply:\n${p.skill.split(/^FORMAT[ \t]*$/m)[0].slice(0, 1800)}`;
   metrics.groups = lessonGroups.total = cohorts.length;
   // Each group's validated synthesis and audit are checkpoints: a repeated or cancelled compile reuses finished groups.
   for (const [i, cohort] of cohorts.entries()) {
@@ -656,6 +659,9 @@ export async function compileCourse(p: {
     if (subject === "none" && p.subjects.includes(proposed.subject.trim())) subject = proposed.subject.trim();
     overview ||= inline(proposed.overview, 600);
     const validQuestions: Question[] = [], groupLessons: DetailedLesson[] = [], units: DraftUnit[] = [];
+    // Each objective's probe ids. A probe is audited like any question, but is sealed at save
+    // (sealed.ts), so it never appears in a lesson's questions or counts as assessing its objective.
+    const groupProbes = new Map<string, string[]>();
     for (const u of proposed.units) {
       if (skillNumbers.has(u.objective) || !scopes.has(u.objective) || !u.name.trim() || !u.details.trim()) continue;
       skillNumbers.set(u.objective, sections.length + units.length + 1);
@@ -678,7 +684,7 @@ export async function compileCourse(p: {
         ...(u.misconceptions.length ? ["misconceptions:", ...u.misconceptions.map(x => `- ${inline(x)}`)] : []),
         ...(u.example.trim() ? ["worked example:", inline(u.example, 720)] : []),
       ].join("\n"));
-      const ids: string[] = [];
+      const ids: string[] = [], probes: string[] = [];
       for (const q of u.questions) {
         // A coding exercise is an open question with tests; its tests stand in for a rubric.
         const code = checkedCode(q);
@@ -698,9 +704,10 @@ export async function compileCourse(p: {
         if (!checked || checked.type !== type || (!!code && !checked.code)) continue;
         validQuestions.push(checked);
         questionSections.push(section);
-        ids.push(id);
+        (checked.task === "probe" ? probes : ids).push(id);
       }
       groupLessons.push({ objective: u.objective, subskill: n, text: u.details.trim().slice(0, 7200), passages: unique(cited.map(x => x.id)), questions: ids });
+      groupProbes.set(u.objective, probes);
     }
     lessons.push(...groupLessons);
     // Lessons and questions derive deterministically from the synthesis, so a reused synthesis gives a stable audit key.
@@ -724,6 +731,8 @@ export async function compileCourse(p: {
       const refs = unique((r?.sources ?? []).filter(id => allowedPassages.has(id) && sourceKeys.has(sources.find(s => s.passages.some(x => x.id === id))?.id ?? "")));
       const skills = r?.teaching ? unique(mine.map(l => l.subskill)) : [];
       const ids = skills.length ? unique((r?.questions ?? []).filter(id => mine.some(l => l.questions.includes(id)))) : [];
+      // A probe passes the same check as a bank question, but is kept apart from the objective's own questions.
+      if (skills.length) for (const id of r?.questions ?? []) if (groupProbes.get(o.id)?.includes(id)) sealedChecked.add(id);
       const gaps = [!refs.length && "source evidence", !skills.length && "teaching material", !ids.length && "assessment", r?.gap?.trim(), !audit && strategy === "local" && LOCAL_GAP("coverage audit")].filter((x): x is string => !!x);
       availability.push({ objective: o.id, sources: refs, lessons: skills, questions: ids, gaps });
     }
@@ -750,6 +759,6 @@ export async function compileCourse(p: {
   metrics.elapsedMs = Date.now() - start;
   if (strategy !== "local") metrics.mainModel = mainIdentity();
   const staged: StagedCourse = { status, inventory, sourceRevisions: [...sourceKeys], lessons, availability, issues, metrics, expansion: p.expansion };
-  const verified = new Set(availability.flatMap(a => a.questions));
+  const verified = new Set([...availability.flatMap(a => a.questions), ...sealedChecked]);
   return { topicBody, questionsBody: questionSections.filter(s => verified.has(/^### (Q\d+)/.exec(s)?.[1] ?? "")).join("\n\n"), subject, staged, usage, calls };
 }

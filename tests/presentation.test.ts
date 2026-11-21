@@ -735,7 +735,7 @@ test("a refresh costs nothing when no note changed and rewrites only the subskil
   assert.deepEqual([same.refresh, same.usage.calls, t.calls.length], ["unchanged", 0, 0]);
 
   const changed = material.map((m) => (m.name === "Pipe notes" ? { ...m, text: m.text + "\n\nA full pipe blocks the writer." } : m));
-  t.replies.push(`### 3. Pipe buffer\nprerequisites: 1\nobjectives: O3\nvisual: simulation | the read and write indices wrap around the array\n- A pipe is a fixed-size circular buffer; a full pipe blocks the writer ([[Pipe notes]]).\nworked example:\nWith 4 slots full, the writer waits until slot 0 is read.\n\n=====QUESTIONS=====\n\n### Q1\nsubskill: 3\ntype: short\nfamily: full-pipe\ntask: application\nquestion: What happens to a writer when the pipe is full?\nanswer: it blocks\nexplanation: No free slot.`);
+  t.replies.push(`### 3. Pipe buffer\nprerequisites: 1\nobjectives: O3\nvisual: simulation | the read and write indices wrap around the array\n- A pipe is a fixed-size circular buffer; a full pipe blocks the writer ([[Pipe notes]]).\nworked example:\nWith 4 slots full, the writer waits until slot 0 is read.\n\n=====QUESTIONS=====\n\n### Q1\nsubskill: 3\ntype: short\nfamily: full-pipe\ntask: application\nquestion: What happens to a writer when the pipe is full?\nanswer: it blocks\nexplanation: No free slot.\n\n### Q2\nsubskill: 3\ntype: short\nfamily: drain-probe\ntask: probe\nquestion: A reader empties an eight-slot ring one slot per second. After how many seconds may a stalled producer resume?\nanswer: 1\nexplanation: One free slot is enough.`);
   const r = await t.engine.refresh({ ...req, material: changed });
   assert.deepEqual([r.refresh, r.subskillsRefreshed, t.calls.length], ["partial", [3], 1]);
   assert.match(t.calls[0].input, /REFRESH: 3/);
@@ -746,6 +746,10 @@ test("a refresh costs nothing when no note changed and rewrites only the subskil
   assert.match(topic.subskills.find((s) => s.n === 3)!.section, /a full pipe blocks the writer/);
   const qs = await t.store.loadQuestions(t.dir);
   assert.deepEqual(qs.map((q) => [q.id, q.subskill]), [["Q1", 1], ["Q2", 1], ["Q3", 2], ["Q4", 2], ["Q6", 3]], "the old question on 3 is replaced and the new one takes a fresh id");
+  // The refresh's probe is sealed, not banked.
+  assert.equal(r.questions, 5);
+  assert.deepEqual((await t.store.loadSealed(t.dir)).map((q) => [q.subskill, q.task]), [[3, "probe"]]);
+  assert.ok(!qs.some((q) => q.task === "probe"));
   const after = await t.store.loadState(t.dir, 4);
   assert.deepEqual([after.levels[3], after.attempts.map((a) => a.id), after.cards.Q1?.interval], [2, ["keep"], 6], "levels, evidence and untouched review schedules are kept");
   const pkg = (await t.store.loadPackage(t.dir))!;

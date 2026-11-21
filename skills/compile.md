@@ -43,7 +43,7 @@ worked example:
 subskill: <number>
 type: <mcq | short | open>
 family: <a short name shared by questions that test the same thing the same way, such as power-rule-polynomial>
-task: <recall | application | transfer | prediction | explanation | error-finding | edge-case>
+task: <recall | application | transfer | prediction | explanation | error-finding | edge-case | probe>
 difficulty: <1 to 5>
 question: <text>
 options:

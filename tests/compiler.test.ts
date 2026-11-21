@@ -614,6 +614,70 @@ test("saved courses reopen, unchanged refresh costs nothing, and expansion leave
   assert.equal(await fs.read(`${complete.dir}/state.md`), saved);
 });
 
+/**
+ * A model that writes a probe question only when the synthesis prompt asks for one with task "probe",
+ * and an audit that lists every question it is shown, or every one but the probe.
+ */
+const PROBE_TEXT = "A tap fills a 12 litre bucket at 3 litres a minute. How many minutes does it take?";
+function probing(auditProbe = true): Model {
+  const call = fake({ audit: (input: any, reply: any) => ({ rows: reply.rows.map((r: any) => ({ ...r, questions: input.questions.filter((q: any) => auditProbe || q.task !== "probe").map((q: any) => q.id) })) }) });
+  return async o => {
+    const r = await call(o);
+    const units = (r.structured as { units?: any[] } | undefined)?.units;
+    if (units && /task "probe"/.test(o.system)) for (const u of units) u.questions.push({ type: "short", question: PROBE_TEXT, options: [], answer: "4", explanation: "12 / 3 = 4.", rubric: "", task: "probe", family: "bucket-rate", difficulty: 3, generator: "" });
+    return r;
+  };
+}
+
+test("cold probes end to end: the staged compile asks for a probe, the audit checks it, saveCompiled seals it, and a probe asks and scores it", async () => {
+  const today = "2026-11-17";
+  const fs = new MemFS(), store = new Store(fs, "Tutor", () => today);
+  const settings: EngineSettings = { claudePath: "", chatModel: "fixture", compileModel: "fixture", utilityModel: "fixture", effort: "low", targetLevel: 4,
+    maxChatWords: 600, maxTopicWords: 2000, singlePassWords: 600, smartRouting: false, hardEffort: "high" };
+  const engine = new Engine(store, () => settings, () => today);
+  (engine as unknown as { call: Model }).call = probing();
+  const r = await engine.compile({ title: "Linear maps", goal: "", material, mode: "notes", fm: {} });
+  assert.equal(r.status, "complete");
+  assert.equal(r.questions, 1, "the notice counts the bank question only");
+  assert.ok(await fs.exists(`${r.dir}/sealed.md`), "the compile wrote a sealed question");
+  assert.ok((await fs.read(`${r.dir}/sealed.md`)).includes(PROBE_TEXT));
+  assert.ok(!(await fs.read(`${r.dir}/questions.md`)).includes(PROBE_TEXT), "questions.md never holds the probe");
+  const sealed = await store.loadSealed(r.dir);
+  const state = await store.loadState(r.dir, 4);
+  assert.deepEqual(sealed.map((q) => [q.task, q.concept]), [["probe", state.concepts[1]]]);
+  // A sealed question never counts as assessing its objective.
+  const pkg = (await store.loadPackage(r.dir))!;
+  const bank = (await store.loadQuestions(r.dir)).map((q) => q.id);
+  assert.deepEqual(bank, ["Q1"]);
+  assert.deepEqual(pkg.staged!.lessons.map((l) => l.questions), [["Q1"]]);
+  assert.deepEqual(pkg.staged!.availability.map((a) => a.questions), [["Q1"]]);
+  assert.deepEqual(pkg.objectives.map((o) => o.questions), [["Q1"]]);
+
+  // The concept is ready: level 3, first unaided success before today. The probe asks the sealed question and scores it.
+  state.levels[1] = 3;
+  for (const [id, day] of [["u1", "2026-11-15"], ["u2", "2026-11-16"]]) state.attempts.push({
+    v: 2, id, skill: 1, concept: state.concepts[1], questionId: "Q1", question: "What is T(0,3)?", answer: "0", activity: "independent-practice", mode: "quiz", difficulty: null,
+    result: "correct", errorType: "", note: "", confidence: null, assisted: false, assistance: [], answerExposed: false, transfer: false, seconds: null,
+    timestamp: `${day}T10:00:00.000Z`, grading: "deterministic", verification: "verified", assumptions: "",
+  });
+  await store.saveState(r.dir, state);
+  const started = await engine.startProbe(r.dir);
+  assert.equal(started?.count, 1);
+  const turn = await engine.study(r.dir, started!.chatPath, "4");
+  assert.match(turn.reply, /1\/1 right/);
+  const st = await engine.probeStatus(r.dir);
+  assert.deepEqual([st.asked, st.correct, st.sealedTotal, st.count], [1, 1, 1, 0]);
+  assert.equal((await store.loadState(r.dir, 4)).levels[1], 3, "levels are unchanged");
+
+  // A probe the audit did not list is dropped like any unchecked question, so nothing is sealed.
+  // Another model, so the saved checkpoints of the first compile are not replayed.
+  (engine as unknown as { call: Model }).call = probing(false);
+  settings.compileModel = "fixture-2";
+  const unaudited = await engine.compile({ title: "Linear maps 2", goal: "", material, mode: "notes", fm: {} });
+  assert.ok(!(await fs.exists(`${unaudited.dir}/sealed.md`)));
+  assert.ok(!(await fs.read(`${unaudited.dir}/questions.md`)).includes(PROBE_TEXT));
+});
+
 test("a question's generator is kept only when trusted code checks it and it gives the question's own answer", async () => {
   const { parseQuestions } = await import("../src/formats");
   const gen = (answer: number) => JSON.stringify({ v: 1, params: { x: { min: 0, max: 9 }, y: { min: 1, max: 9 } }, template: "What is T({x},{y})?", answer: "x", tests: [{ params: { x: 0, y: 3 }, answer }] });
