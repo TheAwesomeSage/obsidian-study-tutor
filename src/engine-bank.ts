@@ -2,7 +2,7 @@
 // Part of the engine (see engine.ts): each function takes the engine it works for, and the
 // engine has a method of the same name that calls it. No Obsidian imports.
 
-import { zeroUsage } from "./claude";
+import { zeroUsage, type Usage } from "./claude";
 import { Attempt, Grading, Outcome, TASK_TYPES, TaskType, recordAttempt } from "./evidence";
 import { Chat, Grade, LearnerState, Mode, Question, objectiveStamp, answerText, chatWords, codeMark, differentNumbers, fmList, fmNum, fmStr, formatQuizQuestion, givesUp, looksLikeQuestion, mcqLetter, parseMcqReply, placementQuestions, sameShortAnswer, schedule, setLevel } from "./formats";
 import { Decision } from "./policy";
@@ -14,7 +14,7 @@ import { gradeOfOutcome, normaliseMark, outcomeOfGrade, withNote } from "./gradi
 import { secondsPerItem, tutorSchedules } from "./scheduler";
 import { IdeaStatus, coverageOf, ideaLabel, ideaOfQuestion, nextMove } from "./coverage";
 import { BankPurpose, TurnResult, TurnOpts, MAX_ANSWER_SECONDS, applyAttempt, pickQuizQuestion } from "./engine-common";
-import { dueMistake, fadedFor, followUp, freshVariant, markTask, metBefore, mistakeUpdates, pairedFor, taskHelp, taskOf } from "./bankvariants";
+import { type BankTask, dueMistake, fadedFor, followUp, freshVariant, markTask, metBefore, mistakeUpdates, pairedFor, taskHelp, taskOf } from "./bankvariants";
 import { baseQuestionId } from "./families";
 import { CodeRunRecord, codeGradingQuestion, codeRunMarkdown, codeRunRecord, codeSource, looksLikeCode, markCodeRun, notRun, sentAsCode, solutionMarkdown } from "./codequestions";
 import type { CodeRunReport, CodeTask } from "./codetask";
@@ -214,6 +214,130 @@ async function runCode(eng: Engine, task: CodeTask, source: string, opts: TurnOp
   }
 }
 
+/** What marking a bank answer gave: a re-prompt when the reply cannot be marked, or the mark with what produced it. */
+export type BankMark =
+  | { kind: "reply"; reply: string }
+  | { kind: "marked"; skipped: boolean; grade: Grade; note: string; grading: Grading; assumptions: string; reasoning: ReasoningAssessment | null; rubric: string | undefined; codeRun: CodeRunRecord | null; mistake: string; usage: Usage; tools: ToolResult[] };
+
+/**
+ * Marks one answer to a question by the bank's own route: a letter by code, code run against its tests,
+ * new numbers by the task's own answer, a plain match, SymPy, and only then one grading call. Shared by
+ * the quiz and by sealed probes, so both are marked by the same code. Changes nothing but what it returns.
+ */
+export async function markBankAnswer(eng: Engine, pending: Question, task: BankTask | null, answer: string, opts: TurnOpts): Promise<BankMark> {
+  const tools: ToolResult[] = [];
+  let usage = zeroUsage();
+  let grade: Grade;
+  let note = "";
+  let grading: Grading = "deterministic";
+  let assumptions = "";
+  let reasoning: ReasoningAssessment | null = null;
+  let mistake = "";
+  let rubric = pending.rubric;
+  let codeRun: CodeRunRecord | null = null;
+  const skipped = givesUp(answer);
+  if (skipped) [grade, assumptions] = ["again", "the learner skipped the question"];
+  else if (pending.type === "mcq") {
+    const letter = parseMcqReply(answer, pending.options.length);
+    if (!letter) {
+      const reply = "Reply with one letter, for example **B**.";
+      return { kind: "reply", reply };
+    }
+    grade = letter === mcqLetter(pending.answer) ? "good" : "again";
+    assumptions = "the chosen letter was compared with the answer key";
+  } else if (pending.code) {
+    if (!looksLikeCode(answer)) {
+      const reply = "Reply with your code, in a fenced code block or as plain text, or say **skip**.";
+      return { kind: "reply", reply };
+    }
+    // A code question: the learner's source is run against the task's tests (codequestions.ts).
+    // The run decides the result and nothing else. When nothing could run it, one grading call
+    // judges the code instead, and the attempt says it was not run.
+    const report = await runCode(eng, pending.code, codeSource(answer), opts);
+    const run = markCodeRun(pending.code, report, pending.rubric);
+    codeRun = run ? run.record : codeRunRecord(pending.code, report);
+    if (run) {
+      grade = run.proposed === "correct" ? "good" : run.proposed === "partial" ? "hard" : "again";
+      note = run.feedback;
+      grading = "executed";
+      assumptions = run.assumptions;
+      reasoning = run.reasoning;
+      rubric = run.rubric;
+      mistake = run.errorType;
+    } else {
+      const why = codeRun.message.replace(/\s+/g, " ").replace(/[.\s]+$/, "") || "no runner for this language here";
+      const g = await eng.grade(codeGradingQuestion(pending), answer);
+      grade = g.grade;
+      note = [`Not run (${why}), so the model judged your code without running it.`, g.feedback].filter(Boolean).join(" ");
+      usage = g.usage;
+      grading = "model";
+      assumptions = `the code was not run (${why}); one model judgement of it against the tests and the reference solution, not independently checked`;
+      reasoning = g.reasoning;
+    }
+  } else if (task?.inst) {
+    // New numbers or a repair task: code computed the answer, so code marks it.
+    const m = markTask(task, answer);
+    if (!m) {
+      const reply = task.kind !== "fix" ? "Reply with your answer as a number, for example **12.5**." : 'Reply as "step N, answer X", for example **step 2, answer 12.5**.';
+      return { kind: "reply", reply };
+    }
+    [grade, note, assumptions, mistake] = [m.grade, m.note, m.assumptions, m.mistake];
+  } else if (pending.type === "short" && sameShortAnswer(answer, pending.answer)) [grade, assumptions] = ["good", "matched the expected answer after ignoring case and spacing"];
+  else if (pending.type === "short" && differentNumbers(answer, pending.answer)) [grade, assumptions] = ["again", "both answers are plain numbers, and they differ"];
+  else {
+    // An answer in another form (1/2 for 0.5, or an unsimplified expression): SymPy can say
+    // whether it equals the expected one, with no model call. If SymPy fails or cannot
+    // tell, that decides nothing and the answer goes to the grading call.
+    const sym = pending.type === "short" ? await eng.checkEquivalent(pending.answer, answer) : null;
+    if (sym?.tool) tools.push(sym.tool);
+    if (sym && sym.equal !== null) {
+      grade = sym.equal ? "good" : "again";
+      note = sym.equal ? "SymPy confirms your answer equals the expected one." : "SymPy finds your answer is not equal to the expected one.";
+      grading = sym.grading;
+      assumptions = sym.assumptions;
+    } else {
+      // Not something code can mark: one small grading call. If it fails, the error is
+      // shown with a retry and nothing is recorded: the answer stays ungraded.
+      const g = await eng.grade(pending, answer);
+      grade = g.grade;
+      note = g.feedback;
+      usage = g.usage;
+      grading = "model";
+      assumptions = "one model judgement against the model answer, not independently checked";
+      reasoning = g.reasoning;
+      // Where both answers end in an expression, SymPy compares the final results. That settles
+      // the result and nothing else: the method and the assumptions stay the grader's judgement.
+      if (reasoning && pending.type === "open") {
+        const given = finalExpression(answer);
+        const expected = finalExpression(pending.answer);
+        const sym = given && expected ? await eng.checkEquivalent(expected, given) : null;
+        if (sym?.tool) tools.push(sym.tool);
+        if (sym && sym.equal !== null) {
+          reasoning = withCheck(reasoning, { evaluated: `the final result ${given} against the expected ${expected}`, kind: sym.grading === "numeric" ? "numeric" : "symbolic", outcome: sym.equal, assumptions: sym.assumptions || "compared as expressions" });
+          assumptions += "; SymPy checked the final result only, not the method";
+        }
+      }
+    }
+  }
+  return { kind: "marked", skipped, grade, note, grading, assumptions, reasoning, rubric, codeRun, mistake, usage, tools };
+}
+
+/**
+ * The verdict a marked answer is shown with: its head, the note, a run's tests, then the answer and
+ * explanation unless the answer was right. `result` and `note` are the held mark's (grading.ts), and
+ * `score` is an optional closing line.
+ */
+export function verdictText(m: Extract<BankMark, { kind: "marked" }>, q: Question, result: Outcome, note: string, score = ""): string {
+  const head = m.skipped ? "**Skipped.**" : result === "ungraded" ? "**Left ungraded.**" : result === "incorrect" ? "**Incorrect.**" : result === "partial" ? "**Partly right.**" : "**Correct.**";
+  const parts = [note ? `${head} ${note}` : head];
+  // Each test's result, hidden ones included now that the answer is marked.
+  if (m.codeRun && m.grading === "executed") parts.push(codeRunMarkdown(m.codeRun));
+  // The solution is shown only now, after an attempt or an explicit skip.
+  if (result !== "correct") parts.push(`${q.code ? solutionMarkdown(q) : `Answer: ${answerText(q)}`}${q.explanation ? `\n\n${q.explanation}` : ""}`);
+  if (score) parts.push(score);
+  return parts.join("\n\n");
+}
+
 /**
  * A turn that uses plain code wherever it can. Questions come from the question bank;
  * multiple-choice and exact short answers are marked without a model, and other forms of a
@@ -273,104 +397,16 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
       answer = last.text;
     }
     if (answer) {
-      let grade: Grade;
-      let note = "";
-      let grading: Grading = "deterministic";
-      let assumptions = "";
-      let reasoning: ReasoningAssessment | null = null;
-      let mistake = "";
-      let rubric = pending.rubric;
-      let codeRun: CodeRunRecord | null = null;
-      const skipped = givesUp(answer);
-      if (skipped) [grade, assumptions] = ["again", "the learner skipped the question"];
-      else if (pending.type === "mcq") {
-        const letter = parseMcqReply(answer, pending.options.length);
-        if (!letter) {
-          const reply = "Reply with one letter, for example **B**.";
-          chat.messages.push({ role: "tutor", text: reply });
-          await eng.store.saveChat(chatPath, chat);
-          return { reply, changes: [], state, usage, local: true };
-        }
-        grade = letter === mcqLetter(pending.answer) ? "good" : "again";
-        assumptions = "the chosen letter was compared with the answer key";
-      } else if (pending.code) {
-        if (!looksLikeCode(answer)) {
-          const reply = "Reply with your code, in a fenced code block or as plain text, or say **skip**.";
-          chat.messages.push({ role: "tutor", text: reply });
-          await eng.store.saveChat(chatPath, chat);
-          return { reply, changes: [], state, usage, local: true };
-        }
-        // A code question: the learner's source is run against the task's tests (codequestions.ts).
-        // The run decides the result and nothing else. When nothing could run it, one grading call
-        // judges the code instead, and the attempt says it was not run.
-        const report = await runCode(eng, pending.code, codeSource(answer), opts);
-        const run = markCodeRun(pending.code, report, pending.rubric);
-        codeRun = run ? run.record : codeRunRecord(pending.code, report);
-        if (run) {
-          grade = run.proposed === "correct" ? "good" : run.proposed === "partial" ? "hard" : "again";
-          note = run.feedback;
-          grading = "executed";
-          assumptions = run.assumptions;
-          reasoning = run.reasoning;
-          rubric = run.rubric;
-          mistake = run.errorType;
-        } else {
-          const why = codeRun.message.replace(/\s+/g, " ").replace(/[.\s]+$/, "") || "no runner for this language here";
-          const g = await eng.grade(codeGradingQuestion(pending), answer);
-          grade = g.grade;
-          note = [`Not run (${why}), so the model judged your code without running it.`, g.feedback].filter(Boolean).join(" ");
-          usage = g.usage;
-          grading = "model";
-          assumptions = `the code was not run (${why}); one model judgement of it against the tests and the reference solution, not independently checked`;
-          reasoning = g.reasoning;
-        }
-      } else if (task?.inst) {
-        // New numbers or a repair task: code computed the answer, so code marks it.
-        const m = markTask(task, answer);
-        if (!m) {
-          const reply = task.kind !== "fix" ? "Reply with your answer as a number, for example **12.5**." : 'Reply as "step N, answer X", for example **step 2, answer 12.5**.';
-          chat.messages.push({ role: "tutor", text: reply });
-          await eng.store.saveChat(chatPath, chat);
-          return { reply, changes: [], state, usage, local: true };
-        }
-        [grade, note, assumptions, mistake] = [m.grade, m.note, m.assumptions, m.mistake];
-      } else if (pending.type === "short" && sameShortAnswer(answer, pending.answer)) [grade, assumptions] = ["good", "matched the expected answer after ignoring case and spacing"];
-      else if (pending.type === "short" && differentNumbers(answer, pending.answer)) [grade, assumptions] = ["again", "both answers are plain numbers, and they differ"];
-      else {
-        // An answer in another form (1/2 for 0.5, or an unsimplified expression): SymPy can say
-        // whether it equals the expected one, with no model call. If SymPy fails or cannot
-        // tell, that decides nothing and the answer goes to the grading call.
-        const sym = pending.type === "short" ? await eng.checkEquivalent(pending.answer, answer) : null;
-        if (sym?.tool) tools.push(sym.tool);
-        if (sym && sym.equal !== null) {
-          grade = sym.equal ? "good" : "again";
-          note = sym.equal ? "SymPy confirms your answer equals the expected one." : "SymPy finds your answer is not equal to the expected one.";
-          grading = sym.grading;
-          assumptions = sym.assumptions;
-        } else {
-          // Not something code can mark: one small grading call. If it fails, the error is
-          // shown with a retry and nothing is recorded: the answer stays ungraded.
-          const g = await eng.grade(pending, answer);
-          grade = g.grade;
-          note = g.feedback;
-          usage = g.usage;
-          grading = "model";
-          assumptions = "one model judgement against the model answer, not independently checked";
-          reasoning = g.reasoning;
-          // Where both answers end in an expression, SymPy compares the final results. That settles
-          // the result and nothing else: the method and the assumptions stay the grader's judgement.
-          if (reasoning && pending.type === "open") {
-            const given = finalExpression(answer);
-            const expected = finalExpression(pending.answer);
-            const sym = given && expected ? await eng.checkEquivalent(expected, given) : null;
-            if (sym?.tool) tools.push(sym.tool);
-            if (sym && sym.equal !== null) {
-              reasoning = withCheck(reasoning, { evaluated: `the final result ${given} against the expected ${expected}`, kind: sym.grading === "numeric" ? "numeric" : "symbolic", outcome: sym.equal, assumptions: sym.assumptions || "compared as expressions" });
-              assumptions += "; SymPy checked the final result only, not the method";
-            }
-          }
-        }
+      const m = await markBankAnswer(eng, pending, task ?? null, answer, opts);
+      if (m.kind === "reply") {
+        chat.messages.push({ role: "tutor", text: m.reply });
+        await eng.store.saveChat(chatPath, chat);
+        return { reply: m.reply, changes: [], state, usage, local: true };
       }
+      usage = m.usage;
+      tools.push(...m.tools);
+      const { skipped, grade, grading, assumptions, reasoning, rubric, codeRun, mistake } = m;
+      let note = m.note;
       // The proposed mark is held to its breakdown (grading.ts). An uncheckable answer, SymPy
       // disagreeing with the grader, or a mark its own breakdown contradicts is left ungraded,
       // never guessed; a right result whose required method could not be judged is partly right
@@ -417,14 +453,7 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
       await eng.store.saveState(dir, state);
       chat.fm.card = "";
       chat.fm.pending_confidence = "";
-      const head = skipped ? "**Skipped.**" : conflict ? "**Left ungraded.**" : result === "incorrect" ? "**Incorrect.**" : result === "partial" ? "**Partly right.**" : "**Correct.**";
-      const parts = [note ? `${head} ${note}` : head];
-      // Each test's result, hidden ones included now that the answer is marked.
-      if (codeRun && grading === "executed") parts.push(codeRunMarkdown(codeRun));
-      // The solution is shown only now, after an attempt or an explicit skip.
-      if (result !== "correct") parts.push(`${pending.code ? solutionMarkdown(pending) : `Answer: ${answerText(pending)}`}${pending.explanation ? `\n\n${pending.explanation}` : ""}`);
-      if (!opts.adaptive && fmNum(chat.fm, "total", 0) % 5 === 0) parts.push(`*Score so far: ${fmNum(chat.fm, "right", 0)}/${fmNum(chat.fm, "total", 0)}.*`);
-      verdict = parts.join("\n\n");
+      verdict = verdictText(m, pending, result, note, !opts.adaptive && fmNum(chat.fm, "total", 0) % 5 === 0 ? `*Score so far: ${fmNum(chat.fm, "right", 0)}/${fmNum(chat.fm, "total", 0)}.*` : "");
     }
   }
 

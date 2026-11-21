@@ -1967,3 +1967,33 @@ test("cold probes: asked and correct skip ungraded and disputed answers, and not
   assert.equal(st.asked, 4);
   assert.deepEqual(st.notTransferring, [1, 2]);
 });
+
+test("bank marking: markBankAnswer marks a letter by code and asks again for a non-letter", async () => {
+  const { markBankAnswer } = await import("../src/engine-bank");
+  const { engine, calls } = await motion();
+  const q = F.parseQuestions(BANK)[0];
+  const right = await markBankAnswer(engine, q, null, "B", {});
+  assert.equal(right.kind, "marked");
+  if (right.kind === "marked") assert.deepEqual([right.grade, right.grading, right.skipped], ["good", "deterministic", false]);
+  const wrong = await markBankAnswer(engine, q, null, "A", {});
+  assert.ok(wrong.kind === "marked" && wrong.grade === "again");
+  assert.deepEqual(await markBankAnswer(engine, q, null, "maybe", {}), { kind: "reply", reply: "Reply with one letter, for example **B**." });
+  assert.equal(calls(), 0);
+});
+
+test("bank marking: verdictText gives one verdict for bank and sealed answers", async () => {
+  const { markBankAnswer, verdictText } = await import("../src/engine-bank");
+  const { engine } = await motion();
+  const q = F.parseQuestions(BANK)[0];
+  const right = await markBankAnswer(engine, q, null, "B", {});
+  const wrong = await markBankAnswer(engine, q, null, "A", {});
+  const skip = await markBankAnswer(engine, q, null, "skip", {});
+  assert.ok(right.kind === "marked" && wrong.kind === "marked" && skip.kind === "marked");
+  if (right.kind !== "marked" || wrong.kind !== "marked" || skip.kind !== "marked") return;
+  assert.equal(verdictText(right, q, "correct", ""), "**Correct.**");
+  assert.equal(verdictText(wrong, q, "incorrect", ""), `**Incorrect.**\n\nAnswer: ${F.answerText(q)}\n\nThe terms shrink.`);
+  assert.equal(verdictText(skip, q, "skipped", "", "*Score so far: 1/5.*").startsWith("**Skipped.**\n\nAnswer: "), true);
+  assert.equal(verdictText(right, q, "ungraded", "n").startsWith("**Left ungraded.** n"), true);
+  assert.equal(verdictText(right, q, "partial", "").startsWith("**Partly right.**"), true);
+  assert.equal(verdictText(right, q, "correct", "", "*Score so far: 1/5.*"), "**Correct.**\n\n*Score so far: 1/5.*");
+});
