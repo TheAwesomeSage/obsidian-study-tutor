@@ -1863,3 +1863,107 @@ test("cold probes: a probe answer is never evidence for or against a misconcepti
   assert.equal(M.countable(wrong), false);
   assert.equal(M.countable(attempt({ id: "w", result: "incorrect" })), true);
 });
+
+// ---------- cold probes: when one is due and what it asks ----------
+
+const probeState = (levels: (number | null)[], firstDay = "2026-11-15") => {
+  const s = F.newState(F.parseTopic(CARD(levels.map((_, i) => [`Skill ${i + 1}`, "none"] as [string, string]))), 4);
+  levels.forEach((lv, i) => {
+    const n = i + 1;
+    s.levels[n] = lv;
+    s.concepts[n] = `c${n}`;
+    if (lv !== null && lv >= 3) {
+      for (const [k, day] of [["a", firstDay], ["b", "2026-11-16"]]) s.attempts.push(attempt({ id: `u${n}${k}`, skill: n, concept: `c${n}`, timestamp: `${day}T10:00:00.000Z` }));
+    }
+  });
+  return s;
+};
+const sealedQ = (n: number, k = 0, over: Partial<F.Question> = {}): F.Question => ({
+  id: `P${String(n * 10 + k).padStart(10, "0")}`, subskill: 0, type: "short", question: `unseen ${n}.${k}`, options: [], answer: "1", explanation: "", task: "probe", concept: `c${n}`, ...over,
+});
+const probeAttempt = (id: string, q: F.Question, over: Partial<Attempt> = {}) =>
+  attempt({ id, skill: q.subskill, concept: q.concept!, questionId: q.id, probe: true, activity: "probe", taskType: "transfer", timestamp: "2026-11-10T10:00:00.000Z", ...over });
+
+test("cold probes: the queue takes one unspent sealed question per concept ready for it, at most six", async () => {
+  const P = await import("../src/probe");
+  const s = probeState([4, 4, 4, 4, 3, 3, 3, 3, 2, 3]);
+  s.attempts = s.attempts.filter((a) => a.skill !== 10);
+  s.attempts.push(attempt({ id: "t10", skill: 10, concept: "c10", timestamp: "2026-11-17T09:00:00.000Z" }));
+  const gen = sealedQ(2, 1, { generator: {} as any });
+  const sealed = [...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => sealedQ(n)), sealedQ(1, 1), gen, sealedQ(99)];
+  const q = P.probeQueue(sealed, s, "2026-11-17");
+  assert.equal(q.length, 6);
+  assert.deepEqual(q.map((x) => x.subskill), [1, 2, 3, 4, 5, 6], "level 4 first, then lowest n");
+  assert.ok(!q.some((x) => [9, 10].includes(x.subskill)), "level 2 and the first success today are not ready");
+  assert.equal(q[1].id, gen.id, "the question with a generator comes first");
+  assert.equal(q[0].id, sealedQ(1).id);
+  // A spent question gives way to the concept's other one.
+  const spent = P.spentSealed(sealed, [probeAttempt("pa", sealedQ(1))]);
+  assert.deepEqual([...spent], [sealedQ(1).id]);
+  s.attempts.push(probeAttempt("pa", sealedQ(1)));
+  assert.equal(P.probeQueue(sealed, s, "2026-11-17")[0].id, sealedQ(1, 1).id);
+  // A question whose concept is unknown is dropped; the rest take their subskill from the concept.
+  const current = P.currentSealed(sealed, s);
+  assert.equal(current.length, sealed.length - 1);
+  assert.ok(!current.some((x) => x.concept === "c99"));
+  s.concepts = { ...s.concepts, 1: "c2", 2: "c1" };
+  assert.deepEqual(P.currentSealed([sealedQ(1), sealedQ(2)], s).map((x) => x.subskill), [2, 1]);
+});
+
+test("cold probes: a probe is due first, then every 14 days, sooner before an exam, never with nothing to ask", async () => {
+  const P = await import("../src/probe");
+  const today = "2026-11-17";
+  const s = probeState([4, 3]);
+  const sealed = [sealedQ(1), sealedQ(2)];
+  let st = P.probeStatus(sealed, s, today);
+  assert.deepEqual([st.count, st.due, st.why, st.lastProbe, st.sealedTotal], [2, true, "no cold probe yet", null, 2]);
+  const probeOn = (day: string, over: Partial<Attempt> = {}) => s.attempts.push(probeAttempt(`p-${day}-${s.attempts.length}`, sealedQ(1, 5), { timestamp: `${day}T10:00:00.000Z`, ...over }));
+  probeOn("2026-11-07");
+  st = P.probeStatus(sealed, s, today);
+  assert.deepEqual([st.due, st.why, st.lastProbe], [false, "", "2026-11-07"]);
+  s.attempts.pop();
+  probeOn("2026-11-12");
+  assert.equal(P.probeStatus(sealed, s, today, "2026-11-20").due, false, "the exam is near, but the last probe is under a week old");
+  s.attempts.pop();
+  probeOn("2026-11-03");
+  st = P.probeStatus(sealed, s, today);
+  assert.deepEqual([st.due, st.why], [true, "14 days since the last cold probe"]);
+  s.attempts.pop();
+  probeOn("2026-11-09");
+  st = P.probeStatus(sealed, s, today, "2026-11-22");
+  assert.deepEqual([st.due, st.why], [true, "the exam is within a week"]);
+  assert.equal(P.probeStatus(sealed, s, today, "2026-11-30").due, false, "the exam is far");
+  assert.equal(P.probeStatus(sealed, s, today, "2026-11-10").due, false, "an exam in the past does not count");
+  // Nothing left to ask.
+  s.attempts.push(probeAttempt("x1", sealedQ(1)), probeAttempt("x2", sealedQ(2)));
+  st = P.probeStatus(sealed, s, today);
+  assert.deepEqual([st.count, st.due], [0, false]);
+  assert.equal(P.probeStatus([], s, today).sealedTotal, 0);
+});
+
+test("cold probes: asked and correct skip ungraded and disputed answers, and not transferring follows the concept through a renumbering", async () => {
+  const P = await import("../src/probe");
+  const s = probeState([4, 4, 3]);
+  const [q1, q2, q3] = [sealedQ(1), sealedQ(2), sealedQ(3)];
+  s.attempts.push(
+    probeAttempt("a", q1, { result: "correct", timestamp: "2026-11-10T10:00:00.000Z" }),
+    probeAttempt("b", q2, { result: "incorrect", timestamp: "2026-11-11T10:00:00.000Z" }),
+    probeAttempt("c", q3, { result: "incorrect", timestamp: "2026-11-12T10:00:00.000Z" }),
+    probeAttempt("d", q1, { result: "ungraded", timestamp: "2026-11-13T10:00:00.000Z" }),
+    probeAttempt("e", q1, { result: "incorrect", verification: "disputed", timestamp: "2026-11-14T10:00:00.000Z" }),
+  );
+  let st = P.probeStatus([q1, q2, q3], s, "2026-11-17");
+  assert.deepEqual([st.asked, st.correct, st.lastProbe], [3, 1, "2026-11-14"]);
+  assert.deepEqual(st.notTransferring, [2], "level 4 and wrong; subskill 3 is only level 3 and subskill 1 last passed");
+  // A recompile swaps the numbers of the first two concepts: the same concept is reported under its new number.
+  s.concepts = { 1: "c2", 2: "c1", 3: "c3" };
+  s.levels = { 1: 4, 2: 4, 3: 3 };
+  st = P.probeStatus([q1, q2, q3], s, "2026-11-17");
+  assert.deepEqual(st.notTransferring, [1]);
+  // A probe attempt for a question since dropped from sealed.md is still counted and still found by its concept.
+  const gone = sealedQ(1, 7);
+  s.attempts.push(probeAttempt("f", gone, { result: "skipped", timestamp: "2026-11-16T10:00:00.000Z" }));
+  st = P.probeStatus([q2, q3], s, "2026-11-17");
+  assert.equal(st.asked, 4);
+  assert.deepEqual(st.notTransferring, [1, 2]);
+});
