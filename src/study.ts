@@ -21,6 +21,7 @@ import { isBankId } from "./bankvariants";
 import { coverageOf, coverageSummary } from "./coverage";
 import { codeRunSummary, codeTestRows } from "./codequestions";
 import { expansionLine } from "./expansion";
+import { activityContext, calibrationCue, type ActivityContext } from "./learning-context";
 import type { Screen, TutorView } from "./view";
 import { MODE_INFO, button, chip, confirmAction, iconButton, modeInfo } from "./ui";
 
@@ -59,6 +60,7 @@ export class StudyScreen implements Screen {
   /** Self-reported confidence for the answer being written, one of CONFIDENCE_LEVELS. Null until one is chosen. */
   private confidence: number | null = null;
   private attach = false;
+  private visualContext: { chatPath: string; value: ActivityContext } | null = null;
   private whyOpen = false;
   private saveDrafts = 0;
 
@@ -482,7 +484,9 @@ export class StudyScreen implements Screen {
     let hintUsed = false;
     // Serialize writes so rapid checks cannot overwrite each other's evidence records.
     let recording = Promise.resolve();
+    this.visualContext = { chatPath, value: { ...activityContext(outcome.lesson, { version: 1, type: "opened", moduleId: outcome.lesson.moduleId, reason: request.reason }), skill: outcome.concept ?? undefined } };
     v.presentActivity(outcome.lesson, request, event => {
+      this.visualContext = { chatPath, value: activityContext(outcome.lesson!, event, this.visualContext?.chatPath === chatPath && this.visualContext.value.moduleId === outcome.lesson!.moduleId ? this.visualContext.value : undefined) };
       if (event.type === "hint") hintUsed = true;
       if (event.type !== "assessment" || !outcome.activity) return;
       const activityId = outcome.activity.id;
@@ -550,6 +554,8 @@ export class StudyScreen implements Screen {
     const ml = markLine(a);
     if (ml) more.createDiv({ cls: "st-meta st-reasoning", text: ml });
     if (a.note) more.createDiv({ cls: "st-meta", text: a.note });
+    const calibration = calibrationCue([a]);
+    if (calibration) box.createDiv({ cls: "st-meta", text: calibration });
     // The result, the method and the assumptions, each with who decided it.
     if (a.reasoning) for (const l of reasoningLines(a.reasoning)) more.createDiv({ cls: "st-meta st-reasoning", text: l });
     // Each test, hidden ones named now that the answer is marked, with the first failures' details as plain text.
@@ -627,6 +633,15 @@ export class StudyScreen implements Screen {
     // Help with the open question, beside the box you type in.
     const q = this.quickEl;
     q.empty();
+    if (!probe) {
+      const coach = v.chat && fmStr(v.chat.fm, "coding_coach") === "yes";
+      const coachButton = button(q, { label: coach ? "Stop coding coach" : "Coding coach", icon: "code", tone: "ghost", onClick: () => void this.send(coach ? "Stop coding coach" : "Start coding coach") });
+      coachButton.disabled = this.busy;
+      if (v.chat && fmStr(v.chat.fm, "placement") === "on") {
+        const skip = button(q, { label: "Skip pretest", icon: "skip-forward", tone: "ghost", onClick: () => void this.send("Skip pretest") });
+        skip.disabled = this.busy;
+      }
+    }
     q.toggleClass("is-empty", asking);
     if (!asking) {
       const quick = (label: string, icon: string, message: string, title: string) => {
@@ -767,7 +782,7 @@ export class StudyScreen implements Screen {
       const attached = await this.attachedNote();
       this.attach = false;
       // Start the turn first: it decides its path from the chat as it stood before this message.
-      const turn = v.plugin.engine.study(dir, chatPath, text, { attached, confidence: this.confidence, onSpawn: (kill) => (this.kill = kill) });
+      const turn = v.plugin.engine.study(dir, chatPath, text, { attached, confidence: this.confidence, activityContext: this.visualContext?.chatPath === chatPath ? this.visualContext.value : undefined, onSpawn: (kill) => (this.kill = kill) });
       if (text) {
         v.chat.messages.push({ role: "you", text });
         if (this.el) this.input.value = "";

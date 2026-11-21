@@ -1,0 +1,28 @@
+# Learning design claim ledger
+
+Review date: 2026-11-21. Sources below support particular design choices, not this plugin's effectiveness. Dates are source publication dates where stated; repository evidence is the d60ac67 snapshot and this implementation. A model-generated assertion is not an independent source. Product capabilities are not causal learning evidence.
+
+| ID / recommendation | Exact source | Date / evidence type | Limitation | Application |
+|---|---|---|---|---|
+| C1 Retrieval, spacing, related interleaving | https://link.springer.com/article/10.1007/s10648-026-10225-5 | 2026-10-29; classroom meta-analysis | Heterogeneity; no universal routing percentage or product ranking | Preserve delayed checks and trial related contrasts |
+| C2 Fade worked steps | https://link.springer.com/article/10.1023/B:TRUC.0000021815.74806.f6 | 2004; experimental research | Domain-specific; no universal hint count | Existing completion/repair workflows |
+| C3 Repair supported misconceptions | https://link.springer.com/article/10.1007/s11251-021-09535-8 | 2021-03-17; experiment, 92 students | Does not establish every error as a misconception | Preserve corroboration and fresh checks |
+| C4 Separate assisted performance from learning | https://doi.org/10.1073/pnas.2422633122 | 2025; mathematics field experiment | Subsequent same-session exam, not multiweek retention | Keep assistance/exposure flags and sealed assessment |
+| C5 Checked question families | https://docs.stack-assessment.org/en/STACK_question_admin/Testing/ ; https://docs.numbas.org.uk/en/latest/question/reference.html | Living primary implementation documentation | Architectural precedent, not evidence that arbitrary generated questions are good | Validate variants and marking; retain family ancestry |
+| C6 Structured local generation | https://docs.ollama.com/capabilities/structured-outputs | Living official documentation | JSON validity does not prove semantic correctness | Keep schema plus semantic checks and bounded fallback |
+| C7 Local inference attribution | https://docs.ollama.com/faq#how-do-i-disable-ollamas-cloud-features | Living official documentation | Localhost can serve cloud inference | Retain backend checks and explicit strategy |
+| C8 Activity-aware explanation | https://brilliant.org/help/features/how-does-koji-work/ ; src/visuals/contracts.ts | Living product documentation; repository event contract | Capability precedent; no causal efficacy established for our snapshot | Reuse player events as bounded reference data, no inference per interaction |
+| C9 Optional prediction/pretest | src/engine-bank.ts placementTurn; src/visuals/player.ts prediction gate | Repository implementation | A placement answer is not mastery; skipping must not fabricate failures | Add a whole-pretest escape; retain existing placement |
+| C10 Confidence-triggered reflection/check | src/evidence.ts calibration data; src/learning-context.ts | Engineering hypothesis using existing evidence | Thresholds .75/.25 are product choices; confidence is not correctness | Exclude probes/helped/disputed/inconclusive attempts, cue repair/justification and later independent checking |
+| C11 Opt-in coding coaching | https://www.anthropic.com/research/AI-assistance-coding-skills | 2026-01-29; primary coding study | Immediate outcomes; use-pattern associations do not prove the proposed coach works | Explicit goal/prediction/repair workflow; no involuntary interruption |
+| C12 FSRS scheduling | https://docs.ankiweb.net/manual/deck-options ; src/scheduler.ts | Living official documentation; custom FSRS-6 implementation | Scheduling does not certify understanding; custom implementation needs parity checks | Preserve scheduler ownership, logs and rollback |
+| C13 Content-aware neural tracing | https://arxiv.org/abs/2407.02547 | 2024, revised 2025; benchmark research | Cross-domain prediction is not measured policy benefit here | Candidate shadow experiment, not enabled |
+| C14 Learned sequencing | https://educationaldatamining.org/edm2024/proceedings/2024.EDM-long-papers.21/index.html | 2024; logic tutor experiment | Reduced training time vs all-practice; reported random-skip comparisons did not establish superiority | Compare learned policies with simple baselines and delayed outcomes |
+| C15 Contextual bandit sequencing | https://arxiv.org/abs/2207.14003 | 2022; trained on thousands of student trajectories and trial | Completion/engagement differ from retained understanding | Future bounded experiment with action-probability logs |
+| C16 Checkpoints, objective versions, holdouts, planning | src/compiler.ts; src/objective-version.ts; src/sealed.ts; src/probe.ts; docs/PILOT.md | Repository architecture / engineering proposals | Code existence and test success are not human learning results | Preserve provenance, migration and separate evaluation; measure end-to-end costs |
+
+## Maintenance
+
+Implemented local semantic source recovery: official structured-output contract at https://docs.ollama.com/capabilities/structured-outputs (living primary documentation; reviewed 2026-11-21). It supports constrained generation, not semantic truth or measured learning gains. Application and limitations are in SEMANTIC-RETRIEVAL.md. Pipeline tests use scripted responses; no live relevance or latency result is claimed.
+
+Add a row before treating a new substantial recommendation as evidence-backed. Record source, date, evidence type, limitation and application. Label unsourced proposals as hypotheses. Revisit living documentation when changing an integration. Do not turn this ledger into runtime prompt overhead; the tutor receives only relevant course passages and compact learner context.

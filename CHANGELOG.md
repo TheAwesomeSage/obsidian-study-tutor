@@ -4,6 +4,14 @@ What changed in each version of Study Tutor, newest first.
 
 ## Unreleased
 
+- Optional semantic source recovery uses the configured local Ollama model when keyword evidence is thin. It selects existing passage IDs, preserves source text/citations, and falls back within a four-second budget. Cloud/unknown models are refused; repeated failures cool down and successful results are cached. It never grades answers or changes mastery. See docs/SEMANTIC-RETRIEVAL.md.
+
+- Activity-aware tutoring: the study screen passes a bounded snapshot of the learner's latest visual prediction, controls, action and response to the next tutor call on the same chat and focus. Playback itself still uses no inference.
+- Placement now has a Skip pretest control that leaves remaining questions unmarked.
+- Confidence mismatches now produce specific reflection feedback and tutor context. A later-day fresh check wins otherwise tied practice selection without changing marks or overriding existing policy constraints.
+- Coding coach is an opt-in, chat-scoped control beside the composer. It guides goal, prediction and repair; Stop returns to normal routing. Enabling it on an open question records help.
+- Added a combined feature evaluation and source/limitation ledger in docs/FEATURE-EVALUATION.md and docs/CLAIM-LEDGER.md. Neural tracing and learned sequencing remain explicitly unimplemented experiments.
+
 - **Cold probes measure transfer to unseen work.** The compile now writes one extra question per lesson to `sealed.md`, kept out of the question bank, flashcards and review so they stay unseen. A cold probe asks up to six of them with no help; the topic page shows the unseen-task score (after 3 answers) and tags a concept "not transferring" when its latest probe answer was wrong at level 4 or higher.
   - The coverage audit checks each sealed question like any other, but a sealed question never counts as assessing its objective. Lesson groups saved by an earlier version are synthesised again on the next compile, so that compile asks for the probes.
   - The audit is now told each lesson's probe ids, so it cannot leave a probe out as outside its lesson. After a probe answer, "How this was checked" says it counts toward the unseen-task score only, not "unaided evidence".

@@ -194,7 +194,7 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal(root.querySelector(".st-pending"), null);
   assert.ok($(root, ".st-composer > .st-quick.st-side"), "help buttons sit at the side of the answer box");
   assert.ok($(root, ".st-composer > .st-side.is-right .st-send"), "Send sits at the other side");
-  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent, b.disabled]), [["Hint", false], ["Explain", false], ["Skip", false], ["Visual", false]]);
+  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent, b.disabled]), [["Coding coach", false], ["Hint", false], ["Explain", false], ["Skip", false], ["Visual", false]]);
   // The reasoning behind the action is one click away.
   $(root, ".st-why-btn").click();
   assert.equal($(root, ".st-why-btn").getAttribute("aria-expanded"), "true");
