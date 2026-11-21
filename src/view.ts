@@ -296,6 +296,20 @@ export class TutorView extends ItemView {
     if (o.begin && this.chat && !this.chat.messages.length && this.mode !== "expert") void this.study.send("");
   }
 
+  /** Starts a cold probe on a topic and opens it. When nothing is ready any more, the screen is only redrawn. */
+  async startProbe(dir: string): Promise<void> {
+    try {
+      const made = await this.plugin.engine.startProbe(dir);
+      if (made) {
+        await this.startStudy({ dir, chatPath: made.chatPath });
+        return;
+      }
+    } catch (e) {
+      new Notice(`Study Tutor: ${(e as Error).message}`);
+    }
+    this.screens[this.screen].refresh?.();
+  }
+
   /** Acts on a suggested step: the review screen, or a chat in the right mode on the right concept. */
   async follow(step: NextStep, dir?: string): Promise<void> {
     if (step.action === "done") return;

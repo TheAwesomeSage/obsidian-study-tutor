@@ -401,6 +401,7 @@ export class StudyScreen implements Screen {
     const tail = this.tailEl;
     tail.empty();
     const chat = v.chat;
+    const probe = chat ? fmStr(chat.fm, "probe") === "yes" : false;
     const info = modeInfo(v.mode);
     const lastMsg = chat?.messages[chat.messages.length - 1];
 
@@ -416,11 +417,12 @@ export class StudyScreen implements Screen {
       return;
     }
 
+    if (probe) tail.createDiv({ cls: "st-notice st-probe-banner", text: "Cold probe: sealed questions, no help, levels unchanged." });
     if (this.changes.length) chip(tail, `Progress updated: ${this.changes.join("; ")}`, "good", "trending-up");
     if (this.marked) this.feedback(tail, this.marked);
     this.expansionChip(tail);
     const activity = this.activity;
-    if (activity && activity.dir === v.dir && activity.chatPath === v.chatPath) {
+    if (activity && !probe && activity.dir === v.dir && activity.chatPath === v.chatPath) {
       const out = activity.outcome;
       const card = tail.createDiv({ cls: "st-notice st-activity-offer" });
       card.createDiv({ cls: "st-meta", text: out.decision.reason });
@@ -617,6 +619,9 @@ export class StudyScreen implements Screen {
     const v = this.view;
     const question = this.openQuestionText();
     const asking = v.mode === "expert";
+    // A cold probe gives no help, so nothing that asks for a hint, an explanation or an activity is offered.
+    const probe = v.chat ? fmStr(v.chat.fm, "probe") === "yes" : false;
+    const NO_HELP = "No help during a cold probe";
 
     // Help with the open question, beside the box you type in.
     const q = this.quickEl;
@@ -625,13 +630,16 @@ export class StudyScreen implements Screen {
     if (!asking) {
       const quick = (label: string, icon: string, message: string, title: string) => {
         const b = button(q, { label, icon, tone: "ghost", title: `${label}: ${title}`, onClick: () => void this.send(message) });
-        b.disabled = this.busy || !question;
+        const help = probe && label !== "Skip";
+        b.disabled = this.busy || !question || help;
+        if (help) { b.title = NO_HELP; b.setAttribute("aria-label", NO_HELP); }
       };
       quick("Hint", "life-buoy", "Hint please.", "ask for a hint. The answer then counts as helped.");
       quick("Explain", "book-open", "Explain this to me.", "ask for an explanation. The answer then counts as helped.");
       quick("Skip", "skip-forward", "skip", "skip this question and see the answer. It is recorded as skipped.");
       const activity = button(q, { label: "Visual", icon: "play", tone: "ghost", title: "Visual activity: ask for a simulation of this concept. Uses a saved activity or Ollama.", onClick: () => void this.send("Show me a simulation for this concept.") });
-      activity.disabled = this.busy;
+      activity.disabled = this.busy || probe;
+      if (probe) { activity.title = NO_HELP; activity.setAttribute("aria-label", NO_HELP); }
     }
 
     this.input.placeholder = asking ? "Ask a question…  (Enter to send, Shift+Enter for a new line)" : question ? "Your answer…  (Enter to send, Shift+Enter for a new line)" : "Message…  (Enter to send, Shift+Enter for a new line)";

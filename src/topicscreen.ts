@@ -7,6 +7,7 @@ import { MIN_ESTIMATE_N, missingFor } from "./evidence";
 import { fmStr, mastery } from "./formats";
 import { isActive, misconceptionLine } from "./misconceptions";
 import { ago } from "./overview";
+import { PROBE_MIN_SHOWN, type ProbeStatus } from "./probe";
 import type { Screen, TutorView } from "./view";
 import { MODE_INFO, button, chip, emptyState, iconButton, levelPips, panel, pct, progressBar } from "./ui";
 
@@ -24,6 +25,31 @@ export class TopicScreen implements Screen {
   }
   refresh(): void {
     this.render();
+  }
+
+  /** The unseen-task score and the way into a cold probe, filled in once the status is read. */
+  private async showProbe(page: HTMLElement, box: HTMLElement, dir: string, levelCells: Map<number, HTMLElement>): Promise<void> {
+    const v = this.view;
+    let st: ProbeStatus;
+    try {
+      st = await v.plugin.engine.probeStatus(dir);
+    } catch {
+      return;
+    }
+    if (this.el === null || !page.isConnected) return;
+    const text = st.sealedTotal === 0
+      ? "No sealed questions yet. Recompile the topic to add cold probes."
+      : st.asked < PROBE_MIN_SHOWN
+        ? `Unseen-task score: after ${PROBE_MIN_SHOWN} cold-probe answers (${st.asked} so far).`
+        : `Unseen-task score: ${st.correct}/${st.asked} on sealed questions` + (st.lastProbe ? ` (last probe ${st.lastProbe}).` : ".");
+    box.createDiv({ cls: "st-meta st-probe-status", text });
+    if (st.count > 0) {
+      button(box, { label: `Take a cold probe (${st.count})`, icon: "shield-question", tone: "secondary", onClick: () => void v.startProbe(dir) });
+    }
+    for (const n of st.notTransferring) {
+      const cell = levelCells.get(n);
+      if (cell) chip(cell, "not transferring", "warn");
+    }
   }
 
   private render(): void {
@@ -50,6 +76,7 @@ export class TopicScreen implements Screen {
     top.createSpan({ cls: "st-card-title", text: `${info?.progress ?? 0}% of the way to level ${s.target}` });
     top.createSpan({ cls: "st-meta", text: `${info?.secured ?? 0} of ${info?.concepts ?? 0} concepts secured` });
     progressBar(summary, info?.progress ?? 0, "Progress to target");
+    const probe = summary.createDiv({ cls: "st-probe" });
     if (info) {
       const next = summary.createDiv({ cls: "st-next-inline" });
       const text = next.createDiv({ cls: "st-grow" });
@@ -69,6 +96,7 @@ export class TopicScreen implements Screen {
     const hr = table.createEl("thead").createEl("tr");
     for (const t of ["Concept", "Level", "Evidence", "Last practised", ""]) hr.createEl("th", { text: t });
     const tb = table.createEl("tbody");
+    const levelCells = new Map<number, HTMLElement>();
     for (const n of Object.keys(s.names).map(Number).sort((a, b) => a - b)) {
       const m = mastery(s, n);
       const e = m.evidence;
@@ -81,6 +109,7 @@ export class TopicScreen implements Screen {
       const lv = tr.createEl("td", { cls: "st-td-level" });
       levelPips(lv, m.level, s.target, m.backed || m.level === null);
       lv.createSpan({ cls: "st-num", text: m.level === null ? " not placed" : ` ${m.level}` });
+      levelCells.set(n, lv);
       const ev = tr.createEl("td", { cls: "st-td-evidence" });
       if (!e.graded) ev.createSpan({ cls: "st-meta", text: "No marked answers yet" });
       else {
@@ -104,6 +133,8 @@ export class TopicScreen implements Screen {
         v.go("graph");
       });
     }
+
+    void this.showProbe(page, probe, dir, levelCells);
 
     // ----- misconceptions -----
     // Each with its status and what stands behind it; ones resolved or set aside are listed after, muted.

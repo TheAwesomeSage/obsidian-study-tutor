@@ -707,3 +707,92 @@ test("what was rendered is checked again: anything still pointing outside the va
   assert.equal(box.querySelectorAll("a, use").length, 2, "a link is only followed on a click, and a shape in the same picture is local");
   assert.equal((box.textContent ?? "").split("[remote content blocked]").length - 1, 5);
 });
+
+test("cold probes: the topic page shows the unseen-task score and starts a probe, Home says when one is due, and the study screen offers no help during it", async () => {
+  const fs = new MemFS();
+  const leaves: any[] = [];
+  let plugin: any = null;
+  const app = makeApp(fs, leaves, [], () => plugin);
+  plugin = new (StudyTutorPlugin as any)(app, { id: "study-tutor" }) as StudyTutorPlugin;
+  await plugin.onload();
+  await tick();
+  const out = parseCompileOutput(COMPILED);
+  await plugin.store.saveCompiled({ title: "Linear maps", fm: { source: "notes", subject: out.subject, kind: "subject" }, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
+  const status = (o: object) => ({ count: 0, due: false, why: "", asked: 0, correct: 0, lastProbe: null, notTransferring: [], sealedTotal: 0, ...o });
+  let now: any = status({});
+  let started = 0;
+  plugin.engine.probeStatus = async () => now;
+  plugin.engine.startProbe = async (d: string) => {
+    started++;
+    const chatPath = await plugin.store.newChat(d, "Linear maps", "quiz");
+    const chat = await plugin.store.loadChat(chatPath);
+    chat.fm.probe = "yes";
+    chat.fm.card = "s1";
+    chat.messages.push({ role: "tutor", text: "**Cold probe** · 2 questions · no hints or explanations until you finish.\n\nWhy is the kernel a subspace?" });
+    await plugin.store.saveChat(chatPath, chat);
+    return { chatPath, count: 2 };
+  };
+  const view: any = await plugin.activateView();
+  const root = view.contentEl;
+  await view.reload();
+  const topicPage = async () => {
+    view.go("home");
+    view.go("topic");
+    await tick();
+  };
+  const unseen = () => $(root, ".st-probe-status")?.textContent ?? "";
+  const takeButton = () => $$(root, "button").some((b: any) => /Take a cold probe/.test(b.textContent));
+  await topicPage();
+  assert.equal(unseen(), "No sealed questions yet. Recompile the topic to add cold probes.");
+  assert.equal(takeButton(), false, "no button without questions");
+
+  now = status({ sealedTotal: 4, count: 2, asked: 1, correct: 1, lastProbe: "2026-11-20" });
+  await topicPage();
+  assert.equal(unseen(), "Unseen-task score: after 3 cold-probe answers (1 so far).");
+
+  now = status({ sealedTotal: 4, count: 2, asked: 3, correct: 2, lastProbe: "2026-11-20", notTransferring: [2, 99] });
+  await topicPage();
+  assert.equal(unseen(), "Unseen-task score: 2/3 on sealed questions (last probe 2026-11-20).");
+  assert.deepEqual($$(root, ".st-td-level .st-chip").map((c: any) => c.textContent), ["not transferring"], "only a row in the table is tagged");
+  assert.match($$(root, ".st-table tbody tr")[1].textContent, /not transferring/);
+
+  // asked 3 with no last-probe date must never print "null"; no questions left means no button.
+  now = status({ sealedTotal: 4, count: 0, asked: 3, correct: 3, lastProbe: null });
+  await topicPage();
+  assert.doesNotMatch(unseen(), /null/);
+  assert.equal(takeButton(), false);
+
+  now = status({ sealedTotal: 4, count: 2, asked: 3, correct: 2, lastProbe: "2026-11-20", due: true, why: "no probe yet" });
+  await topicPage();
+  button(root, "Take a cold probe (2)").click();
+  await tick(60);
+  assert.equal(started, 1);
+  assert.equal(root.getAttribute("data-screen"), "study");
+  assert.equal(view.chat.fm.probe, "yes");
+  assert.match(root.textContent, /Cold probe: sealed questions, no help, levels unchanged\./);
+  const quick = () => Object.fromEntries($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent.trim(), b]));
+  for (const name of ["Hint", "Explain", "Visual"]) {
+    assert.equal(quick()[name].disabled, true, `${name} is off in a probe`);
+    assert.equal(quick()[name].getAttribute("title"), "No help during a cold probe");
+  }
+  assert.equal(quick().Skip.disabled, false, "Skip stays on");
+
+  // Home: a card when due, whose Start begins a probe; nothing when nothing is due.
+  view.go("home");
+  await tick();
+  assert.equal($(root, ".st-probe-due .st-card-title").textContent, "Cold probe due · 2 questions · no probe yet");
+  now = status({ sealedTotal: 4, count: 1, due: true, why: "14 days since the last probe" });
+  view.go("topic");
+  view.go("home");
+  await tick();
+  assert.equal($(root, ".st-probe-due .st-card-title").textContent, "Cold probe due · 1 question · 14 days since the last probe");
+  button($(root, ".st-probe-due"), "Start").click();
+  await tick(60);
+  assert.equal(started, 2);
+  assert.equal(root.getAttribute("data-screen"), "study");
+  assert.equal(view.chat.fm.probe, "yes");
+  now = status({ sealedTotal: 4, count: 0 });
+  view.go("home");
+  await tick();
+  assert.equal($(root, ".st-probe-due"), null, "no card when nothing is due");
+});

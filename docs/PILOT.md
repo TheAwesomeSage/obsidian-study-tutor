@@ -97,7 +97,7 @@ The plugin records the following without any extra setup. File paths are inside 
 | Activity configurations | `Topics/<topic>/activities.md` | status (ready, unsupported, invalid); `localCalls`; `repairs` (at most one repair attempt after a failed validation); `claudeCalls` (always 0); `firstPassValid`; `timing`: `wallMs`, `localMs`, `loadMs`, `promptTokens`, `evalTokens`; validation errors. |
 | Token use and cost | shown, not saved | per turn in Details (input, cached read and write, output, calls) and summed for the sitting; compile usage in the compile notice. Neither is written to the vault, so the pilot must log usage from the CLI separately. |
 
-Not recorded at this version: time spent reading lessons; a per-turn usage log; blueprint fidelity counts (if a later version adds counters to the compile metrics, the summary below sums them without change); anything about unseen tasks, which only the pilot can measure.
+Not recorded at this version: time spent reading lessons; a per-turn usage log; blueprint fidelity counts (if a later version adds counters to the compile metrics, the summary below sums them without change); unseen tasks beyond the sealed questions: cold probes record answers on those in evidence.md with `probe: true`, but the same compile wrote them, so they do not replace the pilot's own unseen tasks.
 
 ### Summarising it
 

@@ -107,6 +107,18 @@ Explicit rules come before the ranking, in this order:
 
 The home screen's suggestion is the decision Adaptive study would make first on that topic, so the two always agree. Flashcards are item recall, kept apart from concept evidence: they come first only when nothing pressing (a lapse, a due delayed check, an unchecked prerequisite) is waiting.
 
+## Cold probes
+
+A cold probe asks sealed questions: ones the compile wrote and kept out of the question bank, so they were never practised. It measures transfer to unseen work and moves nothing.
+
+1. A concept is eligible at level 3 or higher, with a first unaided success before today and an unspent sealed question.
+2. A probe asks at most 6 questions, one per concept, highest level first.
+3. A probe is due when there has been none yet, or 14 days have passed since the last one, or the exam is within 7 days and 7 days have passed since the last one.
+4. The unseen-task score is shown after 3 answers.
+5. "Not transferring" means level 4 or higher with the latest probe answer wrong.
+6. Probe answers move no level, estimate, BKT value, card or misconception. They are recorded with `probe: true`.
+7. Help requests (hints, explanations, visuals) are refused locally during a probe. Skip is allowed.
+
 ## Diagrams, simulations and games
 
 They are used on demand, never on opening a topic, a note or a concept in the graph.
