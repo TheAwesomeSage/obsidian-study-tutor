@@ -107,6 +107,19 @@ Explicit rules come before the ranking, in this order:
 
 The home screen's suggestion is the decision Adaptive study would make first on that topic, so the two always agree. Flashcards are item recall, kept apart from concept evidence: they come first only when nothing pressing (a lapse, a due delayed check, an unchecked prerequisite) is waiting.
 
+## Diagnosing a wrong answer (Master mode)
+
+When an answer is wrong and no recorded misconception explains it, code reads why from the mark and the record, in this order, and the next move teaches to that cause:
+
+1. The mark names a prerequisite error: the earlier idea is taught briefly, with one tiny example, and the original question is given back.
+2. The method was sound and a slip (arithmetic, a sign, notation, carelessness) broke the result: the learner is asked to recheck and find the slip themselves. Without a reasoning record, a careless error counts as a slip only after an unaided success on the concept.
+3. Two unaided answers in a row are wrong while a prerequisite of the concept has been checked and is below level 2: that prerequisite is repaired as in 1, named. A prerequisite never checked is not blamed.
+4. No workable method was shown, and either the learner says they cannot start or this is the second wrong answer in a row: a parallel problem is worked step by step, then the original comes back. A bare wrong answer on its own is probed instead, since the method may just be unwritten.
+5. Two or more unaided answers in a row are wrong with no clearer cause: the idea is taught again in a different representation, then an easier question.
+6. Otherwise one narrower question finds the failed step.
+
+Repairing a prerequisite, modelling a strategy and reteaching all teach, so the answer that follows counts as helped and moves no level by itself. A helped answer ends a run of wrong ones, and so does a right answer. A confirmed or suspected misconception still comes first. The move and its reason show in Details.
+
 ## Cold probes
 
 A cold probe asks sealed questions: ones the compile wrote and kept out of the question bank, so they were never practised. It measures transfer to unseen work and moves nothing.

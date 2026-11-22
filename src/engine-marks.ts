@@ -128,7 +128,7 @@ export async function summarySheet(eng: Engine, dir: string): Promise<{ path: st
  * Grades one free-text answer. A reply that cannot be read as a grade throws, so a failed
  * grading leaves the answer ungraded; it never becomes a wrong answer by default.
  */
-export async function grade(eng: Engine, q: Question, answer: string, careful = false): Promise<{ grade: Grade; feedback: string; usage: Usage; reasoning: ReasoningAssessment | null }> {
+export async function grade(eng: Engine, q: Question, answer: string, careful = false, assessor = false): Promise<{ grade: Grade; feedback: string; usage: Usage; reasoning: ReasoningAssessment | null }> {
   const s = eng.settings();
   // Marking maths wrongly is worse than spending a little more, so answers with symbols or
   // numbers in them go to the chat model. Plain-prose answers stay on the cheap one.
@@ -139,7 +139,7 @@ export async function grade(eng: Engine, q: Question, answer: string, careful = 
   const open = q.type === "open";
   const brief = open && q.rubric ? rubricBrief(q.rubric) : "";
   const res = await eng.call({
-    model: modelFor(s, strong ? "chatModel" : "utilityModel"),
+    model: modelFor(s, assessor ? "compileModel" : strong ? "chatModel" : "utilityModel"),
     effort: careful ? s.hardEffort || s.effort || undefined : strong ? s.effort || undefined : undefined,
     system: utilityPrompt(await eng.store.skill("utility.md"), "grade"),
     input: `Question: ${q.question}\n\nModel answer: ${q.answer}\n${q.explanation ? `Explanation: ${q.explanation}\n` : ""}${q.rubric ? `Rubric: ${q.rubric}\n` : ""}${brief ? `Rubric by what it checks:\n${brief}\n` : ""}${open ? `\n${REASONING_RULE} Give this as "reasoning", answering the rubric points in order in rubric_met.\n` : ""}\nLearner's answer: ${answer.trim() || "(blank)"}`,

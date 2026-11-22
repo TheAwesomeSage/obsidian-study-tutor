@@ -256,6 +256,10 @@ test("prompts keep the stable part first and trim large topic cards", () => {
   assert.match(trimmed, /1\. Definition of a linear map/);
   assert.match(trimmed, /\\ker T/);
   assert.ok(trimmed.includes("sends $0$ to $0$"), "prerequisite definitions remain available");
+  assert.doesNotMatch(trimmed, /## Outcome/, "an older card without an outcome gets none");
+  const aimed = F.parseTopic(F.parseCompileOutput(COMPILED).topicBody.replace("## Subskills", "## Outcome\n\nExplain why a map with kernel {0} is injective.\n\n## Subskills"));
+  assert.equal(aimed.outcome, "Explain why a map with kernel {0} is injective.");
+  assert.match(topicForPrompt(aimed, 2, 10), /## Outcome\nExplain why a map with kernel \{0\} is injective\.\n\n## Subskills \(outline/, "a trimmed card keeps the outcome");
   const state = F.newState(topic, 4);
   const empty: F.Chat = { fm: {}, summary: "", messages: [] };
   assert.match(buildTurnInput({ state, today: "2026-11-12", chat: empty }), /just opened this chat\. Begin\.$/);

@@ -18,9 +18,13 @@ import { moveLine } from "./tutormove";
 import { reasoningLines } from "./reasoning";
 import { conclusive, markLine } from "./grading";
 import { isBankId } from "./bankvariants";
+import { askCourse, askCourseSeed } from "./engine-ask";
 import { coverageOf, coverageSummary } from "./coverage";
 import { codeRunSummary, codeTestRows } from "./codequestions";
 import { expansionLine } from "./expansion";
+import { ConfidencePicker, confidenceLabel } from "./confidence";
+export { CONFIDENCE_LEVELS, confidenceLabel } from "./confidence";
+import { activityContext, calibrationCue, type ActivityContext } from "./learning-context";
 import type { Screen, TutorView } from "./view";
 import { MODE_INFO, button, chip, confirmAction, iconButton, modeInfo } from "./ui";
 
@@ -28,22 +32,6 @@ const ROUTE_NOTE: Record<string, string> = { simple: "utility model", standard: 
 const k = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 /** A trailing status line the engine appends to a reply when SymPy computed or checked something. */
 const SYMPY_LINE = /\n\n(\*SymPy [^\n]*\*|\*\*SymPy disagrees\*\*[^\n]*)\s*$/;
-
-/**
- * The confidence points offered with an answer, as the probability the answer is right. They are
- * evenly spaced so calibration (compared with your results, never with your level) stays simple.
- */
-export const CONFIDENCE_LEVELS: [string, number][] = [
-  ["None", 0],
-  ["Low", 0.25],
-  ["Medium", 0.5],
-  ["High", 0.75],
-  ["Very high", 1],
-];
-
-/** A stored confidence in words: the matching point, or a percentage for values saved by older versions. */
-export const confidenceLabel = (c: number): string => CONFIDENCE_LEVELS.find(([, v]) => Math.abs(v - c) < 1e-9)?.[0] ?? `${Math.round(c * 100)}%`;
-
 
 export class StudyScreen implements Screen {
   busy = false;
@@ -59,6 +47,7 @@ export class StudyScreen implements Screen {
   /** Self-reported confidence for the answer being written, one of CONFIDENCE_LEVELS. Null until one is chosen. */
   private confidence: number | null = null;
   private attach = false;
+  private visualContext: { chatPath: string; value: ActivityContext } | null = null;
   private whyOpen = false;
   private saveDrafts = 0;
 
@@ -71,7 +60,7 @@ export class StudyScreen implements Screen {
   private quickEl!: HTMLElement;
   private input!: HTMLTextAreaElement;
   private confEl!: HTMLElement;
-  private confBtns: HTMLButtonElement[] = [];
+  private confPicker!: ConfidencePicker;
   private attachBtn!: HTMLButtonElement;
   private sendBtn!: HTMLButtonElement;
   private diagEl!: HTMLElement;
@@ -112,30 +101,8 @@ export class StudyScreen implements Screen {
     };
     const foot = main.createDiv({ cls: "st-composer-foot" });
 
-    // Confidence: five points, unset until one is chosen. Choosing the same point again clears it.
-    this.confEl = foot.createDiv({ cls: "st-conf", attr: { role: "radiogroup", "aria-label": "How confident are you in this answer? Choose before you see the feedback." } });
-    this.confEl.createSpan({ cls: "st-conf-label", text: "Confidence" });
-    this.confBtns = CONFIDENCE_LEVELS.map(([label, value], i) => {
-      const b = this.confEl.createEl("button", { cls: "st-conf-opt", text: label, attr: { role: "radio", "aria-checked": "false", "aria-label": `Confidence: ${label}`, "data-value": String(value) } });
-      b.onclick = () => {
-        this.confidence = this.confidence === value ? null : value;
-        this.syncConfidence();
-      };
-      b.onkeydown = (e) => {
-        const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
-        if (step) {
-          e.preventDefault();
-          const next = this.confBtns[(i + step + CONFIDENCE_LEVELS.length) % CONFIDENCE_LEVELS.length];
-          next.focus();
-          next.click();
-        } else if ((e.key === "Backspace" || e.key === "Delete") && this.confidence !== null) {
-          e.preventDefault();
-          this.confidence = null;
-          this.syncConfidence();
-        }
-      };
-      return b;
-    });
+    this.confPicker = new ConfidencePicker(foot, value => { this.confidence = value; });
+    this.confEl = this.confPicker.el;
 
     this.attachBtn = foot.createEl("button", { cls: "st-btn is-ghost st-attach", attr: { "aria-pressed": "false" } });
     setIcon(this.attachBtn.createSpan({ cls: "st-btn-icon" }), "paperclip");
@@ -207,7 +174,7 @@ export class StudyScreen implements Screen {
 
   private record(): SessionRecord | null {
     const v = this.view;
-    return v.chat && v.state ? sessionFor(v.chat, v.state, v.mode) : null;
+    return v.chat && v.state && !v.free ? sessionFor(v.chat, v.state, v.mode) : null;
   }
 
   /** The question waiting for an answer, from the session record, a bank card, or the last tutor message. */
@@ -239,6 +206,14 @@ export class StudyScreen implements Screen {
     const h = this.headEl;
     h.empty();
     button(h, { label: "Home", icon: "arrow-left", tone: "ghost", title: "Back to home. Your session stays as it is.", onClick: () => v.go("home") });
+    if (v.free) {
+      // A free question has no topic, mode or guide's step: its title, its transcript, and a way to delete it.
+      h.createSpan({ cls: "st-study-topic st-ellipsis", text: fmStr(v.chat!.fm, "title") || "Free question" });
+      const end = h.createDiv({ cls: "st-study-end" });
+      if (v.chatPath) iconButton(end, "file-text", "Open this chat's transcript as a note", () => void v.app.workspace.openLinkText(v.chatPath!, "", true));
+      if (v.chatPath) iconButton(end, "trash-2", "Delete this question", () => void this.deleteSession()).disabled = this.busy;
+      return;
+    }
     const title = h.createEl("button", { cls: "st-study-topic", attr: { "aria-label": `Topic: ${v.topic?.title ?? ""}. Open the topic overview.` } });
     title.createSpan({ cls: "st-ellipsis", text: v.topic?.title ?? "" });
     title.onclick = () => v.go("topic");
@@ -290,6 +265,17 @@ export class StudyScreen implements Screen {
     const v = this.view;
     const path = v.chatPath;
     if (!path || this.busy) return;
+    if (v.free) {
+      const ok = await confirmAction(v.app, { title: "Delete this question?", text: "The conversation is moved to the trash. Nothing else changes.", confirm: "Delete" });
+      if (!ok) return;
+      try {
+        await v.deleteChat(path);
+        v.go("home");
+      } catch (e) {
+        new Notice(`Study Tutor: the question could not be deleted. ${(e as Error).message}`);
+      }
+      return;
+    }
     const ok = await confirmAction(v.app, {
       title: "Delete this session?",
       text: "The conversation, its earlier parts and its session notes are moved to the trash, and a new session starts in the same mode. Your answers, levels and saved activities are kept.",
@@ -374,7 +360,7 @@ export class StudyScreen implements Screen {
         if (prev) button(sum, { label: "Open the earlier transcript", icon: "file-text", tone: "ghost", onClick: () => void v.app.workspace.openLinkText(`${prev[1]}.md`, "", true) });
       }
     }
-    const who = modeInfo(v.mode).who;
+    const who = v.free ? "Tutor" : modeInfo(v.mode).who;
     for (let i = this.shownCount; i < messages.length; i++) {
       const m = messages[i];
       const box = list.createDiv({ cls: `st-msg is-${m.role}` });
@@ -402,8 +388,22 @@ export class StudyScreen implements Screen {
     tail.empty();
     const chat = v.chat;
     const probe = chat ? fmStr(chat.fm, "probe") === "yes" : false;
+    const assess = chat ? fmStr(chat.fm, "assess") === "outcome" : false;
     const info = modeInfo(v.mode);
     const lastMsg = chat?.messages[chat.messages.length - 1];
+
+    if (v.free) {
+      // A free question: no level, step, activity or Continue. Only the reply, or a way to get it.
+      tail.createDiv({ cls: "st-notice st-ask-banner", text: "Free question. Nothing here counts toward a level." });
+      if (this.busy) this.thinking(tail);
+      else if (this.error) this.problem(tail);
+      else if (lastMsg?.role === "you") {
+        const box = tail.createDiv({ cls: "st-notice" });
+        box.createSpan({ text: "This message has not been answered yet." });
+        button(box, { label: "Get the reply", icon: "refresh-cw", onClick: () => void this.send("") });
+      } else if (lastMsg?.role === "tutor" && chat) this.courseOffer(tail, chat);
+      return;
+    }
 
     if (!chat || (!chat.messages.length && !chat.summary)) {
       if (this.busy) return void this.thinking(tail);
@@ -418,11 +418,12 @@ export class StudyScreen implements Screen {
     }
 
     if (probe) tail.createDiv({ cls: "st-notice st-probe-banner", text: "Cold probe: sealed questions, no help, levels unchanged." });
+    if (assess) tail.createDiv({ cls: "st-notice st-probe-banner st-assess-banner", text: "Outcome check: on your own, marked by a separate assessor, levels unchanged." });
     if (this.changes.length) chip(tail, `Progress updated: ${this.changes.join("; ")}`, "good", "trending-up");
     if (this.marked) this.feedback(tail, this.marked);
     this.expansionChip(tail);
     const activity = this.activity;
-    if (activity && !probe && activity.dir === v.dir && activity.chatPath === v.chatPath) {
+    if (activity && !probe && !assess && activity.dir === v.dir && activity.chatPath === v.chatPath) {
       const out = activity.outcome;
       const card = tail.createDiv({ cls: "st-notice st-activity-offer" });
       card.createDiv({ cls: "st-meta", text: out.decision.reason });
@@ -431,7 +432,7 @@ export class StudyScreen implements Screen {
         button(row, { label: "Reopen activity", icon: "play", onClick: () => this.openActivity(out, activity.dir, activity.chatPath) });
         // Fresh numbers come from module code with a new seed; the saved configuration is reused, no model is called.
         const saved = out.activity;
-        if (saved && saved.status === "ready") button(row, { label: "New numbers", icon: "shuffle", tone: "ghost", title: "New numbers: the same activity with different values, made by the module itself. Uses no model.", onClick: async () => {
+        if (saved && saved.status === "ready" && !saved.bankQuestion) button(row, { label: "New numbers", icon: "shuffle", tone: "ghost", title: "New numbers: the same activity with different values, made by the module itself. Uses no model.", onClick: async () => {
           try {
             const next = await v.plugin.engine.openActivity(activity.dir, saved.id, { chatPath: activity.chatPath, variantSeed: Math.floor(Math.random() * 1_000_000) });
             if (JSON.stringify(next.lesson?.settings) === JSON.stringify(saved.lesson?.settings)) new Notice("This activity has no numeric variants; it opens as saved.");
@@ -464,7 +465,7 @@ export class StudyScreen implements Screen {
       const box = tail.createDiv({ cls: "st-notice" });
       box.createSpan({ text: "This message has not been answered yet." });
       button(box, { label: "Get the reply", icon: "refresh-cw", onClick: () => void this.send("") });
-    } else if (v.mode !== "expert" && lastMsg?.role === "tutor" && !this.openQuestionText() && !fmStr(chat.fm, "card")) {
+    } else if (v.mode !== "expert" && !assess && lastMsg?.role === "tutor" && !this.openQuestionText() && !fmStr(chat.fm, "card")) {
       button(tail, { label: "Continue", icon: "arrow-right", tone: fmStr(chat.fm, "await_continue") === "yes" || /^\*\*Placement done|\n\*\*Placement done/.test(lastMsg.text) ? "primary" : "secondary", cls: "st-continue", onClick: () => void this.send("") });
     }
   }
@@ -482,14 +483,28 @@ export class StudyScreen implements Screen {
     let hintUsed = false;
     // Serialize writes so rapid checks cannot overwrite each other's evidence records.
     let recording = Promise.resolve();
+    this.visualContext = { chatPath, value: { ...activityContext(outcome.lesson, { version: 1, type: "opened", moduleId: outcome.lesson.moduleId, reason: request.reason }), skill: outcome.concept ?? undefined } };
     v.presentActivity(outcome.lesson, request, event => {
+      this.visualContext = { chatPath, value: activityContext(outcome.lesson!, event, this.visualContext?.chatPath === chatPath && this.visualContext.value.moduleId === outcome.lesson!.moduleId ? this.visualContext.value : undefined) };
       if (event.type === "hint") hintUsed = true;
       if (event.type !== "assessment" || !outcome.activity) return;
       const activityId = outcome.activity.id;
       recording = recording.then(async () => {
         // The lesson actually played is passed, so an answer in a numeric variant is checked against that variant.
         const marked = await v.plugin.engine.recordActivityResult(dir, activityId, event.response, { chatPath, hintUsed, lesson: outcome.lesson });
-        if (v.dir === dir) { this.marked = marked.attempt; this.changes = marked.changes; await v.loadState(); await v.stateChanged(); this.sync(); }
+        if (v.dir === dir) {
+          this.marked = marked.attempt;
+          this.changes = marked.changes;
+          // A part of a task answered in its activity moves the chat on to the next part.
+          if (marked.advanced) {
+            this.activity = marked.presentation ? { outcome: marked.presentation, dir, chatPath } : null;
+            if (v.chatPath === chatPath) await v.openChat(chatPath);
+            if (marked.presentation && this.el && v.screen === "study") this.openActivity(marked.presentation, dir, chatPath);
+          } else if (marked.notPart) new Notice(marked.notPart, 8000);
+          await v.loadState();
+          await v.stateChanged();
+          this.sync();
+        }
       }).catch(error => { new Notice(`The practice result could not be saved: ${(error as Error).message}`); });
     });
   }
@@ -550,6 +565,8 @@ export class StudyScreen implements Screen {
     const ml = markLine(a);
     if (ml) more.createDiv({ cls: "st-meta st-reasoning", text: ml });
     if (a.note) more.createDiv({ cls: "st-meta", text: a.note });
+    const calibration = calibrationCue([a]);
+    if (calibration) box.createDiv({ cls: "st-meta", text: calibration });
     // The result, the method and the assumptions, each with who decided it.
     if (a.reasoning) for (const l of reasoningLines(a.reasoning)) more.createDiv({ cls: "st-meta st-reasoning", text: l });
     // Each test, hidden ones named now that the answer is marked, with the first failures' details as plain text.
@@ -603,23 +620,13 @@ export class StudyScreen implements Screen {
     }
   }
 
-  private syncConfidence(): void {
-    const set = this.confidence !== null;
-    this.confEl.toggleClass("is-set", set);
-    // One point is focusable at a time (the chosen one, or the first), as in any radio group.
-    const chosen = this.confBtns.findIndex((b) => set && Math.abs(Number(b.dataset.value) - this.confidence!) < 1e-9);
-    this.confBtns.forEach((b, i) => {
-      const on = i === chosen;
-      b.toggleClass("is-on", on);
-      b.setAttribute("aria-checked", String(on));
-      b.tabIndex = i === (chosen < 0 ? 0 : chosen) ? 0 : -1;
-    });
-  }
-
   private syncComposer(): void {
     const v = this.view;
-    const question = this.openQuestionText();
-    const asking = v.mode === "expert";
+    const question = v.free ? "" : this.openQuestionText();
+    // An outcome check is one task marked by the assessor: no hints, explanations, skip button, visuals or confidence.
+    const assess = v.chat ? fmStr(v.chat.fm, "assess") === "outcome" : false;
+    // A free question gets no topic help (hints, explanations, skip, visuals) and no confidence: nothing is marked.
+    const asking = v.mode === "expert" || v.free || assess;
     // A cold probe gives no help, so nothing that asks for a hint, an explanation or an activity is offered.
     const probe = v.chat ? fmStr(v.chat.fm, "probe") === "yes" : false;
     const NO_HELP = "No help during a cold probe";
@@ -627,6 +634,15 @@ export class StudyScreen implements Screen {
     // Help with the open question, beside the box you type in.
     const q = this.quickEl;
     q.empty();
+    if (!probe && !assess && !v.free) {
+      const coach = v.chat && fmStr(v.chat.fm, "coding_coach") === "yes";
+      const coachButton = button(q, { label: coach ? "Stop coding coach" : "Coding coach", icon: "code", tone: "ghost", onClick: () => void this.send(coach ? "Stop coding coach" : "Start coding coach") });
+      coachButton.disabled = this.busy;
+      if (v.chat && fmStr(v.chat.fm, "placement") === "on") {
+        const skip = button(q, { label: "Skip pretest", icon: "skip-forward", tone: "ghost", onClick: () => void this.send("Skip pretest") });
+        skip.disabled = this.busy;
+      }
+    }
     q.toggleClass("is-empty", asking);
     if (!asking) {
       const quick = (label: string, icon: string, message: string, title: string) => {
@@ -643,7 +659,7 @@ export class StudyScreen implements Screen {
       if (probe) { activity.title = NO_HELP; activity.setAttribute("aria-label", NO_HELP); }
     }
 
-    this.input.placeholder = asking ? "Ask a question…  (Enter to send, Shift+Enter for a new line)" : question ? "Your answer…  (Enter to send, Shift+Enter for a new line)" : "Message…  (Enter to send, Shift+Enter for a new line)";
+    this.input.placeholder = assess ? "Your answer to the task…  (Enter to send, Shift+Enter for a new line)" : v.free ? "Ask a follow-up…  (Enter to send, Shift+Enter for a new line)" : asking ? "Ask a question…  (Enter to send, Shift+Enter for a new line)" : question ? "Your answer…  (Enter to send, Shift+Enter for a new line)" : "Message…  (Enter to send, Shift+Enter for a new line)";
     const active = v.app.workspace.getActiveFile();
     const canAttach = active instanceof TFile && active.extension === "md" && !active.path.startsWith(v.plugin.store.root + "/");
     if (!canAttach) this.attach = false;
@@ -656,8 +672,7 @@ export class StudyScreen implements Screen {
     // Confidence goes with an answer. It can be chosen at any time (it is sent with your next
     // message and counts only if that message is marked), and is not offered in Ask mode.
     this.confEl.toggleClass("is-hidden", asking);
-    for (const b of this.confBtns) b.disabled = this.busy;
-    this.syncConfidence();
+    this.confPicker.set(this.confidence, this.busy);
 
     this.sendBtn.empty();
     setIcon(this.sendBtn.createSpan({ cls: "st-btn-icon" }), this.busy ? "square" : "send");
@@ -706,7 +721,7 @@ export class StudyScreen implements Screen {
     const v = this.view;
     const st = v.state;
     const n = st?.focus;
-    if (!st || n === null || n === undefined || !(n in st.names) || !v.dir) return;
+    if (!st || v.free || n === null || n === undefined || !(n in st.names) || !v.dir) return;
     if (this.bankOptions?.dir !== v.dir) {
       const dir = v.dir;
       this.bankOptions = { dir, options: null };
@@ -745,9 +760,78 @@ export class StudyScreen implements Screen {
     return text ? { name: f.basename, text: text.split(/\s+/).slice(0, 3000).join(" ") } : undefined;
   }
 
+  /**
+   * Under a free chat's reply: open the course it grew into, or make one from it. A broad goal is
+   * offered as the main next step, with the first step it would start from; a narrow question
+   * gets a quiet button only.
+   */
+  private courseOffer(tail: HTMLElement, chat: NonNullable<TutorView["chat"]>): void {
+    const v = this.view;
+    const course = askCourse(chat);
+    if (course && v.overview.some((t) => t.dir === course)) {
+      const box = tail.createDiv({ cls: "st-notice st-ask-course" });
+      box.createSpan({ text: "This question has a course." });
+      button(box, { label: "Open the course", icon: "book-open", tone: "primary", onClick: () => void v.selectTopic(course).then(() => v.go("topic")) });
+      return;
+    }
+    const broad = fmStr(chat.fm, "ask_kind") === "broad";
+    const step = fmStr(chat.fm, "first_step");
+    const box = tail.createDiv({ cls: "st-notice st-ask-course" });
+    if (broad) box.createSpan({ text: step ? `This is worth learning properly. A course would plan it step by step, starting with: ${step.replace(/[.\s]+$/, "")}.` : "This is worth learning properly. A course would plan it step by step." });
+    const seed = askCourseSeed(chat);
+    button(box, { label: "Make this a course", icon: "graduation-cap", tone: broad ? "primary" : undefined, onClick: () => v.chatPath && v.plugin.openNewTopic({ ...seed, fromAsk: v.chatPath }) });
+  }
+
+  /** A turn of a free question (engine-ask.ts): one model call, nothing marked, no learner state. */
+  private async sendAsk(message: string): Promise<void> {
+    const v = this.view;
+    const chatPath = v.chatPath;
+    if (!chatPath || !v.chat) return;
+    const text = message.trim();
+    this.busy = true;
+    this.error = "";
+    this.stopped = false;
+    this.last = null;
+    try {
+      const attached = await this.attachedNote();
+      this.attach = false;
+      const turn = v.plugin.engine.askTurn(chatPath, text, { attached, onSpawn: (kill) => (this.kill = kill) });
+      if (text) {
+        v.chat.messages.push({ role: "you", text });
+        if (this.el) this.input.value = "";
+        delete v.plugin.data.drafts[chatPath];
+      }
+      this.sync();
+      const r = await turn;
+      v.sessionUsage = addUsage(v.sessionUsage, r.usage);
+      if (v.chatPath === chatPath) await v.openChat(chatPath);
+    } catch (e) {
+      this.error = (e as Error).message || String(e);
+      this.stopped = this.error === "Stopped.";
+      if (v.chatPath === chatPath) {
+        try {
+          v.chat = await v.plugin.store.loadChat(chatPath);
+          const saved = v.chat.messages[v.chat.messages.length - 1];
+          if (text && !(saved?.role === "you" && saved.text === text) && this.el && !this.input.value) {
+            this.input.value = text;
+            this.keepDraft();
+          }
+        } catch {
+          /* keep what is on screen */
+        }
+      }
+    } finally {
+      this.busy = false;
+      this.kill = null;
+      this.sync();
+      if (this.el && !this.error) this.input.focus();
+    }
+  }
+
   /** Sends a message. An empty message starts a chat, continues, or retries the last turn. */
   async send(message: string): Promise<void> {
     const v = this.view;
+    if (!this.busy && v.free) return this.sendAsk(message);
     if (this.busy || !v.dir || !v.topic) return;
     const dir = v.dir;
     const text = message.trim();
@@ -767,7 +851,7 @@ export class StudyScreen implements Screen {
       const attached = await this.attachedNote();
       this.attach = false;
       // Start the turn first: it decides its path from the chat as it stood before this message.
-      const turn = v.plugin.engine.study(dir, chatPath, text, { attached, confidence: this.confidence, onSpawn: (kill) => (this.kill = kill) });
+      const turn = v.plugin.engine.study(dir, chatPath, text, { attached, confidence: this.confidence, activityContext: this.visualContext?.chatPath === chatPath ? this.visualContext.value : undefined, onSpawn: (kill) => (this.kill = kill) });
       if (text) {
         v.chat.messages.push({ role: "you", text });
         if (this.el) this.input.value = "";

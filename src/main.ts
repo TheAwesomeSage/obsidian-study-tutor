@@ -7,6 +7,7 @@ import { CompileResult, Engine, EngineSettings, Material } from "./engine";
 import { Frontmatter, SourceMode, fmList, fmStr, splitFrontmatter, words } from "./formats";
 import { DEFAULT_WEIGHTS, PolicyWeights, WEIGHT_LABELS } from "./policy";
 import { DEFAULT_LOCAL_MODEL, DEFAULT_OLLAMA_URL, OllamaClient, locateLocal } from "./ollama";
+import { LocalPassageSelector } from "./semantic-retrieval";
 import { FS, Store } from "./store";
 import { BundleFiles, SympyWorker } from "./sympy";
 import { LocalCodeRunner } from "./coderun";
@@ -20,6 +21,8 @@ import { existsSync, promises as fsp, readFileSync } from "fs";
 import { createHash } from "crypto";
 import * as visualRegistry from "./visuals/registry";
 import { adaptRegistry } from "./visualcontract";
+import { EXAMPLES, installExample } from "./examples";
+import type {GraphLayoutStyle, Positions} from "./graphlayout";
 import { DEFAULT_RETENTION, RETENTION_RANGE, ScheduleOwner, SchedulerChoice, SchedulerId, clampRetention, scheduleOwner, schedulerFor, schedulerLabel, schedulerRef } from "./scheduler";
 
 export interface TutorSettings extends EngineSettings {
@@ -43,6 +46,8 @@ export interface TutorSettings extends EngineSettings {
   minutes: number;
   /** Configure existing visual modules with a local Ollama model when no saved configuration fits. */
   localActivities: boolean;
+  /** Optional semantic source selection using the configured local model. */
+  semanticRetrieval: boolean;
   /** Which models compile a course (model-provider.ts). Settings from before it was added are migrated from `localCompilation`. */
   compileStrategy: CompileStrategy;
   /** Plan diagrams and simulations at compile time with the main provider ("main" compile strategy only). */
@@ -71,6 +76,9 @@ interface PluginData {
   drafts: Record<string, string>;
   /** Where each concept sits on the knowledge graph, so the map stays familiar. */
   graphLayout: Record<string, [number, number]>;
+  /** Each layout keeps its own saved coordinates; the previous map survives tree adoption. */
+  graphLayoutMode?: GraphLayoutStyle;
+  graphLayouts?: Partial<Record<GraphLayoutStyle,Positions>>;
 }
 
 const DEFAULTS: TutorSettings = {
@@ -101,6 +109,7 @@ const DEFAULTS: TutorSettings = {
   weights: { ...DEFAULT_WEIGHTS },
   minutes: 25,
   localActivities: true,
+  semanticRetrieval: false,
   compileStrategy: "hybrid",
   compileBlueprints: true,
   researchLimits: DEFAULT_RESEARCH_LIMITS,
@@ -190,7 +199,8 @@ export default class StudyTutorPlugin extends Plugin {
       native: new NativeRunner(() => this.opts.compilerPath),
     });
     const saved = ((await this.loadData()) ?? {}) as Partial<PluginData>;
-    this.data = { settings: { ...DEFAULTS, ...(saved.settings ?? {}) }, activeTopic: saved.activeTopic ?? "", activeChat: saved.activeChat ?? {}, skills: saved.skills ?? {}, settingsVersion: saved.settingsVersion ?? 1, drafts: saved.drafts ?? {}, graphLayout: saved.graphLayout ?? {} };
+    const layoutMode=saved.graphLayoutMode&&["tree","connected","clusters"].includes(saved.graphLayoutMode)?saved.graphLayoutMode:undefined;
+    this.data = { settings: { ...DEFAULTS, ...(saved.settings ?? {}) }, activeTopic: saved.activeTopic ?? "", activeChat: saved.activeChat ?? {}, skills: saved.skills ?? {}, settingsVersion: saved.settingsVersion ?? 1, drafts: saved.drafts ?? {}, graphLayout: saved.graphLayout ?? {}, graphLayoutMode:layoutMode, graphLayouts:saved.graphLayouts??{} };
     // Settings saved by an older version have no weights; a partly filled set is completed from the defaults.
     this.data.settings.weights = { ...DEFAULT_WEIGHTS, ...(saved.settings?.weights ?? {}) };
     // Up to 0.9 a toggle chose whether Ollama selected passages; off is the main strategy now.
@@ -290,9 +300,10 @@ export default class StudyTutorPlugin extends Plugin {
   /** Share one generation queue between compilation and visual activities. */
   buildLocal(): void {
     const compiles = compileStrategyFor(this.opts) !== "main";
-    const client = this.opts.localActivities || compiles ? new OllamaClient({ model: this.opts.localModel || DEFAULT_LOCAL_MODEL, baseUrl: this.opts.ollamaUrl || DEFAULT_OLLAMA_URL }) : null;
+    const client = this.opts.localActivities || compiles || this.opts.semanticRetrieval ? new OllamaClient({ model: this.opts.localModel || DEFAULT_LOCAL_MODEL, baseUrl: this.opts.ollamaUrl || DEFAULT_OLLAMA_URL }) : null;
     this.engine.local = this.opts.localActivities ? client : null;
     this.engine.compilationLocal = compiles ? client : null;
+    this.engine.semanticSelector = this.opts.semanticRetrieval && client ? new LocalPassageSelector(client) : null;
   }
 
   /** Opens Obsidian's settings on this plugin's tab. The settings API is not typed, so every step is guarded. */
@@ -374,8 +385,29 @@ export default class StudyTutorPlugin extends Plugin {
     return leaf.view instanceof TutorView ? leaf.view : null;
   }
 
-  openNewTopic(): void {
-    new NewTopicModal(this.app, this).open();
+  /**
+   * Saves a bundled example course as a topic (no model call) and opens it. One already in the
+   * vault is opened as it is, so a learner's progress on it is never replaced.
+   */
+  async addExample(id: string): Promise<string | null> {
+    try {
+      const { dir, added } = await installExample(this.store, id, this.opts.targetLevel);
+      new Notice(added ? "Study Tutor: example course added. It was written by hand, so no model was called." : "Study Tutor: the example course is already in your vault, so it was opened as it is.");
+      this.data.activeTopic = dir;
+      await this.save();
+      const view = await this.activateView();
+      await view?.reload();
+      view?.go("topic");
+      return dir;
+    } catch (e) {
+      new Notice(`Study Tutor: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  /** Opens the New topic dialog. A seed (from a free chat) fills in the title and goal and links the course back to that chat. */
+  openNewTopic(seed?: TopicSeed): void {
+    new NewTopicModal(this.app, this, seed).open();
   }
 
   /** Reads the source notes itself, so the model needs no tools. */
@@ -426,13 +458,18 @@ export default class StudyTutorPlugin extends Plugin {
     return { mode, material, fm, truncated };
   }
 
-  async compileTopic(p: { title: string; kind: SourceKind; folder: string; goal: string; research?: boolean; existingDir?: string; sources?: string[] }): Promise<CompileResult | null> {
+  async compileTopic(p: { title: string; kind: SourceKind; folder: string; goal: string; research?: boolean; existingDir?: string; sources?: string[]; fromAsk?: string }): Promise<CompileResult | null> {
     return this.runCompilation(async (signal, progress) => {
       progress("Gathering notes…");
       const g = await this.gather(p.kind, p.folder, p.sources);
-      const req = { title: p.title, mode: g.mode, goal: p.goal, material: g.material, fm: g.fm, existingDir: p.existingDir, research: p.research, truncated: g.truncated, signal };
-      return p.existingDir && !g.truncated ? this.engine.refresh({ ...req, existingDir: p.existingDir }, progress) : this.engine.compile(req, progress);
-    });
+      const origin = p.fromAsk ?? (p.existingDir ? fmStr((await this.store.loadTopic(p.existingDir).catch(() => null))?.fm ?? {}, "from_ask") : "");
+      const fm = origin ? { ...g.fm, from_ask: origin } : g.fm;
+      const req = { title: p.title, mode: g.mode, goal: p.goal, material: g.material, fm, existingDir: p.existingDir, research: p.research, truncated: g.truncated, signal };
+      const res = await (p.existingDir && !g.truncated ? this.engine.refresh({ ...req, existingDir: p.existingDir }, progress) : this.engine.compile(req, progress));
+      // The free chat it grew from can open the course from now on. A chat deleted meanwhile changes nothing.
+      if (p.fromAsk) await this.engine.linkAskCourse(p.fromAsk, res.dir).catch(() => undefined);
+      return res;
+    }, p.fromAsk);
   }
 
   async compileExpansion(request: ExpansionRequest, existingDir?: string): Promise<CompileResult | null> {
@@ -443,7 +480,8 @@ export default class StudyTutorPlugin extends Plugin {
     });
   }
 
-  private async runCompilation(run: (signal: AbortSignal, progress: (msg: string) => void) => Promise<CompileResult>): Promise<CompileResult | null> {
+  /** `keepChat`: the free chat a course grew from. If it is still open, it stays open when the compile ends. */
+  private async runCompilation(run: (signal: AbortSignal, progress: (msg: string) => void) => Promise<CompileResult>, keepChat?: string): Promise<CompileResult | null> {
     if (this.activeCompile) {
       new Notice("Study Tutor: a compilation is already running.");
       return null;
@@ -483,7 +521,8 @@ export default class StudyTutorPlugin extends Plugin {
       // Keep the flashcard note in step with the new question bank; existing schedules are kept.
       if (this.usesSr()) await this.store.exportFlashcards(res.dir);
       const view = await this.activateView();
-      await view?.reload();
+      if (view && keepChat && view.chatPath === keepChat) await view.refreshAround(keepChat);
+      else await view?.reload();
       return res;
     } catch (e) {
       notice.hide();
@@ -531,25 +570,36 @@ class ExpandTopicModal extends Modal {
   onClose(): void { this.contentEl.empty(); }
 }
 
+/** What a free chat hands the New topic dialog. */
+export interface TopicSeed {
+  title: string;
+  goal: string;
+  /** The free chat's path, linked to the course once it is compiled. */
+  fromAsk: string;
+}
+
 class NewTopicModal extends Modal {
   constructor(
     app: App,
     private plugin: StudyTutorPlugin,
+    private seed?: TopicSeed,
   ) {
     super(app);
   }
 
   onOpen(): void {
     const active = this.app.workspace.getActiveFile();
-    let title = active && active.extension === "md" ? active.basename : "";
-    let kind: SourceKind = active ? "links" : "subject";
+    const seed = this.seed;
+    let title = seed?.title ?? (active && active.extension === "md" ? active.basename : "");
+    // A course grown from a question teaches the subject unless the learner picks notes.
+    let kind: SourceKind = active && !seed ? "links" : "subject";
     let folder = active?.parent && active.parent.path !== "/" ? active.parent.path : "";
-    let goal = "";
+    let goal = seed?.goal ?? "";
     // Web research is offered by default only when there are no notes to teach from.
     const noNotes = (k: SourceKind) => k === "spec" || k === "subject";
     let research = noNotes(kind);
     let researchToggle: { setValue(v: boolean): unknown } | null = null;
-    this.titleEl.setText("New topic");
+    this.titleEl.setText(seed ? "Make this a course" : "New topic");
     const { contentEl } = this;
 
     new Setting(contentEl).setName("Title").addText((t) => t.setValue(title).onChange((v) => (title = v)));
@@ -573,7 +623,7 @@ class NewTopicModal extends Modal {
     new Setting(contentEl)
       .setName("Goal (optional)")
       .setDesc("Level or purpose, for example: first-year university course, exam in June.")
-      .addText((t) => t.onChange((v) => (goal = v)));
+      .addText((t) => t.setValue(goal).onChange((v) => (goal = v)));
     new Setting(contentEl)
       .setName("Research on the web")
       .setDesc("Searches through Brave and reads selected public pages. Requires BRAVE_SEARCH_API_KEY in Obsidian's environment. Without it, compilation uses available notes and reports research gaps.")
@@ -591,7 +641,7 @@ class NewTopicModal extends Modal {
             return;
           }
           this.close();
-          void this.plugin.compileTopic({ title: title.trim(), kind, folder, goal, research });
+          void this.plugin.compileTopic({ title: title.trim(), kind, folder, goal, research, fromAsk: seed?.fromAsk });
         }),
     );
   }
@@ -865,6 +915,13 @@ class TutorSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl).setName("Interactive activities").setHeading();
+    new Setting(containerEl).setName("Semantic source recovery").setDesc(
+      "Optional: when keyword search finds too little source evidence, ask the configured local Ollama model to select relevant saved passages, including paraphrases. At most 8 short candidates and 4 seconds; otherwise keyword search continues. No cloud fallback, downloads, grading or mastery changes.",
+    ).addToggle(t => t.setValue(s.semanticRetrieval).onChange(async enabled => {
+      s.semanticRetrieval = enabled;
+      this.plugin.buildLocal();
+      await this.plugin.save();
+    }));
     new Setting(containerEl)
       .setName("Configure activities with a local model")
       .setDesc("When you ask for a diagram, simulation or game, or the tutor offers one and you open it, an existing module is configured from a short excerpt of your notes by a small model on this computer, through Ollama. Saved activities reopen with no model at all, and moving their controls never calls a model. Nothing here ever calls Claude, and a model that Ollama runs in the cloud is refused. Off: only saved activities open.")

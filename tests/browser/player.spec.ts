@@ -90,7 +90,7 @@ for(const [module,steps,end,answer] of [["process",8,"P2 ends ready","ready"],["
 });
 for(const theme of ["light","dark"])test(`graph real canvas, details and keyboard (${theme})`,async({page})=>{
  const errors:string[]=[];page.on("pageerror",e=>errors.push(e.message));await page.goto(`/?module=graph&theme=${theme}`);await expect(page.locator("canvas")).toBeVisible();
- await page.getByRole("combobox",{name:"Find a concept"}).fill("Derivatives");await page.getByRole("option").first().click();await expect(page.locator(".st-graph-title")).toHaveText("Derivatives");await expect(page.locator(".st-graph-panel")).toContainText("Current capability");
+ await page.getByRole("combobox",{name:"Find a concept"}).fill("Derivatives");await page.getByRole("listbox",{name:"Matching concepts"}).getByRole("option").first().click();await expect(page.locator(".st-graph-title")).toHaveText("Derivatives");await expect(page.locator(".st-graph-panel")).toContainText("Current capability");
  await page.locator("canvas").focus();await page.keyboard.press("ArrowRight");await page.screenshot({path:`tests/out/graph-${theme}.png`,fullPage:true});expect(errors).toEqual([]);
 });
 test("dense graph and narrow player have no horizontal overflow",async({page})=>{

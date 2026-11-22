@@ -6,12 +6,14 @@ import { Course, CourseEdge, EdgeStatus, Relation, TopicGraph, effectivePrereqs,
 import { Attempt, LevelChange, normaliseAttempt } from "./evidence";
 import { SrStats, buildSrNote, srStats } from "./formats";
 import { parseMistakeCard } from "./families";
-import { Chat, Frontmatter, LearnerState, Mode, Prereqs, Question, Topic, fmNum, fmStr, newState, parseChat, parseQuestions, parseState, parseTopic, serializeChat, serializeState, textHash, withFrontmatter, ymd } from "./formats";
+import { Chat, Frontmatter, LearnerState, Mode, Prereqs, Question, Topic, fmNum, fmStr, mastery, newState, parseChat, parseQuestions, parseState, parseTopic, serializeChat, serializeState, textHash, withFrontmatter, ymd } from "./formats";
 import type { PolicyCase } from "./policy";
 import { SEAL_SIMILARITY, splitSealed, type SealedSection } from "./sealed";
 import { SessionRecord, sessionMarkdown } from "./session";
 import type { ActivityRecord } from "./configure";
+import { structureOf, type StructureTwin } from "./structures";
 import type { CoursePackage } from "./coursepkg";
+import type { Assessment } from "./engine-assess";
 import { passageWindow, type SourceRevision } from "./compile-sources";
 import { Misconception, parseMisconception, reconcile } from "./misconceptions";
 import { ExpansionRecord, parseExpansion } from "./expansion";
@@ -113,6 +115,8 @@ export interface ExternalPrereq {
 const FIRST_RELEASE: Record<string, string> = { "core.md": "c8e78aa5", "mode-tutor.md": "bd93508", "mode-quiz.md": "29a50213", "compile.md": "4c586797" };
 
 const base = (p: string): string => p.split("/").pop() ?? p;
+/** The sortable `YYYY-MM-DD HHmm` stamp a chat file name starts with, or "" if it has none. */
+const stampOf = (p: string): string => /(\d{4}-\d{2}-\d{2} \d{4})/.exec(base(p))?.[1] ?? "";
 const safeName = (s: string): string => s.replace(/[\\/:*?"<>|#^[\]]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "Topic";
 
 const EVIDENCE_HEAD = "Every answer Study Tutor has marked on this topic and every change of level, one record per line.\nThis is the evidence behind the levels in state.md. Edit it only if you know what you are changing.";
@@ -164,6 +168,10 @@ export class Store {
   }
   get topicsDir(): string {
     return `${this.root}/Topics`;
+  }
+  /** Free questions asked with no topic. Outside Topics, so no topic listing ever reads them. */
+  get askDir(): string {
+    return `${this.root}/Ask`;
   }
 
   async ensureDir(path: string): Promise<void> {
@@ -370,6 +378,35 @@ export class Store {
     return out;
   }
 
+  /**
+   * Concepts in other topics with the same deep structure as one of this topic's, matched by the
+   * slug on both cards and nothing else, with the learner's level there.
+   */
+  async structureTwins(dir: string, target: number): Promise<StructureTwin[]> {
+    const topic = await this.loadTopic(dir);
+    const mine = topic.subskills.filter((k) => structureOf(k.structure));
+    if (!mine.length) return [];
+    const out: StructureTwin[] = [];
+    for (const ref of await this.listTopics()) {
+      if (ref.dir === dir) continue;
+      let other: Topic;
+      try {
+        other = await this.loadTopic(ref.dir);
+      } catch {
+        continue;
+      }
+      const theirs = other.subskills.filter((k) => structureOf(k.structure));
+      if (!theirs.length) continue;
+      const state = await this.loadState(ref.dir, target);
+      for (const k of mine) for (const t of theirs) {
+        if (t.structure !== k.structure || !state.concepts[t.n]) continue;
+        const m = mastery(state, t.n);
+        out.push({ skill: k.n, structure: k.structure!, id: state.concepts[t.n], name: t.name, topic: other.title, dir: ref.dir, level: m.level, demonstrated: m.backed && m.evidence.independentCorrect > 0 && !m.evidence.lapse && !m.evidence.recheck, section: t.section });
+      }
+    }
+    return out;
+  }
+
   /** What the tutor is told about the focus subskill's prerequisites in other topics. */
   async linkedContext(dir: string, state: LearnerState, known?: ExternalPrereq[]): Promise<string> {
     const links = (known ?? (await this.externalPrereqs(dir, state.target))).filter((l) => l.skill === state.focus);
@@ -413,6 +450,39 @@ export class Store {
 
   sealedPath(dir: string): string {
     return `${dir}/sealed.md`;
+  }
+
+  /** Outcome checks, one JSON record per line, apart from the practice evidence. */
+  assessmentsPath(dir: string): string {
+    return `${dir}/assessments.md`;
+  }
+
+  /** Every outcome check on a topic, oldest first. A line that cannot be read is skipped. */
+  async loadAssessments(dir: string): Promise<Assessment[]> {
+    const p = this.assessmentsPath(dir);
+    if (!(await this.fs.exists(p))) return [];
+    const out: Assessment[] = [];
+    for (const line of (await this.fs.read(p)).split("\n")) {
+      if (!line.startsWith("{")) continue;
+      try {
+        const a = JSON.parse(line) as Assessment;
+        if (typeof a.t === "string" && Array.isArray(a.criteria)) out.push(a);
+      } catch {
+        /* a damaged line is skipped */
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Adds an outcome check to the log. The records sit in a fenced block, so a view of the note never
+   * renders the assessor's text; a backtick inside a record is written as a JSON escape so it cannot close the fence.
+   */
+  async appendAssessment(dir: string, a: Assessment): Promise<void> {
+    const lines = [...(await this.loadAssessments(dir)), a].map((r) => JSON.stringify(r).replace(/`/g, "\\u0060"));
+    const head = withFrontmatter({ tutor: "assessments" }, "Outcome checks: the course's outcome task, attempted unaided and marked by a separate assessor that saw only the task and the answer. One record per line. These never change a level.\n");
+    const fence = "`".repeat(4);
+    await this.writeFile(this.assessmentsPath(dir), `${head}\n${fence}jsonl\n${lines.join("\n")}\n${fence}\n`);
   }
 
   /** The sealed (cold probe) questions, each with its concept. Not part of the bank: nothing practises or reviews them. */
@@ -672,13 +742,48 @@ export class Store {
     }
   }
 
-  async newChat(dir: string, topicTitle: string, mode: Mode, now: Date = new Date()): Promise<string> {
+  /** `folder/stamp name.md`, numbered when that file already exists. */
+  private async freshChatPath(folder: string, name: string, now: Date): Promise<string> {
     const p = (n: number) => String(n).padStart(2, "0");
-    const stamp = `${ymd(now)} ${p(now.getHours())}${p(now.getMinutes())}`;
-    let path = `${dir}/chats/${stamp} ${mode}.md`;
-    for (let i = 2; await this.fs.exists(path); i++) path = `${dir}/chats/${stamp} ${mode} (${i}).md`;
+    const stem = `${folder}/${ymd(now)} ${p(now.getHours())}${p(now.getMinutes())} ${name}`;
+    let path = `${stem}.md`;
+    for (let i = 2; await this.fs.exists(path); i++) path = `${stem} (${i}).md`;
+    return path;
+  }
+
+  async newChat(dir: string, topicTitle: string, mode: Mode, now: Date = new Date()): Promise<string> {
+    const path = await this.freshChatPath(`${dir}/chats`, mode, now);
     await this.saveChat(path, { fm: { tutor: "chat", topic: topicTitle, mode, part: 1, previous: "", next: "", created: ymd(now) }, summary: "", messages: [] });
     return path;
+  }
+
+  /** A free question's chat, in the Ask folder. Its header fields start empty until the first reply fills them. */
+  async newAskChat(title: string, now: Date = new Date()): Promise<string> {
+    const path = await this.freshChatPath(this.askDir, safeName(title).slice(0, 50).trim() || "Question", now);
+    await this.saveChat(path, { fm: { tutor: "chat", mode: "ask", title, ask_kind: "", goal: "", first_step: "", part: 1, previous: "", next: "", created: ymd(now) }, summary: "", messages: [] });
+    return path;
+  }
+
+  /**
+   * Free questions in the Ask folder, newest first: each one's title, and whether its last message is
+   * still unanswered. File names start with a sortable stamp, so only the newest files are read, one
+   * at a time, until `limit` chats with messages are found.
+   */
+  async recentAsks(limit = 8): Promise<{ path: string; title: string; stamp: string; unanswered: boolean }[]> {
+    if (!(await this.fs.exists(this.askDir))) return [];
+    const out: { path: string; title: string; stamp: string; unanswered: boolean }[] = [];
+    const files = (await this.fs.list(this.askDir)).files.filter((f) => f.endsWith(".md")).sort((a, b) => (base(a) < base(b) ? 1 : base(a) > base(b) ? -1 : 0));
+    for (const path of files) {
+      if (out.length >= limit) break;
+      try {
+        const chat = await this.loadChat(path);
+        if (fmStr(chat.fm, "mode") !== "ask" || !chat.messages.length) continue;
+        out.push({ path, title: fmStr(chat.fm, "title") || base(path).replace(/\.md$/, ""), stamp: stampOf(path) || fmStr(chat.fm, "created"), unanswered: chat.messages[chat.messages.length - 1]?.role === "you" });
+      } catch {
+        /* an unreadable chat is skipped */
+      }
+    }
+    return out;
   }
 
   /** Starts the next part of a chat: the summary replaces the old transcript and the last exchange is carried over. */
@@ -782,13 +887,12 @@ export class Store {
             record = {};
           }
           const pending = typeof record.pendingQuestion === "string" ? record.pendingQuestion : "";
-          const m = /(\d{4}-\d{2}-\d{2} \d{4})/.exec(base(path));
           out.push({
             path,
             dir: ref.dir,
             topic: ref.title,
             mode: (fmStr(chat.fm, "mode", "tutor") as Mode) || "tutor",
-            stamp: m ? m[1] : fmStr(chat.fm, "created"),
+            stamp: stampOf(path) || fmStr(chat.fm, "created"),
             part: fmNum(chat.fm, "part", 1),
             messages: chat.messages.length,
             unfinished: !!pending || !!fmStr(chat.fm, "card") || fmStr(chat.fm, "placement") === "on" || last?.role === "you" || (record.completedStep !== true && last?.role === "tutor" && /\?\s*$/.test(last.text.trim())),
@@ -1025,7 +1129,7 @@ export class Store {
     const tag = topic.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "topic";
     const p = this.flashcardPath(dir);
     const existing = (await this.fs.exists(p)) ? await this.fs.read(p) : "";
-    const next = buildSrNote(qs, tag, existing);
+    const next = buildSrNote(qs.filter((q) => !q.part), tag, existing);
     if (next !== existing.replace(/\r\n/g, "\n")) await this.writeFile(p, next);
     return p;
   }

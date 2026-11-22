@@ -14,10 +14,11 @@ import { Notice } from "obsidian";
 import { Course, CourseConcept, CourseEdge, RELATIONS, RELATION_TEXT, Relation, neighbourhood } from "./course";
 import { MIN_CALIBRATION_N, MIN_ESTIMATE_N, PREDICTION_TARGET, gradingLabel, missingFor } from "./evidence";
 import { mastery } from "./formats";
-import { GEdge, GGroup, GNode, GraphCanvas, GraphColors } from "./graphcanvas";
-import { layoutGraph } from "./graphlayout";
+import { GEdge, GGroup, GNode, GraphCanvas, GraphColors, topicColorSlot } from "./graphcanvas";
+import { layoutGraph, type GraphLayoutStyle } from "./graphlayout";
 import { ago } from "./overview";
 import { ACTION_LABEL, Decision } from "./policy";
+import { timeToIndependence } from "./structures";
 import { bktTrace, brierComparison, comparisonLine, mcqOptions, shadowLine } from "./bkt";
 import type { Screen, TutorView } from "./view";
 import { button, chip, emptyState, iconButton, levelPips, pct } from "./ui";
@@ -66,7 +67,7 @@ export class GraphScreen implements Screen {
     const v = this.view;
     const root = el.createDiv({ cls: "st-graph-screen" });
     if (!v.topics.length) {
-      const box = emptyState(root, { icon: "git-fork", title: "The graph is empty", text: "Concepts appear here once a topic has been compiled. Each topic becomes a cluster, and prerequisites link them." });
+      const box = emptyState(root, { icon: "git-fork", title: "The graph is empty", text: "Concepts appear here once a topic has been compiled. Prerequisites organize them into learning paths, with colour showing the topic." });
       button(box, { label: "New topic", icon: "plus", tone: "primary", onClick: () => v.plugin.openNewTopic() });
       return;
     }
@@ -167,6 +168,12 @@ export class GraphScreen implements Screen {
     }
     if (!this.el) return;
     const concepts = [...this.course.concepts.values()];
+    const data = v.plugin.data;
+    if(!data.graphLayoutMode){
+      data.graphLayouts={...data.graphLayouts,connected:{...data.graphLayout}};
+      data.graphLayoutMode="tree";
+      data.graphLayout=data.graphLayouts.tree??{};
+    }
     const saved = v.plugin.data.graphLayout;
     const known = concepts.filter((c) => saved[c.id]).length;
     // Positions already on the map are kept; only concepts that are new are placed.
@@ -174,10 +181,11 @@ export class GraphScreen implements Screen {
       concepts.map((c) => ({ id: c.id, group: c.topic })),
       this.course.edges.filter((e) => e.status !== "rejected").map((e) => ({ from: e.from, to: e.to, orders: e.type === "requires" })),
       known ? saved : {},
-      "connected",
+      data.graphLayoutMode,
     );
     if (known !== concepts.length || Object.keys(saved).length !== concepts.length) {
       v.plugin.data.graphLayout = pos;
+      (data.graphLayouts??={})[data.graphLayoutMode]=pos;
       void v.plugin.save();
     }
     const degree = new Map<string, number>();
@@ -232,7 +240,6 @@ export class GraphScreen implements Screen {
     const v = this.view;
     const { get, colors } = this.cssColors();
     const topicList = this.topicList();
-    const topics = topicList.map((t) => t.dir);
     const seq = (i: number) => get(`--st-seq-${Math.max(1, Math.min(6, i))}`) || colors.accent;
     for (const n of this.nodes) {
       const c = course.concepts.get(n.id)!;
@@ -241,9 +248,7 @@ export class GraphScreen implements Screen {
       n.hollow = false;
       n.weak = false;
       if (this.mode === "topic") {
-        const i = topics.indexOf(c.topic);
-        // Eight validated hues in a fixed order. Topics past the eighth share a neutral, and are told apart by their labels.
-        n.color = i >= 0 ? get(`--st-cat-${i % 16 + 1}`) : get("--st-cat-other");
+        n.color = get(`--st-topic-${topicColorSlot(c.topic)}`);
       } else if (this.mode === "level") {
         if (!st || st.m.level === null) n.hollow = true;
         else {
@@ -447,6 +452,16 @@ export class GraphScreen implements Screen {
       this.expand(!expanded);
       this.renderTools();
     });
+    const layout=end.createEl("select",{cls:"dropdown st-graph-layout",attr:{"aria-label":"Graph layout"}});
+    for(const [value,text] of [["tree","Prerequisite tree"],["connected","Connected map"],["clusters","Topic clusters"]])layout.createEl("option",{value,text});
+    layout.value=v.plugin.data.graphLayoutMode??"tree";
+    layout.onchange=async()=>{
+      const data=v.plugin.data,previous=data.graphLayoutMode??"tree",next=layout.value as GraphLayoutStyle;
+      (data.graphLayouts??={})[previous]={...data.graphLayout};
+      data.graphLayoutMode=next;data.graphLayout=data.graphLayouts[next]??{};
+      this.fitted=false;
+      await this.load();await v.plugin.save();this.canvas?.fit();
+    };
   }
 
   private renderLegend(): void {
@@ -460,6 +475,8 @@ export class GraphScreen implements Screen {
     box.addEventListener("toggle", () => (this.legendOpen = box.open));
     const l = box.createDiv({ cls: "st-legend-rows" });
     l.createDiv({ cls: "st-meta", text: "Requires arrows point to prerequisites. Dashed prerequisites are inferred." });
+    if(this.view.plugin.data.graphLayoutMode==="tree")l.createDiv({cls:"st-meta",text:"Foundations start at the top; dependent concepts follow below. Multiple prerequisites and cross-topic links are retained."});
+    l.createDiv({ cls: "st-meta", text: "Larger circles have more links, across all topics and relation filters. Rejected links do not count." });
     const sw = (cls: string, text: string, style = "") => {
       const row = l.createDiv({ cls: "st-legend-row" });
       row.createSpan({ cls: `st-swatch ${cls}`, attr: style ? { style } : {} });
@@ -472,10 +489,10 @@ export class GraphScreen implements Screen {
       row.createSpan({ cls: "st-meta", text: to });
     };
     if (this.mode === "topic") {
-      // Same order as the colours in apply(): the first eight topics get a hue each.
+      // The legend uses exactly the same identity-based colour as the canvas.
       const shown = this.topicList();
-      shown.forEach((t, i) => sw("", t.title.length > 30 ? t.title.slice(0, 29) + "…" : t.title, `background:var(--st-cat-${i % 16 + 1})`));
-      if (shown.length > 16) l.createDiv({ cls: "st-meta", text: "Colours repeat after 16 topics; use labels or the topic filter to distinguish them." });
+      shown.forEach(t => sw("", t.title.length > 30 ? t.title.slice(0, 29) + "…" : t.title, `background:var(--st-topic-${topicColorSlot(t.dir)})`));
+      if (new Set(shown.map(t => topicColorSlot(t.dir))).size < shown.length) l.createDiv({ cls: "st-meta", text: "Some topics share a colour; use labels or the topic filter to distinguish them." });
     } else if (this.mode === "level") {
       ramp("Level 0", "5", [1, 2, 3, 4, 5, 6]);
       sw("is-hollow", "Not placed yet");
@@ -560,6 +577,13 @@ export class GraphScreen implements Screen {
       // The concept's delayed check comes from unaided work only (evidence.ts, CHECK_INTERVALS).
       if (e.recheck) capability.createDiv({ cls: "st-meta st-warn-text", text: `Recheck due: an objective changed materially on ${e.recheck.since.slice(0, 10)} (${e.recheck.why}). Earlier answers are kept; one unaided answer on the new version is needed.` });
       else if (e.nextCheck) capability.createDiv({ cls: "st-meta", text: e.nextCheck <= v.today ? `An unaided check is due now (since ${e.nextCheck}).` : `Next unaided check: ${e.nextCheck}.` });
+      // Time to independent work, the measure a bridge from another topic is meant to shorten (structures.ts).
+      const tti = timeToIndependence(s.attempts, c.n, e.firstIndependentSuccess);
+      const fromId = tti?.bridgedFrom || s.attempts.find((x) => x.skill === c.n && x.transferFrom)?.transferFrom || "";
+      const from = fromId ? this.course?.concepts.get(fromId) : undefined;
+      const bridged = fromId ? ` Bridged from ${from ? `${from.name} (${from.topicTitle})` : "a concept in another topic"}.` : "";
+      if (tti) capability.createDiv({ cls: "st-meta", text: `First worked on its own after ${tti.attempts} attempt${tti.attempts === 1 ? "" : "s"} over ${tti.days} day${tti.days === 1 ? "" : "s"}.${bridged}` });
+      else if (bridged) capability.createDiv({ cls: "st-meta", text: bridged.trim() });
 
       // The suggested activity, with its reason. Asked of the same policy the study screen uses.
       const next = p.createDiv({ cls: "st-graph-next" });

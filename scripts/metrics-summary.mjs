@@ -1,5 +1,5 @@
-// Summarises what Study Tutor already records (compile metrics, attempts, activity configurations,
-// policy decisions, and BKT in shadow against the existing estimate) for one Study Tutor folder.
+// Summarises what Study Tutor already records (compile metrics, attempts, time to independence,
+// outcome checks, activity configurations, policy decisions, and BKT in shadow against the existing estimate) for one Study Tutor folder.
 // Read-only: no network, no model, nothing written. It bundles src/metrics.ts in memory with the
 // esbuild the project already has, so the numbers come from the same code the plugin runs.
 //
@@ -38,5 +38,6 @@ const attempts = Object.fromEntries(find(root, "evidence.md").map((p) => [path.r
 const activities = find(root, "activities.md").flatMap((p) => m.jsonlFromText(read(p)));
 const decisions = find(root, "decisions.md").flatMap((p) => m.jsonlFromText(read(p)));
 
-const summary = m.summariseMetrics({ packages, attempts, activities, decisions });
+const assessments = find(root, "assessments.md").flatMap((p) => m.jsonlFromText(read(p)));
+const summary = m.summariseMetrics({ packages, attempts, activities, decisions, assessments });
 process.stdout.write(args.includes("--json") ? JSON.stringify(summary, null, 2) + "\n" : m.metricsReport(summary));

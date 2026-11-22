@@ -187,7 +187,8 @@ export function readSessionReply(text: string, record: SessionRecord, opts: { no
   if (!pending && asked) pending = asked;
   const next: SessionRecord = { ...record, completedStep: false };
   const newStep = !record.pendingQuestion || !!opts.resolved || t?.completedStep === true;
-  if (pending !== record.pendingQuestion) {
+  // A question given back after its answer was marked is a new step, asked under this turn's move.
+  if (pending !== record.pendingQuestion || (!!pending && !!opts.resolved)) {
     next.pendingQuestion = pending;
     if (newStep) {
       next.questionId = pending ? questionKey(pending) : "";

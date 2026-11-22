@@ -14,6 +14,7 @@ import { TopicInfo, topicInfo } from "./overview";
 import { DEFAULT_WEIGHTS, V1_WEIGHTS, replay } from "./policy";
 import { ReviewScreen } from "./review";
 import { ChatRef, TopicRef } from "./store";
+import { isAskChat } from "./engine-ask";
 import { StudyScreen } from "./study";
 import { TopicScreen } from "./topicscreen";
 import { MODE_INFO, iconButton } from "./ui";
@@ -95,6 +96,10 @@ export class TutorView extends ItemView {
   get study(): StudyScreen {
     return this.screens.study as StudyScreen;
   }
+  /** The open chat is a free question, which belongs to no topic and needs none. */
+  get free(): boolean {
+    return isAskChat(this.chat);
+  }
 
   /** Backend gate/explicit request only. Topic and graph navigation never call this. */
   presentActivity(lesson: unknown, request: PresentationRequest, onEvent?: (event: PlayerEvent) => void): void {
@@ -146,6 +151,23 @@ export class TutorView extends ItemView {
     await this.loadOverview();
     this.loading = false;
     this.show(this.screen);
+  }
+
+  /**
+   * Re-reads the topic list and progress while a free chat stays open, for example when a course it
+   * grew into has just been compiled. A reply still being written is left alone; the chat is
+   * reread only when none is.
+   */
+  async refreshAround(chatPath: string): Promise<void> {
+    try {
+      this.topics = await this.plugin.store.listTopics();
+    } catch {
+      this.topics = [];
+    }
+    await this.loadOverview();
+    if (this.chatPath === chatPath && !this.study.busy) await this.openChat(chatPath).catch(() => undefined);
+    this.renderNav();
+    await this.mounted?.refresh?.();
   }
 
   /** Progress for every topic and the recent chats. One topic that cannot be read does not hide the others. */
@@ -207,7 +229,7 @@ export class TutorView extends ItemView {
       if (path) await this.openChat(path, false);
       // A finished cold probe is not the chat a topic reopens on. (openChat set the chat, which TypeScript cannot see.)
       const opened = this.chat as Chat | null;
-      if (opened && fmStr(opened.fm, "probe_done")) {
+      if (opened && (fmStr(opened.fm, "probe_done") || fmStr(opened.fm, "assess_done"))) {
         this.chat = null;
         this.chatPath = null;
       }
@@ -238,10 +260,12 @@ export class TutorView extends ItemView {
   async openChat(path: string, remember = true): Promise<void> {
     this.chat = await this.plugin.store.loadChat(path);
     this.chatPath = path;
+    // A free question has no study mode and is never a topic's chat, so it is not remembered as one.
+    if (this.free) return;
     const m = fmStr(this.chat.fm, "mode", "tutor") as Mode;
     this.mode = MODE_INFO.some((p) => p.mode === m) ? m : "tutor";
-    // A finished cold probe can be reread, but it is no longer the topic's chat.
-    const done = !!fmStr(this.chat.fm, "probe_done");
+    // A finished cold probe or outcome check can be reread, but it is no longer the topic's chat.
+    const done = !!fmStr(this.chat.fm, "probe_done") || !!fmStr(this.chat.fm, "assess_done");
     if (done && this.dir && this.plugin.data.activeChat[this.dir] === path) {
       delete this.plugin.data.activeChat[this.dir];
       await this.plugin.save();
@@ -272,7 +296,7 @@ export class TutorView extends ItemView {
   async newChat(mode: Mode): Promise<void> {
     if (!this.dir || !this.topic) return;
     this.mode = mode;
-    if (this.chat && this.chatPath && !this.chat.messages.length && !this.chat.summary) {
+    if (this.chat && this.chatPath && !this.free && !this.chat.messages.length && !this.chat.summary) {
       this.chat.fm.mode = mode;
       await this.plugin.store.saveChat(this.chatPath, this.chat);
     } else await this.openChat(await this.plugin.store.newChat(this.dir, this.topic.title, mode));
@@ -297,16 +321,30 @@ export class TutorView extends ItemView {
         this.state.focus = o.focus;
         await this.plugin.store.saveState(this.dir, this.state);
       }
-      // A cold probe is in quiz mode too, but is never continued as practice.
-      const probe = !!this.chat && fmStr(this.chat.fm, "probe") === "yes";
+      // A cold probe is in quiz mode too, but is never continued as practice; a free question is never continued as study.
+      const probe = !!this.chat && (fmStr(this.chat.fm, "probe") === "yes" || fmStr(this.chat.fm, "assess") === "outcome" || this.free);
       if (o.chatPath) await this.openChat(o.chatPath);
       else if (o.mode && !(this.chat && !probe && this.mode === o.mode && !o.focus)) await this.newChat(o.mode);
-      else if (!this.chat) await this.newChat(o.mode ?? this.mode);
+      else if (!this.chat || this.free) await this.newChat(o.mode ?? this.mode);
     } catch (e) {
       new Notice(`Study Tutor: ${(e as Error).message}`);
     }
     this.show("study");
     if (o.begin && this.chat && !this.chat.messages.length && this.mode !== "expert") void this.study.send("");
+  }
+
+  /** Opens an outcome check on a topic (a new one, or the one not marked yet). */
+  async startAssessment(dir: string): Promise<void> {
+    try {
+      const chatPath = await this.plugin.engine.startAssessment(dir);
+      if (chatPath) {
+        await this.startStudy({ dir, chatPath });
+        return;
+      }
+      new Notice("This topic has no outcome yet. Recompile it to plan one.");
+    } catch (e) {
+      new Notice(`Study Tutor: ${(e as Error).message}`);
+    }
   }
 
   /** Starts a cold probe on a topic and opens it. When nothing is ready any more, the screen is only redrawn. */
@@ -321,6 +359,45 @@ export class TutorView extends ItemView {
       new Notice(`Study Tutor: ${(e as Error).message}`);
     }
     this.screens[this.screen].refresh?.();
+  }
+
+  /**
+   * Asks a free question from Home: a new chat in the Ask folder, opened on the study screen with
+   * the message sent as its first turn. It needs no topic, and the open topic stays as it was.
+   */
+  async startAsk(message: string): Promise<boolean> {
+    const text = message.trim();
+    if (!text) return false;
+    if (this.study.busy) {
+      new Notice("Wait for the current reply, or stop it, before asking another question.");
+      return false;
+    }
+    try {
+      const path = await this.plugin.engine.startAsk(text);
+      await this.openChat(path);
+    } catch (e) {
+      new Notice(`Study Tutor: ${(e as Error).message}`);
+      return false;
+    }
+    this.show("study");
+    void this.study.send(text);
+    return true;
+  }
+
+  /** Reopens a free question from Home's Recent questions, as it was left. */
+  async openAsk(path: string): Promise<void> {
+    if (this.study.busy) {
+      new Notice("Wait for the current reply, or stop it, before opening another question.");
+      return;
+    }
+    try {
+      await this.openChat(path);
+    } catch (e) {
+      new Notice(`Study Tutor: ${(e as Error).message}`);
+      return;
+    }
+    this.show("study");
+    this.study.refresh();
   }
 
   /** Acts on a suggested step: the review screen, or a chat in the right mode on the right concept. */
@@ -363,8 +440,8 @@ export class TutorView extends ItemView {
       this.screen = screen;
       return;
     }
-    // Study, review and the topic page need a topic. Without one, home explains what to do.
-    if (!this.dir && (screen === "study" || screen === "review" || screen === "topic")) screen = "home";
+    // Study, review and the topic page need a topic, except a free question on the study screen. Without one, home explains what to do.
+    if (!this.dir && ((screen === "study" && !this.free) || screen === "review" || screen === "topic")) screen = "home";
     this.mounted?.unmount?.();
     if (this.rendered) this.removeChild(this.rendered);
     this.rendered = this.addChild(new Component());
@@ -390,7 +467,7 @@ export class TutorView extends ItemView {
       setIcon(b.createSpan({ cls: "st-nav-icon" }), item.icon);
       b.createSpan({ cls: "st-nav-label", text: item.label });
       if (item.screen === "review" && due) b.createSpan({ cls: "st-badge", text: String(due), attr: { "aria-label": `${due} due` } });
-      b.disabled = !this.dir && (item.screen === "study" || item.screen === "review");
+      b.disabled = !this.dir && ((item.screen === "study" && !this.free) || item.screen === "review");
       b.onclick = () => this.show(item.screen);
     }
 

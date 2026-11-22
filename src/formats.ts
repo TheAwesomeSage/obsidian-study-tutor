@@ -181,6 +181,12 @@ export interface Subskill {
   visual?: { kind: string; reason: string } | null;
   /** The compiled concise worked example, when the card has one. */
   worked?: string;
+  /**
+   * The deep structure this subskill has, as a slug from structures.ts ("structure: first-order-decay").
+   * A concept in another topic with the same one can be a bridge to it. Kept as written; a slug
+   * not on the list is reported on the topic page and matches nothing.
+   */
+  structure?: string;
 }
 
 /** One specification objective from the card's "## Objectives" section. */
@@ -196,6 +202,8 @@ export interface Topic {
   title: string;
   fm: Frontmatter;
   overview: string;
+  /** The `## Outcome` section: the task the course builds to and how to tell it is done well. Empty on older topics. */
+  outcome: string;
   subskills: Subskill[];
   body: string;
   /** Objectives listed under "## Objectives". Empty on cards compiled before 0.6. */
@@ -230,7 +238,8 @@ export function parseTopic(md: string): Topic {
     const vis = /^visual:\s*([a-z-]+)\s*(?:[|—–:-]\s*(.*))?$/im.exec(sec);
     const visualKind = vis ? vis[1].toLowerCase() : "";
     // "worked example:" starts a block of lines that runs to the next "key:" line or the end.
-    const worked = /^worked example:\s*\n?([\s\S]*?)(?=^\s*(?:misconceptions|objectives|visual|prerequisites|relations):|(?![\s\S]))/im.exec(sec);
+    const worked = /^worked example:\s*\n?([\s\S]*?)(?=^\s*(?:misconceptions|objectives|visual|prerequisites|relations|structure):|(?![\s\S]))/im.exec(sec);
+    const structure = /^structure:\s*([A-Za-z0-9-]+)\s*$/im.exec(sec);
     subskills.push({
       n: h.n,
       name: h.name,
@@ -241,6 +250,7 @@ export function parseTopic(md: string): Topic {
       objectives: obj ? obj[1].split(/[;,]/).map((x) => x.trim()).filter((x) => x && !/^none$/i.test(x)) : [],
       visual: VISUAL_KINDS.includes(visualKind) && visualKind !== "none" ? { kind: visualKind, reason: (vis![2] ?? "").trim().slice(0, 200) } : null,
       worked: worked ? worked[1].trim() : "",
+      ...(structure ? { structure: structure[1].toLowerCase() } : {}),
     });
   });
   const objectives: Objective[] = [];
@@ -256,7 +266,7 @@ export function parseTopic(md: string): Topic {
     const o = readObjectiveLine(m[2]);
     objectives.push({ id: m[1], text: o.text, source: o.source, ...(o.exam ? { exam: o.exam } : {}) });
   }
-  return { title: fmStr(fm, "title") || (h1 ? h1[1].trim() : "Untitled"), fm, overview: section(body, "Overview"), subskills, body: body.trim(), objectives, ...(examDate ? { examDate } : {}) };
+  return { title: fmStr(fm, "title") || (h1 ? h1[1].trim() : "Untitled"), fm, overview: section(body, "Overview"), outcome: section(body, "Outcome"), subskills, body: body.trim(), objectives, ...(examDate ? { examDate } : {}) };
 }
 
 export interface CompileOutput {
@@ -313,9 +323,103 @@ export interface Question {
   code?: CodeTask;
   /** Stable concept id; set only on sealed questions. */
   concept?: string;
+  /**
+   * One part of a task in several parts ("part: spsc-queue 2/4"): the parts are asked in order, each
+   * marked on its own by its own route and recorded as its own attempt. Only part 1 is ever picked.
+   */
+  part?: TaskPart;
+  /**
+   * For a part of a task: an existing module to open for it ("activity:" as one line of JSON). Code
+   * completes it into a lesson for the concept, checks it with the module, and records the module's
+   * own assessment of the answer as this part's answer. A typed answer is marked against `answer`.
+   */
+  activity?: PartActivity;
 }
 
-const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation", "family", "task", "difficulty", "rubric", "generator", "code", "concept"] as const;
+/** The module, settings and wording of a part's activity; the rest of the lesson is filled in by code. */
+export interface PartActivity {
+  moduleId: string;
+  assessmentId: string;
+  settings: Record<string, unknown>;
+  predictionQuestion: string;
+  hint: string;
+}
+
+/** Reads a part's activity line; null when it is not an object with every field. Validation is the module's. */
+export function parsePartActivity(raw: string): PartActivity | null {
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const o = v as Record<string, unknown>;
+  const str = (k: string) => (typeof o[k] === "string" && (o[k] as string).trim() ? (o[k] as string).trim() : "");
+  const settings = o.settings && typeof o.settings === "object" && !Array.isArray(o.settings) ? (o.settings as Record<string, unknown>) : null;
+  if (!str("moduleId") || !str("assessmentId") || !settings || !str("predictionQuestion") || !str("hint")) return null;
+  return { moduleId: str("moduleId"), assessmentId: str("assessmentId"), settings, predictionQuestion: str("predictionQuestion"), hint: str("hint") };
+}
+
+/** Where a question sits in a task of several parts. */
+export interface TaskPart {
+  /** The task the parts belong to, a slug. */
+  task: string;
+  /** This part, from 1. */
+  n: number;
+  /** How many parts the task has, 2 to 8. */
+  of: number;
+}
+
+/** Reads "spsc-queue 2/4"; null when it is not a valid part. */
+export function parsePart(raw: string): TaskPart | null {
+  const m = /^([a-z0-9][a-z0-9-]{0,59})\s+(\d)\s*\/\s*(\d)$/i.exec(raw.trim());
+  if (!m) return null;
+  const [n, of] = [Number(m[2]), Number(m[3])];
+  return n >= 1 && of >= 2 && of <= 8 && n <= of ? { task: m[1].toLowerCase(), n, of } : null;
+}
+
+/** The part after `q` in its task, when the bank has it. */
+export function nextPart(questions: Question[], q: Question): Question | null {
+  const p = q.part;
+  if (!p || p.n >= p.of) return null;
+  return questions.find((x) => x.part?.task === p.task && x.part.n === p.n + 1) ?? null;
+}
+
+/** A question that only follows the part before it: never picked or placed on its own. */
+export const laterPart = (q: Question): boolean => !!q.part && q.part.n > 1;
+
+/**
+ * A traced order ("P1, C1, P2" or "P1 -> C1 -> P2") compared step by step with the expected one:
+ * case, spacing and the separator are ignored, the order and every step are not.
+ */
+export function sameSequence(given: string, expected: string): boolean {
+  // Steps are split at commas, semicolons, arrows, bars or new lines; only an answer with none of
+  // those is split at spaces. Spacing inside a step ("push 1") is ignored.
+  const steps = (s: string) => {
+    const t = s.toLowerCase().replace(/\$/g, "");
+    const marked = /,|;|->|→|=>|\||\n/.test(t);
+    return t.split(marked ? /,|;|->|→|=>|\||\n/ : /\s+/).map((x) => x.replace(/\s+/g, "").replace(/[.]+$/, "")).filter(Boolean);
+  };
+  const a = steps(given);
+  const b = steps(expected);
+  // Bare numbers are allowed when the question states the unit; a supplied unit must
+  // match the key. Integer endpoints are exact, not rounded to a ±0.5 interval.
+  const value = (x: string): {n: number; unit: string} | null => {
+    const m = /^([+-]?(?:\d+\.?\d*|\.\d+))([a-zµΩ°%]*)$/i.exec(x);
+    return m ? {n: Number(m[1]), unit: m[2]} : null;
+  };
+  const same = (x: string, y: string): boolean => {
+    const [u, w] = [value(x), value(y)];
+    if (u === null || w === null) return x === y;
+    if (u.unit && u.unit !== w.unit) return false;
+    const places = (/\.(\d+)/.exec(y)?.[1].length ?? 0);
+    return places === 0 ? u.n === w.n : Math.round(u.n * 10 ** places) === Math.round(w.n * 10 ** places);
+  };
+  return a.length > 0 && a.length === b.length && a.every((x, i) => same(x, b[i]));
+}
+
+const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation", "family", "task", "difficulty", "rubric", "generator", "code", "concept", "part", "activity"] as const;
 const Q_TASKS = ["recall", "application", "transfer", "prediction", "explanation", "error-finding", "teach-back", "edge-case", "probe"];
 
 const OPTION_LABEL = /^\(?[A-Za-z][.):]\s+/;
@@ -389,8 +493,13 @@ export function parseQuestions(md: string): Question[] {
     if (Number.isInteger(difficulty) && difficulty >= 1 && difficulty <= 5) q.difficulty = difficulty;
     if (get("concept")) q.concept = get("concept").slice(0, 80);
     if (get("rubric")) q.rubric = get("rubric").slice(0, 800);
-    // A spec that fails its checks is dropped: the question stays, with its own numbers only.
-    const generator = type === "short" && get("generator") ? parseFamilySpec(get("generator")) : null;
+    const part = get("part") ? parsePart(get("part")) : null;
+    if (part) q.part = part;
+    const activity = part && get("activity") ? parsePartActivity(get("activity")) : null;
+    if (activity) q.activity = activity;
+    // A spec that fails its checks is dropped: the question stays, with its own numbers only. A part
+    // of a task keeps its own numbers too, so no variant, faded example or pair ever asks it alone.
+    const generator = type === "short" && !part && get("generator") ? parseFamilySpec(get("generator")) : null;
     if (generator && "spec" in generator) q.generator = generator.spec;
     // "code:" is a one-line JSON task. One that fails its checks is dropped, and the question
     // stays an open one for the grader, with no tests to run.
@@ -746,17 +855,19 @@ export function schedule(prev: CardSched | undefined, grade: Grade, today: strin
 
 /** Due cards first, then unseen cards up to today's remaining allowance. Families kept for assessment are never new cards. */
 export function reviewQueue(questions: Question[], s: LearnerState, today: string, newPerDay: number): Question[] {
-  const due = questions.filter((q) => s.cards[q.id] && s.cards[q.id].due <= today);
+  // A part of a task is never a flashcard: it makes sense only after the part before it.
+  const cards = questions.filter((q) => !q.part);
+  const due = cards.filter((q) => s.cards[q.id] && s.cards[q.id].due <= today);
   const used = s.newDate === today ? s.newCount : 0;
   const kept = reservedQuestions(questions);
-  const fresh = questions.filter((q) => !s.cards[q.id] && !kept.has(q.id)).slice(0, Math.max(0, newPerDay - used));
+  const fresh = cards.filter((q) => !s.cards[q.id] && !kept.has(q.id)).slice(0, Math.max(0, newPerDay - used));
   return [...due, ...fresh];
 }
 
 // ---------- quiz from the question bank, marked by plain code ----------
 
 export function formatQuizQuestion(q: Question, s: LearnerState): string {
-  const head = `**${s.names[q.subskill] ?? "Question"}**\n\n${q.question}`;
+  const head = `**${s.names[q.subskill] ?? "Question"}**${q.part ? ` · part ${q.part.n} of ${q.part.of}` : ""}\n\n${q.question}`;
   if (q.type === "mcq") return `${head}\n\n${q.options.map((o) => `- ${o}`).join("\n")}\n\n*Reply with a letter.*`;
   // A code question shows its visible tests and starting code; hidden tests only after marking.
   if (q.code) return `${head}\n\n${renderCodeTask(q.code)}`;
@@ -787,7 +898,8 @@ export function placementQuestions(questions: Question[], s: LearnerState): Ques
   const kept = reservedQuestions(questions);
   const pick = (qs: Question[]) => qs.find((x) => x.type === "mcq") ?? qs.find((x) => x.type === "short");
   for (const n of Object.keys(s.names).map(Number).sort((a, b) => a - b)) {
-    const mine = questions.filter((q) => q.subskill === n);
+    // A part of a task is asked only inside its task, and marked by its own route.
+    const mine = questions.filter((q) => q.subskill === n && !q.part);
     const q = pick(mine.filter((x) => !kept.has(x.id))) ?? pick(mine);
     if (q) out.push(q);
   }
@@ -1039,12 +1151,15 @@ export function serializeChat(c: Chat): string {
 
 export const chatWords = (c: Chat): number => c.messages.reduce((a, m) => a + words(m.text), 0);
 
+/** One message as a prompt line: `LEARNER:` or `TUTOR:` and its text. */
+export const chatLine = (m: Chat["messages"][number]): string => `${m.role === "you" ? "LEARNER" : "TUTOR"}: ${m.text.trim()}`;
+
 export function chatForPrompt(c: Chat): string {
   const out: string[] = [];
   if (c.summary.trim()) out.push("## Summary of earlier parts", c.summary.trim(), "");
   if (c.messages.length) {
     out.push("## Messages");
-    for (const m of c.messages) out.push(`${m.role === "you" ? "LEARNER" : "TUTOR"}: ${m.text.trim()}`, "");
+    for (const m of c.messages) out.push(chatLine(m), "");
   }
   return out.join("\n").trim();
 }

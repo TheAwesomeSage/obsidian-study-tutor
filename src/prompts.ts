@@ -12,6 +12,8 @@ import compileMd from "../skills/compile.md";
 import utilityMd from "../skills/utility.md";
 import subjectsMd from "../skills/subjects.md";
 import policyMd from "../skills/policy.md";
+import askMd from "../skills/ask.md";
+import assessMd from "../skills/assess.md";
 import { Chat, LearnerState, Mode, SourceMode, Topic, chatForPrompt, stateForPrompt, words } from "./formats";
 
 export function splitSubjects(md: string): Record<string, string> {
@@ -36,6 +38,8 @@ export const BUNDLED: Record<string, string> = {
   "mode-expert.md": expertMd,
   "compile.md": compileMd,
   "utility.md": utilityMd,
+  "ask.md": askMd,
+  "assess.md": assessMd,
   // Documentation of the rules the code enforces. It is never sent to a model.
   "policy.md": policyMd,
   ...Object.fromEntries(Object.entries(splitSubjects(subjectsMd)).map(([name, text]) => [`subjects/${name}.md`, text])),
@@ -60,7 +64,9 @@ export function topicForPrompt(topic: Topic, focus: number | null, maxWords: num
   };
   if (current) include(current.n);
   const relevant = topic.subskills.filter(s => needed.has(s.n)).map(s => s.section).join("\n\n");
-  return [`# ${topic.title}`, "", topic.overview, "", "## Subskills (outline; focus and relevant prerequisites are shown in full)", outline, "", "## Focus subskill", relevant].join("\n");
+  // The outcome stays on a trimmed card: every turn teaches toward it.
+  const outcome = topic.outcome ? ["## Outcome", topic.outcome, ""] : [];
+  return [`# ${topic.title}`, "", topic.overview, "", ...outcome, "## Subskills (outline; focus and relevant prerequisites are shown in full)", outline, "", "## Focus subskill", relevant].join("\n");
 }
 
 /**

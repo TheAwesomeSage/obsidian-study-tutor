@@ -7,8 +7,12 @@
 //     placed, so the map stays familiar as topics are added;
 //   - it stays fast with thousands of nodes, because repulsion only looks at nearby nodes
 //     through a grid instead of comparing every pair.
-// Topics form clusters, and within a cluster foundations sit low and what builds on them rises.
+// Map layouts cluster topics with foundations below dependents. The optional tree layout
+// follows every prerequisite in levels from top to bottom and preserves shared parents.
 
+import {treePositions} from "./graphtree";
+
+export type GraphLayoutStyle = "tree" | "clusters" | "connected";
 export interface LayoutNode {
   id: string;
   /** Cluster key: the topic the concept belongs to. */
@@ -61,12 +65,13 @@ export function depths(nodes: LayoutNode[], edges: LayoutEdge[]): Record<string,
  * pinned where they were, and everything else is placed around them. With nothing saved, the
  * whole graph is laid out from scratch.
  */
-export function layoutGraph(nodes: LayoutNode[], edges: LayoutEdge[], saved: Positions = {}, style: "clusters" | "connected" = "clusters"): Positions {
+export function layoutGraph(nodes: LayoutNode[], edges: LayoutEdge[], saved: Positions = {}, style: GraphLayoutStyle = "clusters"): Positions {
   const connected = style === "connected";
   const n = nodes.length;
   if (!n) return {};
   const index = new Map(nodes.map((node, i) => [node.id, i]));
   const depth = depths(nodes, edges);
+  if(style === "tree") return treePositions(nodes,edges,depth,saved);
   const x = new Float64Array(n);
   const y = new Float64Array(n);
   const pinned = new Uint8Array(n);

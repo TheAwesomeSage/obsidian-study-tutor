@@ -701,6 +701,35 @@
 .study-tutor .st-time {
   margin-left: auto;
 }
+/* Ask anything: a question or a goal, answered with no topic. */
+.study-tutor .st-ask {
+  display: flex;
+  flex-direction: column;
+  gap: var(--st-2);
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+}
+.study-tutor .st-empty .st-ask,
+.study-tutor .st-empty .st-recent-asks {
+  margin-top: var(--st-4);
+}
+.study-tutor .st-ask-wrap,
+.study-tutor .st-recent-asks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--st-3);
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+}
+.study-tutor .st-ask-input {
+  width: 100%;
+  resize: vertical;
+}
+.study-tutor .st-ask .st-actions {
+  justify-content: flex-end;
+}
 .study-tutor .st-ways {
   display: flex;
   flex-direction: column;
@@ -1302,28 +1331,83 @@
 }
 
 /* confidence: five points, none chosen until you choose one */
-.study-tutor .st-conf {
-  display: inline-flex;
-  align-items: center;
+.study-tutor .st-graph-layout {
+  max-width: 11rem;
+  height: 28px;
+  font-size: var(--st-smaller);
+}
+.study-tutor .st-graph-island {
   flex-wrap: wrap;
+  max-width: calc(100% - 24px);
+}
+.study-tutor .st-conf {
+  display: flex;
+  flex-direction: column;
+  width: 24rem;
+  max-width: 100%;
+  min-width: 0;
   gap: 3px;
   font-size: var(--st-smaller);
   color: var(--text-muted);
+}
+.study-tutor .st-conf-head {
+  display: flex;
+  align-items: center;
+  gap: var(--st-2);
+}
+.study-tutor .st-conf-value {
+  color: var(--text-normal);
+}
+.study-tutor .st-conf-clear {
+  margin-left: auto;
+  height: 22px;
+  padding: 0 var(--st-1);
+  font-size: inherit;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+}
+.study-tutor input.st-conf-slider {
+  width: 80%;
+  margin: 0 10%;
+  height: 24px;
+  padding: 0;
+  cursor: pointer;
+  accent-color: var(--interactive-accent);
+}
+.study-tutor .st-conf:not(.is-set) .st-conf-slider {
+  opacity: 0.55;
+}
+.study-tutor .st-conf-slider:disabled {
+  cursor: default;
+}
+.study-tutor .st-conf-slider:focus-visible,
+.study-tutor .st-conf-opt:focus-visible,
+.study-tutor .st-conf-clear:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+.study-tutor .st-conf-points {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 3px;
 }
 .study-tutor .st-conf-label {
   margin-right: var(--st-1);
   white-space: nowrap;
 }
 .study-tutor .st-conf-opt {
-  height: 24px;
-  padding: 0 var(--st-2);
+  min-width: 0;
+  min-height: 24px;
+  height: auto;
+  padding: 2px;
   border: 1px solid var(--st-line);
   border-radius: 999px;
   background: transparent;
   box-shadow: none;
   color: var(--text-muted);
   font-size: var(--st-smaller);
-  white-space: nowrap;
+  white-space: normal;
   cursor: pointer;
 }
 .study-tutor .st-conf-opt:hover:not(:disabled) {
@@ -1638,8 +1722,32 @@
   min-width: 0;
   min-height: 12rem;
   overflow: hidden;
-  /* A very faint wash behind the map, so clusters sit on something. Static and low contrast. */
-  background: radial-gradient(ellipse at 50% 40%, color-mix(in srgb, var(--interactive-accent) 5%, transparent), transparent 70%), var(--st-surface);
+  background: var(--st-g-surface);
+}
+.study-tutor {
+  --st-g-surface: #fafbf8;
+  --st-g-edge: #354b54;
+  /* Off-white becomes slate on a light surface; the other families retain their identity. */
+  --st-topic-1: #53616a;
+  --st-topic-2: #3477b5;
+  --st-topic-3: #087f99;
+  --st-topic-4: #087e78;
+  --st-topic-5: #507f5b;
+  --st-topic-6: #718329;
+}
+.theme-dark .study-tutor {
+  --st-g-surface: #080c0f;
+  --st-g-edge: #a3b0b8;
+  --st-topic-1: #e1e5df;
+  --st-topic-2: #639cd5;
+  --st-topic-3: #69c7dc;
+  --st-topic-4: #51b8ad;
+  --st-topic-5: #8bab7c;
+  --st-topic-6: #c0ce6a;
+}
+.study-tutor .st-graph-canvas:focus-visible {
+  outline: 2px solid var(--st-g-text);
+  outline-offset: -3px;
 }
 .study-tutor .st-graph-canvas {
   display: block;

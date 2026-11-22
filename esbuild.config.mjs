@@ -8,7 +8,7 @@ const common = { bundle: true, format: "cjs", target: "es2020", loader: { ".md":
 
 if (mode === "test") {
   const t = { ...common, platform: "node", outdir: "tests/out", outExtension: { ".js": ".cjs" } };
-  await esbuild.build({ ...t, external: [...external, "pyodide"], entryPoints: ["tests/unit.test.ts", "tests/learning.test.ts", "tests/tutoring.test.ts", "tests/graph.test.ts", "tests/router.test.ts", "tests/maths.test.ts", "tests/families.test.ts", "tests/visuals.test.ts", "tests/qwen-bench.ts", "tests/presentation.test.ts", "tests/compiler.test.ts", "tests/coderun.test.ts", "tests/live.test.ts", "tests/live-compile.ts", "tests/live-features.test.ts", "tests/live-session.test.ts"] });
+  await esbuild.build({ ...t, external: [...external, "pyodide"], entryPoints: ["tests/unit.test.ts", "tests/learning.test.ts", "tests/tutoring.test.ts", "tests/graph.test.ts", "tests/router.test.ts", "tests/maths.test.ts", "tests/families.test.ts", "tests/visuals.test.ts", "tests/qwen-bench.ts", "tests/presentation.test.ts", "tests/compiler.test.ts", "tests/coderun.test.ts", "tests/live.test.ts", "tests/live-compile.ts", "tests/live-features.test.ts", "tests/live-session.test.ts", "tests/journey.test.ts", "tests/journey-live.ts", "tests/base-bench.ts"] });
   // The UI test swaps the real "obsidian" module for a stub and runs under jsdom.
   await esbuild.build({ ...t, entryPoints: ["tests/ui.test.ts", "tests/preview.ts"], external: [...external.filter((e) => e !== "obsidian"), "jsdom"], alias: { obsidian: "./tests/obsidian-stub.ts" } });
   // Browser pages for looking at things no Node test can show: the real SymPy worker and the concept graph.

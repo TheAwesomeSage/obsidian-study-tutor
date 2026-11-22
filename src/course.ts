@@ -299,7 +299,7 @@ export function neighbourhood(course: Course, id: string): Neighbourhood {
   return {
     prerequisites: order.filter((e) => e.from === id),
     dependents: order.filter((e) => e.to === id),
-    related: course.edges.filter((e) => (e.from === id || e.to === id) && !(e.type === "requires" && e.status !== "rejected")),
+    related: course.edges.filter((e) => e.status !== "rejected" && e.type !== "requires" && (e.from === id || e.to === id)),
     ancestors: walk(id, "from", "to"),
     descendants: walk(id, "to", "from"),
   };

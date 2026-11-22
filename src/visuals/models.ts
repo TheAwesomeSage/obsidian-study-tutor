@@ -1,6 +1,6 @@
 /** Module-owned equations and actual execution traces. All input is validated by registry. */
 export interface PlotSettings {
-  family: "polynomial" | "sin" | "cos" | "exp" | "log" | "sqrt" | "reciprocal" | "abs";
+  family: "polynomial" | "sin" | "cos" | "exp" | "decay" | "log" | "sqrt" | "reciprocal" | "abs";
   coefficients: number[]; scale: number; shiftX: number; shiftY: number;
   domain: [number, number]; viewport: [number, number, number, number]; pointX: number;
 }
@@ -15,6 +15,7 @@ export function evaluate(s: PlotSettings, x: number): { y: number | null; slope:
     case "sin": y = Math.sin(u); d = Math.cos(u); break;
     case "cos": y = Math.cos(u); d = -Math.sin(u); break;
     case "exp": y = Math.exp(u); d = y; break;
+    case "decay": y = Math.exp(-u); d = -y; break;
     case "log": y = u > 0 ? Math.log(u) : NaN; d = u > 0 ? 1 / u : NaN; break;
     case "sqrt": y = u >= 0 ? Math.sqrt(u) : NaN; d = u > 0 ? 0.5 / Math.sqrt(u) : NaN; break;
     case "reciprocal": y = u !== 0 ? 1 / u : NaN; d = u !== 0 ? -1 / (u * u) : NaN; break;
@@ -27,7 +28,7 @@ export function evaluate(s: PlotSettings, x: number): { y: number | null; slope:
 export function formula(s: PlotSettings): string {
   const u = `(x − ${s.shiftX})`;
   const base = s.family === "polynomial" ? s.coefficients.map((c, i) => `${c}${i ? `·${u}${i > 1 ? `^${i}` : ""}` : ""}`).join(" + ")
-    : s.family === "reciprocal" ? `1/${u}` : `${s.family}(${u})`;
+    : s.family === "reciprocal" ? `1/${u}` : s.family === "decay" ? `exp(−${u})` : `${s.family}(${u})`;
   return `f(x) = ${s.scale}·[${base}] + ${s.shiftY}`;
 }
 /** Separate curve pieces so a renderer never joins across an asymptote/domain boundary. */

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CompileCancelled, STAGE_VERSIONS, checkpointKey, compileCourse, type CompilerCache } from "../src/compiler";
+import { parseTopic } from "../src/formats";
 import { canonicalPage, publicIPv4, readablePage, type ResearchProvider } from "../src/compile-research";
 import { indexSource, passageWindow } from "../src/compile-sources";
 import { Engine, type EngineSettings } from "../src/engine";
@@ -29,6 +30,8 @@ function fake(options: {
   omit?: string; uncovered?: boolean; review?: (input: any) => unknown; seen?: any[];
   /** Replace the synthesis or audit reply; each receives the input and the default reply. */
   synth?: (input: any, reply: any) => unknown; audit?: (input: any, reply: any) => unknown;
+  /** Replace the planned outcome. */
+  outcome?: { task: string; criteria: string[] };
 } = {}): Model {
   return async o => {
     const input = JSON.parse(o.input);
@@ -38,7 +41,7 @@ function fake(options: {
     let structured: unknown;
     if (props.objectives) {
       const lines = input.passages.filter((p: any) => !p.text.startsWith("#") && !p.text.includes(options.omit ?? "_not_omitted_"));
-      structured = { objectives: lines.length ? lines.map((p: any) => ({ text: p.text.trim().slice(0, 120), references: [p.id], search: `linear maps kernel ${p.line}` })) : input.mode === "subject" ? [{ text: "Compute a kernel", references: [], search: "linear maps kernel" }] : [] };
+      structured = { outcome: options.outcome ?? { task: "Find the kernel of a given linear map and explain what it says about the map", criteria: ["Sets T(v)=0 and solves", "States whether T is injective"] }, objectives: lines.length ? lines.map((p: any) => ({ text: p.text.trim().slice(0, 120), references: [p.id], search: `linear maps kernel ${p.line}` })) : input.mode === "subject" ? [{ text: "Compute a kernel", references: [], search: "linear maps kernel" }] : [] };
     } else if (props.fetch) {
       structured = options.review?.(input) ?? { fetch: input.candidates.slice(0, 1).map((h: any) => ({ objective: h.objective, url: h.url })), searches: [], inspect: [] };
     } else if (props.units) {
@@ -464,7 +467,9 @@ test("a stage version bump invalidates that stage's checkpoints", async () => {
   const base = fake();
   await run({ cache, call: o => { sent[stageOf(o.system)] = { system: o.system, schema: o.jsonSchema, input: JSON.parse(o.input) }; return base(o); } });
   for (const stage of ["synth", "audit"] as const) {
-    const { system, schema, input } = sent[stage]!;
+    const { system, schema, input: sentInput } = sent[stage]!;
+    // A synthesis key leaves the outcome out, so a reworded outcome alone rebuilds nothing.
+    const input = stage === "synth" ? { ...(sentInput as object), outcome: undefined } : sentInput;
     const key = checkpointKey(stage, STAGE_VERSIONS[stage], "fixture", system, schema, input);
     assert.ok(cache.data.has(key), `the ${stage} checkpoint is keyed by its stage version`);
     assert.notEqual(checkpointKey(stage, `${STAGE_VERSIONS[stage]}-next`, "fixture", system, schema, input), key);
@@ -695,4 +700,72 @@ test("a question's generator is kept only when trusted code checks it and it giv
   assert.equal(kept.length, 1, "only the spec that reproduces the stated answer is kept");
   assert.equal(kept[0].generator?.answer, "x");
   assert.deepEqual([r.staged.metrics.generators, r.staged.metrics.generatorsRejected], [1, 2]);
+});
+
+test("backward design: planning states the outcome first, it heads the topic card and reaches synthesis, and objectives keep the planned order", async () => {
+  const c = counted();
+  const r = await run({ call: c.call });
+  assert.deepEqual(r.staged.outcome, { task: "Find the kernel of a given linear map and explain what it says about the map", criteria: ["Sets T(v)=0 and solves", "States whether T is injective"] });
+  assert.match(r.topicBody, /## Overview[\s\S]*## Outcome\n\nFind the kernel of a given linear map and explain what it says about the map\n\nDone well when:\n- Sets T\(v\)=0 and solves\n- States whether T is injective\n\n## Objectives/);
+  const topic = parseTopic(`---\ntutor: topic\ntitle: Linear maps\n---\n${r.topicBody}`);
+  assert.match(topic.outcome, /^Find the kernel[\s\S]*- States whether T is injective$/);
+  assert.equal(topic.subskills.length, r.staged.lessons.length, "the outcome section does not disturb the subskills");
+  assert.deepEqual(c.inputs.synth[0].outcome, r.staged.outcome, "lessons are written toward the outcome");
+
+  // The planning prompt asks for backward design.
+  const seen: string[] = [];
+  const call: Model = async (o) => { if (stageOf(o.system) === "plan") seen.push(o.system); return fake()(o); };
+  await run({ call });
+  assert.match(seen[0], /^Inventory the learning objectives[\s\S]*Plan backwards from the goal\. First state the outcome/);
+  assert.match(seen[0], /in teaching order: prerequisites first; if the goal says where to start, that first/);
+
+  // No outcome stated: no section, no field, and the course is otherwise the same.
+  const none = await run({ call: fake({ outcome: { task: "  ", criteria: ["ignored"] } }) });
+  assert.equal(none.staged.outcome, undefined);
+  assert.doesNotMatch(none.topicBody, /## Outcome/);
+  assert.equal(parseTopic(`---\ntitle: x\n---\n${none.topicBody}`).outcome, "");
+});
+
+test("backward design: synthesis is told the outcome only when there is one, a reworded outcome reuses lesson groups, later batches plan against it, and extra criteria do not reject a plan", async () => {
+  const c = counted();
+  await run({ call: c.call });
+  const synthSystems: string[] = [];
+  const seen = counted((o) => { if (stageOf(o.system) === "synth") synthSystems.push(o.system); return fake()(o); });
+  await run({ call: seen.call });
+  assert.match(synthSystems[0], /The supplied outcome is the task the whole course builds to\. It is the learner's goal, not a source/);
+  const plain: string[] = [];
+  await run({ call: (o) => { if (stageOf(o.system) === "synth") plain.push(o.system); return fake({ outcome: { task: "", criteria: [] } })(o); } });
+  assert.doesNotMatch(plain[0], /The supplied outcome/, "a course without an outcome keeps the old synthesis prompt and its checkpoints");
+
+  // Replanning that only rewords the outcome reuses every synthesised group.
+  const cache = memory();
+  await run({ cache });
+  for (const k of [...cache.data.keys()]) if (k.startsWith("plan-")) cache.data.delete(k);
+  const reworded = counted(fake({ outcome: { task: "Work out the kernel of a linear map and say what it means", criteria: ["Solves T(v)=0"] } }));
+  const r = await run({ cache, call: reworded.call });
+  assert.equal(r.staged.outcome?.task, "Work out the kernel of a linear map and say what it means");
+  assert.equal(reworded.n.plan, 1, "the plan was asked again");
+  assert.equal(reworded.n.synth, 0, "no lesson group is rebuilt for a reworded outcome");
+
+  // Seven criteria are kept to six instead of rejecting the plan; a heading-like task cannot add a subskill.
+  const many = await run({ call: fake({ outcome: { task: "### 9. Fake subskill", criteria: ["a", "b", "c", "d", "e", "f", "g"] } }) });
+  assert.equal(many.staged.outcome?.task, "9. Fake subskill");
+  assert.equal(many.staged.outcome?.criteria.length, 6);
+  assert.equal(parseTopic(`---\ntitle: x\n---\n${many.topicBody}`).subskills.length, many.staged.lessons.length);
+
+  // Long material is planned in batches; every batch after the first is given the outcome.
+  const batches = counted();
+  const long = Array.from({ length: 2 }, (_, k) => ({ name: `Long notes ${k}`, path: `Math/Long ${k}.md`, text: Array.from({ length: 40 }, (_, i) => `C${k}.${i}: Compute the kernel of map number ${k * 40 + i}, ${"with a long description of its matrix entries ".repeat(6)}`).join("\n\n") }));
+  await run({ call: batches.call, material: long, singlePassWords: 10 });
+  assert.ok(batches.inputs.plan.length > 1, "long material is planned in more than one batch");
+  for (const input of batches.inputs.plan.slice(1)) assert.ok(input.outcome?.task, "a later batch plans against the stated outcome");
+  assert.equal(batches.inputs.plan[0].outcome, undefined, "the first batch states it");
+});
+
+test("a proposed deep structure is written only when it is on the list", async () => {
+  const r = await run({ call: fake({ synth: (_input, reply: any) => ({ ...reply, units: reply.units.map((u: any, i: number) => ({ ...u, structure: i === 0 ? "first-order-decay" : "made-up-structure" })) }) }) });
+  const lines = r.topicBody.match(/^structure: .*$/gm) ?? [];
+  assert.deepEqual(lines, ["structure: first-order-decay"], "an invented slug is dropped, never written");
+  const topic = parseTopic(`# Linear maps\n\n${r.topicBody}`);
+  assert.equal(topic.subskills.filter((k) => k.structure).length, 1);
 });

@@ -360,12 +360,16 @@ const FAILURE: Record<Exclude<CodeTestStatus, "pass">, { type: string; says: str
   timeout: { type: "timeout", says: "ran out of time" },
 };
 
+/** What a run of threaded code does not establish, recorded with every concurrent result. */
+export const TESTS_ESTABLISH = "These runs do not establish thread safety: they cover only the interleavings that happened, and they do not check any explanation of why the code is correct.";
+
 /**
  * Turns a run into a proposed mark. All tests passing proposes correct; some passing, partial;
  * none passing, a compile error, or a sanitizer report (even with every output right), incorrect.
  * A threaded task proposes correct only with a clean thread sanitizer behind it; otherwise its
  * race-freedom stays unjudged. Returns null for a run with no execution evidence.
  */
+
 export function markCodeRun(task: CodeTask, report: CodeRunReport, rubric = ""): CodeMarking | null {
   if (!executed(report)) return null;
   const record = codeRunRecord(task, report);
@@ -387,6 +391,7 @@ export function markCodeRun(task: CodeTask, report: CodeRunReport, rubric = ""):
     proposed = "correct";
     feedback = `All ${total} tests passed${hidden ? `, including ${hidden} hidden` : ""}.`;
     if (task.concurrent && !tsan) feedback = `All ${total} tests passed, but passing tests cannot show that threaded code is free of data races, and ${record.language === "python" ? "Python has no thread sanitizer here" : "no thread sanitizer ran clean"}.`;
+    else if (task.concurrent) feedback += ` ${TESTS_ESTABLISH}`;
   } else if (passed > 0) {
     [proposed, errorType, feedback] = ["partial", failure.type, `${passed} of ${total} tests passed; "${failed?.name ?? "a test"}" ${failure.says}.`];
   } else {
@@ -402,7 +407,7 @@ export function markCodeRun(task: CodeTask, report: CodeRunReport, rubric = ""):
     ...(record.limits ? [record.limits] : []),
     "the tests check outputs only, not the method",
     ...(record.language !== "python" && task.sanitizers !== false && record.sanitizer === "not-available" ? ["no sanitizer was available, so a memory error that leaves the output unchanged would go unnoticed"] : []),
-    ...(task.concurrent ? [tsan ? "a thread sanitizer ran clean on these runs" : "passing tests cannot show the absence of data races"] : []),
+    ...(task.concurrent ? [tsan ? "a thread sanitizer ran clean on these runs" : "passing tests cannot show the absence of data races", TESTS_ESTABLISH.toLowerCase().replace(/\.$/, "")] : []),
   ];
   return { proposed, reasoning, rubric: [rubric.trim(), task.concurrent ? RACE_POINT : ""].filter(Boolean).join("; "), errorType, feedback, assumptions: notes.join("; "), record };
 }

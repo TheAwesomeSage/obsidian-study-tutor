@@ -64,6 +64,7 @@ export type Action =
   | "guided-practice"
   | "independent-practice"
   | "transfer"
+  | "bridge"
   | "retrieval"
   | "teach-back"
   | "edge-case"
@@ -81,6 +82,7 @@ export const ACTION_LABEL: Record<Action, string> = {
   "guided-practice": "Guided practice",
   "independent-practice": "Independent practice",
   transfer: "Transfer question",
+  bridge: "Bridge from another topic",
   retrieval: "Retrieval check",
   "teach-back": "Teach it back",
   "edge-case": "Edge case",
@@ -100,6 +102,7 @@ export const ACTION_GUIDE: Record<Action, string> = {
   "guided-practice": "Set one problem and support the learner through it, giving graduated hints only when asked or when they are stuck.",
   "independent-practice": "Set one fresh problem. Give no hint, example or method before the attempt.",
   transfer: "Set one unfamiliar problem that uses the idea in a new setting. Give no hints.",
+  bridge: "Code puts a question asking the learner to carry over a concept from another topic with the same deep structure, before this one is taught. The separate assessor marks it.",
   retrieval: "Ask one recall question on this material without warning and without hints.",
   "teach-back": "Ask the learner to explain the idea as if teaching a classmate: what it says, why it holds, and one example of their own. Give no explanation or example before the attempt. When marking, judge accuracy, completeness and whether someone could learn from it.",
   "edge-case": "Set one boundary or degenerate case where the usual method needs care (an empty or extreme input, a limit, an exception to the rule). Give no hint. When marking, ask for the reason, not only the result.",
@@ -150,6 +153,11 @@ export interface SkillInput {
    * day. False means a transfer today cannot satisfy the delayed requirement. Unset means true.
    */
   transferReady?: boolean;
+  /**
+   * A concept in another topic with the same deep structure that the learner can already do on their
+   * own, when no bridge from it has been answered here yet (structures.ts). Absent otherwise.
+   */
+  bridge?: { id: string; name: string; topic: string };
   /** Level 5 still needs an unaided teach-back, or an unaided edge case. */
   needsTeachBack?: boolean;
   needsEdgeCase?: boolean;
@@ -235,7 +243,7 @@ export interface Decision {
   /** The explicit rule that decided this turn, when one did. Empty when the ranking chose. */
   constraint: string;
   /** Handled by plain code with no model call: placement questions, or a bank question. */
-  local: "placement" | "bank" | null;
+  local: "placement" | "bank" | "bridge" | null;
   /** True when Learn mode thinks the learner is ready to practise unaided. */
   suggestIndependent: boolean;
   scores: Score[];
@@ -251,6 +259,8 @@ export interface Decision {
   teaches?: string;
   /** Minutes suggested for timed practice, as in the exam. Set only on unaided practice the time available can hold. */
   timed?: number;
+  /** For a bridge: the stable id of the concept in another topic it carries over. */
+  bridgeFrom?: string;
 }
 
 /** Level a prerequisite must hold before what builds on it is taught. */
@@ -453,6 +463,11 @@ export function decide(p: PolicyInput): Decision {
   }
 
   const level = s.level;
+  // A concept with the same deep structure as one the learner can already do elsewhere is bridged
+  // from it once, before it is taught: the answer shows what carries over, and the lesson starts from it.
+  if (s.bridge && p.mode !== "teach" && (level === null ? !p.placementReady : level <= 1)) {
+    return { ...out("bridge", s.n, `${why}${s.name} has the same deep structure as ${s.bridge.name} in ${s.bridge.topic}, which you can already do on your own. One question asks you to carry it over before ${s.name} is taught.`, "a concept with a twin the learner can already do is bridged from it before it is taught", "bridge"), bridgeFrom: s.bridge.id };
+  }
   if (level === null) {
     if (p.placementReady) return out("diagnose", s.n, "Nothing is placed yet, so a few quick questions set your starting levels.", "", "placement");
     return out("diagnose", s.n, `${why}There is no evidence on ${s.name} yet, so one question finds your starting point.`);

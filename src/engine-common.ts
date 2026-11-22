@@ -3,10 +3,11 @@
 // Obsidian imports.
 
 import { Usage } from "./claude";
+import { calibrationReview } from "./learning-context";
 import { daysBetween as dayGap } from "./dates";
 import type { ModelProviderSettings } from "./model-provider";
 import { Attempt, Grading, TASK_TYPES, TaskType } from "./evidence";
-import { Chat, Frontmatter, LearnerState, Mode, Question, SourceMode, Topic, fmStr, mastery, setLevel, words } from "./formats";
+import { Chat, Frontmatter, LearnerState, Mode, Question, SourceMode, Topic, fmStr, laterPart, mastery, setLevel, words } from "./formats";
 import { ACTION_LABEL, Action, Decision, PolicyWeights, PrereqCheck } from "./policy";
 import { ActivityRecord } from "./configure";
 import { type CompileMetrics, type ExpansionRequest as CompileExpansionRequest } from "./compiler";
@@ -150,6 +151,8 @@ export interface TurnResult {
 }
 
 export interface TurnOpts {
+  /** Latest visual state from this chat; never used to award mastery. */
+  activityContext?: import("./learning-context").ActivityContext;
   attached?: Material;
   onSpawn?: (kill: () => void) => void;
   /** The learner's stated confidence in this answer, 0 to 1, given before feedback. Null when not given. */
@@ -208,7 +211,8 @@ export interface CompileResult {
 }
 
 export const MODE_NAME: Record<Mode, string> = { auto: "Adaptive", teach: "Learn", quiz: "Practise", tutor: "Master", expert: "Ask" };
-export const TEACHING: string[] = ["explain", "worked-example", "re-explain"];
+/** Actions and Master-mode moves that teach: an answer asked straight after one counts as helped. */
+export const TEACHING: string[] = ["explain", "worked-example", "re-explain", "repair-prerequisite", "model-strategy", "reteach"];
 export const ERROR_TYPES = ["conceptual", "procedural", "arithmetic", "notation", "prerequisite", "careless"];
 /** The learner is pointing back at something said before this part of the chat. */
 export const LOOKS_BACK = /\b(earlier|before|previous(ly)?|last time|you said|you told|we (did|covered|talked|discussed|went over)|remind me|go back|at the start)\b/i;
@@ -275,14 +279,17 @@ export function pickQuizQuestion(questions: Question[], s: LearnerState, asked: 
   }
   const seenToday = new Set(s.attempts.filter((a) => a.timestamp.slice(0, 10) === today).map((a) => baseQuestionId(a.questionId)));
   const times = (q: Question) => asked.filter((id) => baseQuestionId(id) === q.id).length;
-  const left = questions.filter((q) => times(q) < (q.generator ? 3 : 1) && (!opts.only || opts.only(q)) && (purpose !== "practice" || !kept.has(q.id)));
+  // A later part of a task is asked only straight after the part before it.
+  const left = questions.filter((q) => !laterPart(q) && times(q) < (q.generator ? 3 : 1) && (!opts.only || opts.only(q)) && (purpose !== "practice" || !kept.has(q.id)));
   if (!left.length) return null;
   const level = (q: Question) => s.levels[q.subskill] ?? 0;
   const fresh = (q: Question) => (purpose === "transfer" ? (unmet.has(q.id) ? (kept.has(q.id) ? 0 : 1) : 2) : kept.has(q.id) ? 1 : 0);
   const order = (q: Question) => (seenToday.has(q.id) ? 3 : s.cards[q.id] ? (s.cards[q.id].due <= today ? 0 : 2) : 1);
   // `rank` puts questions on ideas not yet asked first (coverage.ts); without it only level, freshness and due date decide.
   const rank = opts.rank ?? (() => 0);
-  return [...left].sort((a, b) => level(a) - level(b) || rank(a) - rank(b) || fresh(a) - fresh(b) || order(a) - order(b))[0];
+  const check = calibrationReview(s.attempts, today);
+  const calibrationRank = (q: Question) => check && q.subskill === check.skill && q.id !== baseQuestionId(check.questionId) ? 0 : 1;
+  return [...left].sort((a, b) => level(a) - level(b) || rank(a) - rank(b) || fresh(a) - fresh(b) || order(a) - order(b) || calibrationRank(a) - calibrationRank(b))[0];
 }
 
 /** Picks the texts that share the most words with the query, in their original order, within a word budget. */

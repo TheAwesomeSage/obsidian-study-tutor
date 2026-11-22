@@ -76,6 +76,8 @@ export interface ActivityRecord {
   selectionReason: string;
   /** A failure that depends on the moment (server down, timeout) and must not be cached. */
   transient?: boolean;
+  /** For an activity a part of a task names: that question's id. Its assessment is the part's answer. */
+  bankQuestion?: string;
 }
 
 /** The contract's view of a record: the player gets the lesson, or the reason and what is missing. */

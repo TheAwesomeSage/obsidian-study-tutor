@@ -6,13 +6,15 @@
   "scripts": {
     "build": "tsc --noEmit && node scripts/vendor-pyodide.mjs && node esbuild.config.mjs production",
     "dev": "node esbuild.config.mjs",
-    "test": "node esbuild.config.mjs test && node --test tests/out/unit.test.cjs tests/out/learning.test.cjs tests/out/tutoring.test.cjs tests/out/graph.test.cjs tests/out/router.test.cjs tests/out/maths.test.cjs tests/out/families.test.cjs tests/out/ui.test.cjs tests/out/visuals.test.cjs tests/out/presentation.test.cjs tests/out/compiler.test.cjs tests/out/coderun.test.cjs",
+    "test": "node esbuild.config.mjs test && node --test tests/out/unit.test.cjs tests/out/learning.test.cjs tests/out/tutoring.test.cjs tests/out/graph.test.cjs tests/out/router.test.cjs tests/out/maths.test.cjs tests/out/families.test.cjs tests/out/ui.test.cjs tests/out/visuals.test.cjs tests/out/presentation.test.cjs tests/out/compiler.test.cjs tests/out/coderun.test.cjs tests/out/journey.test.cjs",
     "test:live": "node esbuild.config.mjs test && node tests/out/live.test.cjs",
     "test:compile-live": "node esbuild.config.mjs test && node tests/out/live-compile.cjs",
     "test:features": "node esbuild.config.mjs test && node tests/out/live-features.test.cjs",
     "test:session": "node esbuild.config.mjs test && node tests/out/live-session.test.cjs",
     "preview": "node esbuild.config.mjs test && node tests/out/preview.cjs",
     "preview:visuals": "node scripts/visual-preview.mjs",
+    "test:journey-live": "node esbuild.config.mjs test && node tests/out/journey-live.cjs",
+    "bench:base": "node esbuild.config.mjs test && node tests/out/base-bench.cjs",
     "bench:qwen": "node esbuild.config.mjs test && node tests/out/qwen-bench.cjs",
     "test:visual-browser": "node scripts/visual-preview.mjs --build && playwright test"
   },

@@ -102,6 +102,19 @@ function makeApp(fs: MemFS, leaves: any[], opened: string[], getPlugin: () => an
   return app;
 }
 
+test("graph layout choices and each layout's coordinates survive plugin reload",async()=>{
+  const fs=new MemFS(),leaves:any[]=[],opened:string[]=[];
+  let plugin:any=null;
+  const app=makeApp(fs,leaves,opened,()=>plugin);
+  plugin=new (StudyTutorPlugin as any)(app,{id:"study-tutor"});
+  const positions={tree:{a:[0,0],b:[0,85]},connected:{a:[12,34],b:[56,78]}};
+  await plugin.saveData({settingsVersion:3,graphLayoutMode:"connected",graphLayout:positions.connected,graphLayouts:positions});
+  await plugin.onload();
+  assert.equal(plugin.data.graphLayoutMode,"connected");
+  assert.deepEqual(plugin.data.graphLayouts,positions);
+  assert.deepEqual(plugin.data.graphLayout,positions.connected);
+});
+
 test("home, study, review, topic page and graph work together from the normal entry points", async () => {
   const fs = new MemFS();
   const leaves: any[] = [];
@@ -148,7 +161,7 @@ test("home, study, review, topic page and graph work together from the normal en
   // Home suggests exactly what Adaptive study would do first (0.6): one diagnostic question, not a separate ranking.
   assert.match($(root, ".st-next").textContent, /Suggested next.*Diagnosis · Linear maps.*no evidence on Definition of a linear map yet, so one question finds your starting point.*Start: Diagnosis/s);
   assert.equal($(root, ".st-resume"), null, "nothing to resume yet");
-  assert.deepEqual($$(root, ".st-tile-label").map((e: any) => e.textContent), ["Adaptive study", "Learn", "Practise", "Review", "Ask", "Knowledge graph"]);
+  assert.deepEqual($$(root, ".st-tile-label").map((e: any) => e.textContent), ["Adaptive study", "Learn", "Practise", "Review", "Ask about this topic", "Knowledge graph"]);
   assert.match($(root, ".st-topics .st-row-item").textContent, /Linear maps0%.*2 concepts · 0 secured · practised not yet/s);
   assert.match($(root, ".st-recent").textContent, /Sessions you start will be listed here/);
   assert.equal($(root, ".st-topic-select").value, dir);
@@ -179,7 +192,10 @@ test("home, study, review, topic page and graph work together from the normal en
   const confPick = (label: string) => conf().find((b: any) => b.textContent === label).click();
   assert.deepEqual(conf().map((b: any) => b.textContent), ["None", "Low", "Medium", "High", "Very high"], "confidence is five discrete points");
   assert.deepEqual(confOn(), [], "confidence is unset until one is chosen");
-  assert.equal($(root, ".st-conf").getAttribute("role"), "radiogroup");
+  assert.equal($(root, ".st-conf-points").getAttribute("role"), "radiogroup");
+  const confSlider = () => $(root, ".st-conf-slider");
+  assert.equal(confSlider().type, "range");
+  assert.match(confSlider().getAttribute("aria-valuetext"), /Not set/);
   button(root, "Start session").click();
   await tick(80);
   assert.match($(root, ".st-messages").textContent, /Is \$f\(x\)=x\+1\$ linear\?/);
@@ -194,7 +210,7 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal(root.querySelector(".st-pending"), null);
   assert.ok($(root, ".st-composer > .st-quick.st-side"), "help buttons sit at the side of the answer box");
   assert.ok($(root, ".st-composer > .st-side.is-right .st-send"), "Send sits at the other side");
-  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent, b.disabled]), [["Hint", false], ["Explain", false], ["Skip", false], ["Visual", false]]);
+  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent, b.disabled]), [["Coding coach", false], ["Hint", false], ["Explain", false], ["Skip", false], ["Visual", false]]);
   // The reasoning behind the action is one click away.
   $(root, ".st-why-btn").click();
   assert.equal($(root, ".st-why-btn").getAttribute("aria-expanded"), "true");
@@ -204,7 +220,11 @@ test("home, study, review, topic page and graph work together from the normal en
 
   // Confidence: choosing a point sets it, choosing it again or Delete clears it, arrows move it.
   assert.equal(conf()[0].disabled, false);
+  confSlider().value = "1";
+  fire(confSlider(), "input");
+  assert.deepEqual(confOn(), ["Low"], "dragging the slider selects a confidence stop");
   confPick("High");
+  assert.equal(confSlider().value, "3", "clicking a label also moves the slider");
   assert.deepEqual(confOn(), ["High"]);
   assert.ok($(root, ".st-conf").classList.contains("is-set"));
   confPick("High");
@@ -215,7 +235,8 @@ test("home, study, review, topic page and graph work together from the normal en
   conf()[3].dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
   assert.deepEqual(confOn(), []);
   assert.ok(!$(root, ".st-conf").classList.contains("is-set"));
-  confPick("Very high");
+  confSlider().value = "4";
+  fire(confSlider(), "input");
 
   // A draft survives leaving the screen and coming back; so does the confidence.
   const input = () => $(root, ".st-composer textarea");
@@ -231,6 +252,7 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal(root.getAttribute("data-screen"), "study");
   assert.equal(input().value, "Yes, it is li");
   assert.deepEqual(confOn(), ["Very high"]);
+  assert.equal(confSlider().value, "4", "the dragged value survives leaving and resuming chat");
   assert.equal($$(root, ".st-msg").length, 1);
 
   // A failed send keeps the message, the confidence and the open question.
@@ -260,6 +282,7 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.match($(root, ".st-feedback").textContent, /Marked incorrectgraded by the model, unverified · your confidence: very high/);
   assert.match($(root, ".st-feedback-more").textContent, /How this was checkedBasis: one model judgement, not independently checked\.This counts as unaided evidence\.thinks translation is linear/);
   assert.deepEqual(confOn(), [], "confidence resets for the next answer");
+  assert.match(confSlider().getAttribute("aria-valuetext"), /Not set/, "the slider also resets after marking");
   const state1 = parseState(await fs.read(`${dir}/state.md`));
   assert.equal(state1.levels[1], 1, "a first wrong answer places the concept at 1; the model's proposed level 4 is ignored");
   assert.deepEqual(state1.misconceptions, ["thinks translation is linear"]);
@@ -915,4 +938,447 @@ test("cold probes: Practise never reopens a probe chat, and disputing a probe ma
   assert.deepEqual(await plugin.store.listChats(dir), [probePath]);
   await view.reload();
   assert.equal(view.chatPath, null);
+});
+
+test("ask anything: with no topic, Home asks a question straight away, the study screen shows a free chat without topic controls, and a topic's Home still works", async () => {
+  const fs = new MemFS();
+  const leaves: any[] = [];
+  let plugin: any = null;
+  const app = makeApp(fs, leaves, [], () => plugin);
+  plugin = new (StudyTutorPlugin as any)(app, { id: "study-tutor" }) as StudyTutorPlugin;
+  await plugin.onload();
+  await tick();
+  const calls: any[] = [];
+  const replies = [
+    `<ask>{"kind":"broad","goal":"Defend a concurrent queue in an interview","first_step":"Data races"}</ask>\nFirst learn **data races**, because every queue bug is one. See ![the race](https://host.example/race.png).\n\nTry this: list what two threads share.`,
+    "A lock makes the two writes take turns.",
+  ];
+  plugin.engine.call = async (o: any) => {
+    calls.push(o);
+    return { text: replies[calls.length - 1] ?? "ok", usage: { input: 10, cacheRead: 0, cacheWrite: 0, output: 20, costUsd: 0, calls: 1 } };
+  };
+  let other = 0;
+  plugin.engine.local = { model: "qwen", chatJson: async () => { other++; throw new Error("no Ollama"); } };
+  plugin.engine.compile = async () => { other++; throw new Error("no compile"); };
+  plugin.engine.placementTurn = async () => { other++; throw new Error("no placement"); };
+  const before = new Map(fs.files);
+
+  const view: any = await plugin.activateView();
+  const root = view.contentEl;
+  assert.equal(root.getAttribute("data-screen"), "home");
+  assert.match(root.textContent, /Start with a topic/);
+  const ask = () => $(root, ".st-ask");
+  assert.ok(ask(), "Home has an Ask anything box with no topic");
+  assert.match(ask().textContent, /Ask anything/);
+  assert.equal($(ask(), "textarea").getAttribute("placeholder"), "Ask a question or describe what you want to learn");
+  button(root, "New topic");
+  assert.equal($$(root, ".st-tile").length, 0, "still no study tiles before there is a topic");
+
+  $(ask(), "textarea").value = "Teach me concurrency well enough to defend my queue in an interview next Friday";
+  button(ask(), "Ask").click();
+  await tick(80);
+  assert.equal(root.getAttribute("data-screen"), "study", "the free chat opens on the study screen");
+  assert.equal(calls.length, 1, "exactly one model call");
+  assert.equal(other, 0, "no compile, Ollama or placement call");
+  assert.match($(root, ".st-messages").textContent, /Teach me concurrency[\s\S]*First learn \*\*data races\*\*/);
+  assert.ok(!/<ask>/.test(root.textContent), "the header is never shown");
+  assert.ok(!$(root, ".st-messages").textContent.includes("!["), "a remote picture in the reply is made inert before it is rendered");
+  assert.match(root.textContent, /Free question\. Nothing here counts toward a level\./);
+  // Topic controls are not offered: hints, explanations, visuals, skip, modes, confidence, the guide's step.
+  assert.equal($$(root, ".st-quick .st-btn").length, 0);
+  assert.equal($(root, ".st-modes"), null);
+  assert.equal($(root, ".st-mode-select"), null);
+  assert.equal($(root, ".st-why-btn"), null);
+  assert.ok($(root, ".st-conf").classList.contains("is-hidden"));
+  assert.ok(!$$(root, "button").some((b: any) => /^Continue/.test(b.textContent.trim())));
+  assert.ok($(root, ".st-composer textarea"), "the composer stays");
+
+  const saved = [...fs.files.keys()].filter((k) => k.startsWith("Tutor/Ask/"));
+  assert.equal(saved.length, 1);
+  const chat = await plugin.store.loadChat(saved[0]);
+  assert.deepEqual([chat.fm.mode, chat.fm.ask_kind, chat.fm.goal, chat.fm.first_step], ["ask", "broad", "Defend a concurrent queue in an interview", "Data races"]);
+
+  // A second message continues the chat.
+  $(root, ".st-composer textarea").value = "How does a lock fix it?";
+  button(root, "Send").click();
+  await tick(80);
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].input, /LEARNER: Teach me concurrency[\s\S]*TUTOR: First learn[\s\S]*LEARNER: How does a lock fix it\?/);
+  assert.match($(root, ".st-messages").textContent, /A lock makes the two writes take turns\./);
+
+  // Nothing but the chat (and the plugin's own settings) was written.
+  const changed = [...fs.files.keys()].filter((k) => before.get(k) !== fs.files.get(k) && !k.endsWith("data.json"));
+  assert.deepEqual(changed, saved);
+
+  // ----- with a topic: Home still works, and the Ask box is there too -----
+  const out = parseCompileOutput(COMPILED);
+  const dir = await plugin.store.saveCompiled({ title: "Linear maps", fm: { source: "notes", subject: out.subject, kind: "subject" }, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
+  view.go("home");
+  await view.reload();
+  assert.equal(root.getAttribute("data-screen"), "home");
+  assert.deepEqual($$(root, ".st-tile-label").map((e: any) => e.textContent), ["Adaptive study", "Learn", "Practise", "Review", "Ask about this topic", "Knowledge graph"]);
+  assert.ok($$(root, ".st-tile").every((b: any) => !b.disabled), "a topic's tiles work");
+  assert.ok(ask(), "the Ask anything box is there with a topic too");
+  assert.match($(root, ".st-recent").textContent, /Sessions you start will be listed here/, "a free chat is not one of a topic's sessions");
+  assert.equal((await plugin.store.recentChats(8)).length, 0);
+  assert.deepEqual((await plugin.store.listTopics()).map((t: any) => t.dir), [dir]);
+  assert.equal(view.overview.length, 1);
+  assert.equal(plugin.data.activeChat[dir], undefined, "a free chat is never remembered as a topic's chat");
+
+  // A topic's study screen is not taken over by the free chat.
+  $$(root, ".st-tile")[0].click();
+  await tick(40);
+  assert.equal(root.getAttribute("data-screen"), "study");
+  assert.match(view.chatPath, /Topics\/.*\/chats\//);
+  assert.ok($(root, ".st-modes"), "a topic chat has its modes again");
+  assert.doesNotMatch(root.textContent, /Free question\./);
+  await view.onClose();
+});
+
+test("ask anything: with a topic open, asking from Home opens a free chat, and Adaptive study afterwards does not continue it", async () => {
+  const fs = new MemFS();
+  const leaves: any[] = [];
+  let plugin: any = null;
+  const app = makeApp(fs, leaves, [], () => plugin);
+  plugin = new (StudyTutorPlugin as any)(app, { id: "study-tutor" }) as StudyTutorPlugin;
+  await plugin.onload();
+  await tick();
+  const out = parseCompileOutput(COMPILED);
+  const dir = await plugin.store.saveCompiled({ title: "Linear maps", fm: { source: "notes", subject: out.subject, kind: "subject" }, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
+  const calls: any[] = [];
+  plugin.engine.call = async (o: any) => {
+    calls.push(o);
+    return { text: "Answer.", usage: { input: 10, cacheRead: 0, cacheWrite: 0, output: 20, costUsd: 0, calls: 1 } };
+  };
+  plugin.opts.codePlacement = false;
+  const view: any = await plugin.activateView();
+  const root = view.contentEl;
+  await view.reload();
+  const stateBefore = await fs.read(`${dir}/state.md`);
+  $(root, ".st-ask textarea").value = "What is a cache line?";
+  button($(root, ".st-ask"), "Ask").click();
+  await tick(80);
+  assert.equal(root.getAttribute("data-screen"), "study");
+  assert.match(view.chatPath, /^Tutor\/Ask\//);
+  assert.equal(calls.length, 1);
+  assert.doesNotMatch(calls[0].system, /# Topic card/, "a free question is not answered from the open topic");
+  assert.match(root.textContent, /Free question\. Nothing here counts toward a level\./);
+  assert.equal(await fs.read(`${dir}/state.md`), stateBefore, "the open topic's learner state is untouched");
+  assert.deepEqual(await plugin.store.listChats(dir), [], "nothing is written under the topic");
+  view.go("home");
+  await tick();
+  $$(root, ".st-tile")[0].click();
+  await tick(40);
+  assert.match(view.chatPath, /Topics\/.*\/chats\//, "Adaptive study starts a topic chat, never continues the free one");
+  await view.onClose();
+});
+
+async function askPlugin(): Promise<{ fs: MemFS; plugin: any; view: any; root: any; calls: any[] }> {
+  const fs = new MemFS();
+  const leaves: any[] = [];
+  let plugin: any = null;
+  const app = makeApp(fs, leaves, [], () => plugin);
+  plugin = new (StudyTutorPlugin as any)(app, { id: "study-tutor" }) as StudyTutorPlugin;
+  await plugin.onload();
+  await tick();
+  const calls: any[] = [];
+  plugin.engine.call = async (o: any) => {
+    calls.push(o);
+    return { text: `Reply ${calls.length}.`, usage: { input: 10, cacheRead: 0, cacheWrite: 0, output: 20, costUsd: 0, calls: 1 } };
+  };
+  const view: any = await plugin.activateView();
+  return { fs, plugin, view, root: view.contentEl, calls };
+}
+
+test("ask anything: Home lists recent questions with or without a topic, newest first, marks unanswered ones, reopens and deletes them", async () => {
+  const { fs, plugin, view, root } = await askPlugin();
+  const doc = (globalThis as any).document;
+  assert.equal($(root, ".st-recent-asks"), null, "no list before any question");
+  const older = await plugin.store.newAskChat("Why is the sky blue?", new Date(2026, 10, 20, 9, 0));
+  const chat = await plugin.store.loadChat(older);
+  chat.messages.push({ role: "you", text: "Why is the sky blue?" }, { role: "tutor", text: "Rayleigh scattering." });
+  await plugin.store.saveChat(older, chat);
+  const newer = await plugin.store.newAskChat("What is a cache line?", new Date(2026, 10, 21, 9, 0));
+  const open = await plugin.store.loadChat(newer);
+  open.messages.push({ role: "you", text: "What is a cache line?" });
+  await plugin.store.saveChat(newer, open);
+  assert.deepEqual((await plugin.store.recentAsks(8)).map((a: any) => [a.path, a.title, a.unanswered]), [[newer, "What is a cache line?", true], [older, "Why is the sky blue?", false]]);
+
+  view.go("graph");
+  view.go("home");
+  await tick(40);
+  const rows = () => $$(root, ".st-recent-asks .st-row-item");
+  assert.equal(rows().length, 2, "shown with no topic");
+  assert.match(rows()[0].textContent, /What is a cache line\?.*No reply yet/s);
+  assert.doesNotMatch(rows()[1].textContent, /No reply yet/);
+
+  // Reopening the unanswered one offers to get the reply.
+  $(rows()[0], ".st-row-main").click();
+  await tick(40);
+  assert.equal(root.getAttribute("data-screen"), "study");
+  assert.equal(view.chatPath, newer);
+  button(root, "Get the reply").click();
+  await tick(60);
+  assert.match($(root, ".st-messages").textContent, /Reply 1\./);
+
+  // With a topic, the list is still there.
+  const out = parseCompileOutput(COMPILED);
+  await plugin.store.saveCompiled({ title: "Linear maps", fm: { source: "notes", subject: out.subject, kind: "subject" }, topicBody: out.topicBody, questionsBody: out.questionsBody, target: 4 });
+  await view.reload();
+  view.go("home");
+  await tick(40);
+  assert.equal(rows().length, 2, "shown with a topic too");
+  assert.doesNotMatch(rows()[0].textContent, /No reply yet/, "answered now");
+
+  // Delete asks first and moves the chat to the trash.
+  labelled(rows()[1], "Delete this question").click();
+  await tick();
+  doc.querySelector("button.mod-warning").click();
+  await tick(80);
+  assert.ok(!(await fs.exists(older)));
+  assert.equal(rows().length, 1);
+  await view.onClose();
+});
+
+test("ask anything: asking while a reply is being written keeps the question in the box and says why", async () => {
+  const { fs, view, root } = await askPlugin();
+  view.study.busy = true;
+  notices.length = 0;
+  const box = $(root, ".st-ask textarea");
+  box.value = "Keep me";
+  fire(box, "input");
+  button($(root, ".st-ask"), "Ask").click();
+  await tick(40);
+  assert.equal(root.getAttribute("data-screen"), "home");
+  assert.equal($(root, ".st-ask textarea").value, "Keep me", "the question stays in the box");
+  assert.ok(notices.some((n) => /Wait for the current reply/.test(n)), notices.join(" | "));
+  assert.equal([...fs.files.keys()].filter((k) => k.startsWith("Tutor/Ask/")).length, 0, "no chat is made");
+  view.study.busy = false;
+  await view.onClose();
+});
+
+test("ask anything: a failed call keeps the question, offers a retry, and the chat can be answered later", async () => {
+  const { fs, plugin, view, root, calls } = await askPlugin();
+  plugin.engine.call = async () => { throw new Error("usage limit reached"); };
+  $(root, ".st-ask textarea").value = "What is a cache line?";
+  button($(root, ".st-ask"), "Ask").click();
+  await tick(80);
+  assert.equal(root.getAttribute("data-screen"), "study");
+  assert.match($(root, ".st-notice.is-error").textContent, /That did not go through.*usage limit reached/s);
+  const path = [...fs.files.keys()].find((k) => k.startsWith("Tutor/Ask/"))!;
+  assert.match(await fs.read(path), /%%msg:you%%\n###### You\nWhat is a cache line\?/, "the question is saved");
+  assert.equal($(root, ".st-composer textarea").value, "", "the saved question is not put back in the box");
+  assert.equal($(root, ".st-send").textContent, "Send", "the composer is ready again");
+  assert.equal($(root, ".st-send").disabled, false);
+  assert.equal($$(root, ".st-msg").length, 1);
+
+  // Later, from Home: the question is marked unanswered, and reopening it offers the reply.
+  plugin.engine.call = async (o: any) => {
+    calls.push(o);
+    return { text: "A 64-byte block.", usage: { input: 1, cacheRead: 0, cacheWrite: 0, output: 1, costUsd: 0, calls: 1 } };
+  };
+  view.go("home");
+  await tick(40);
+  assert.match($(root, ".st-recent-asks").textContent, /No reply yet/);
+  $(root, ".st-recent-asks .st-row-main").click();
+  await tick(40);
+  assert.equal($(root, ".st-notice.is-error"), null, "the old error is not shown again");
+  button(root, "Get the reply").click();
+  await tick(60);
+  assert.match($(root, ".st-messages").textContent, /A 64-byte block\./);
+  assert.equal(calls.length, 1);
+  await view.onClose();
+});
+test("ask anything: Home will not delete a question while its reply is being written", async () => {
+  const { fs, plugin, view, root } = await askPlugin();
+  const doc = (globalThis as any).document;
+  const path = await plugin.store.newAskChat("What is a cache line?");
+  const chat = await plugin.store.loadChat(path);
+  chat.messages.push({ role: "you", text: "What is a cache line?" });
+  await plugin.store.saveChat(path, chat);
+  await view.openAsk(path);
+  view.study.busy = true;
+  view.go("home");
+  await tick(40);
+  notices.length = 0;
+  labelled($(root, ".st-recent-asks .st-row-item"), "Delete this question").click();
+  await tick(40);
+  assert.ok(notices.some((n) => /being answered/.test(n)), notices.join(" | "));
+  assert.equal(doc.querySelector("button.mod-warning"), null, "no confirmation is offered");
+  assert.ok(await fs.exists(path), "nothing is deleted");
+  view.study.busy = false;
+  await view.onClose();
+});
+test("grow a question into a course: a broad reply offers Make this a course, the dialog is filled in, compiling links the chat and keeps it open, and the chat then opens the course", async () => {
+  const fs = new MemFS();
+  const leaves: any[] = [];
+  let plugin: any = null;
+  const app = makeApp(fs, leaves, [], () => plugin);
+  plugin = new (StudyTutorPlugin as any)(app, { id: "study-tutor" }) as StudyTutorPlugin;
+  await plugin.onload();
+  await tick();
+  const replies = [
+    `<ask>{"kind":"broad","goal":"Defend a concurrent queue in an interview","first_step":"Data races"}</ask>\nFirst learn data races.`,
+    `<ask>{"kind":"narrow","goal":"What a mutex is","first_step":""}</ask>\nA mutex lets one thread in at a time.`,
+  ];
+  let n = 0;
+  plugin.engine.call = async () => ({ text: replies[n++] ?? "ok", usage: { input: 1, cacheRead: 0, cacheWrite: 0, output: 1, costUsd: 0, calls: 1 } });
+  const reqs: any[] = [];
+  let fail = true;
+  plugin.engine.compile = async (req: any) => {
+    reqs.push(req);
+    if (fail) throw new Error("the model is unavailable");
+    const out = parseCompileOutput(COMPILED);
+    const dir = await plugin.store.saveCompiled({ title: req.title, fm: { source: req.mode, subject: out.subject, goal: req.goal, ...req.fm }, topicBody: out.topicBody.replace("## Subskills", "## Outcome\n\nDefend a lock-free queue design in a mock interview.\n\nDone well when:\n- Names the race each step prevents\n\n## Subskills"), questionsBody: out.questionsBody, target: 4 });
+    return { dir, subskills: 1, questions: 1, usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, costUsd: 0, calls: 0 }, agents: 0 };
+  };
+
+  const view: any = await plugin.activateView();
+  const root = view.contentEl;
+  $(root, ".st-ask textarea").value = "Teach me concurrency for my interview";
+  button($(root, ".st-ask"), "Ask").click();
+  await tick(80);
+  const chatPath = view.chatPath;
+  const offer = $(root, ".st-ask-course");
+  assert.ok(offer, "a broad reply offers a course");
+  assert.match(offer.textContent, /starting with: Data races\./);
+  const make = button(offer, "Make this a course");
+  assert.ok(make.classList.contains("mod-cta"), "a broad goal makes it the main next step");
+
+  // The real dialog opens with the seed filled in and teaches the subject by default.
+  const dialog = () => [...root.ownerDocument.body.children].filter((e: any) => e.querySelector?.(".setting-item")).pop() as any;
+  const fill = () => {
+    make.click();
+    const d = dialog();
+    const inputs = $$(d, "input:not([type=checkbox])");
+    return { d, title: inputs[0].value, goal: inputs[2].value, kind: $(d, "select").value, research: $(d, "input[type=checkbox]").checked };
+  };
+  let f = fill();
+  assert.equal(f.title, "Defend a concurrent queue in an interview");
+  assert.equal(f.goal, 'Defend a concurrent queue in an interview. The learner first asked: "Teach me concurrency for my interview". Start with: Data races.');
+  assert.equal(f.kind, "subject");
+  assert.equal(f.research, true, "with no notes, research is offered as for any subject topic");
+
+  // A failed compile links nothing, and the chat stays open.
+  button(f.d, "Compile").click();
+  await tick(60);
+  assert.equal(reqs.length, 1);
+  assert.equal(reqs[0].fm.from_ask, chatPath);
+  assert.equal((await plugin.store.loadChat(chatPath)).fm.course, undefined);
+
+  // A compile that works links the chat, and the open chat now offers the course without leaving it.
+  fail = false;
+  f = fill();
+  button(f.d, "Compile").click();
+  await tick(80);
+  const [dir] = (await plugin.store.listTopics()).map((t: any) => t.dir);
+  assert.equal((await plugin.store.loadTopic(dir)).fm.from_ask, chatPath);
+  assert.equal((await plugin.store.loadChat(chatPath)).fm.course, dir);
+  assert.equal(root.getAttribute("data-screen"), "study", "the learner is not pulled out of the chat");
+  assert.equal(view.chatPath, chatPath);
+  assert.match($(root, ".st-ask-course").textContent, /This question has a course/);
+  button($(root, ".st-ask-course"), "Open the course").click();
+  await tick(60);
+  assert.equal(root.getAttribute("data-screen"), "topic");
+  assert.equal(view.dir, dir);
+  assert.match(root.textContent, /What this course builds to[\s\S]*Defend a lock-free queue design in a mock interview\.[\s\S]*Names the race each step prevents/, "the topic screen shows the outcome the course was planned back from");
+
+  // A link to a topic that is gone offers to make the course again.
+  const chat = await plugin.store.loadChat(chatPath);
+  chat.fm.course = "Tutor/Topics/Gone";
+  await plugin.store.saveChat(chatPath, chat);
+  await view.openAsk(chatPath);
+  await tick(40);
+  assert.ok(button($(root, ".st-ask-course"), "Make this a course"));
+
+  // A narrow question gets a quiet button and no pitch.
+  view.go("home");
+  await tick(20);
+  $(root, ".st-ask textarea").value = "What is a mutex?";
+  button($(root, ".st-ask"), "Ask").click();
+  await tick(80);
+  const quiet = $(root, ".st-ask-course");
+  assert.doesNotMatch(quiet.textContent, /worth learning properly/);
+  assert.ok(!button(quiet, "Make this a course").classList.contains("mod-cta"));
+  await view.onClose();
+});
+
+test("outcome check: the topic page offers it under the outcome, the check has no help controls, and the page then shows the last result", async () => {
+  const fs = new MemFS();
+  const leaves: any[] = [];
+  let plugin: any = null;
+  const app = makeApp(fs, leaves, [], () => plugin);
+  plugin = new (StudyTutorPlugin as any)(app, { id: "study-tutor" }) as StudyTutorPlugin;
+  await plugin.onload();
+  await tick();
+  const out = parseCompileOutput(COMPILED);
+  const dir = await plugin.store.saveCompiled({ title: "Linear maps", fm: { source: "notes", subject: out.subject, kind: "subject" }, topicBody: out.topicBody.replace("## Subskills", "## Outcome\n\nShow a map with kernel {0} is injective.\n\nDone well when:\n- Uses T(u)=T(v) implies T(u-v)=0\n\n## Subskills"), questionsBody: out.questionsBody, target: 4 });
+  const calls: any[] = [];
+  plugin.engine.call = async (o: any) => {
+    calls.push(o);
+    return { text: "", structured: { criteria: [{ criterion: "c", verdict: "met", evidence: "T(u-v)=0" }], summary: "Clear and complete." }, usage: { input: 1, cacheRead: 0, cacheWrite: 0, output: 1, costUsd: 0, calls: 1 }, model: "m" };
+  };
+  const view: any = await plugin.activateView();
+  const root = view.contentEl;
+  await view.selectTopic(dir);
+  view.go("topic");
+  await tick(40);
+  assert.doesNotMatch(root.textContent, /Last outcome check/);
+  button($(root, ".st-outcome-check"), "Check the outcome").click();
+  await tick(60);
+  assert.equal(root.getAttribute("data-screen"), "study");
+  assert.match(root.textContent, /Outcome check: on your own, marked by a separate assessor, levels unchanged\./);
+  assert.equal($$(root, ".st-quick .st-btn").length, 0, "no hint, explain, skip or visual buttons");
+  assert.ok($(root, ".st-conf").classList.contains("is-hidden"));
+  assert.match($(root, ".st-composer textarea").getAttribute("placeholder"), /^Your answer to the task/);
+  $(root, ".st-composer textarea").value = "If T(u)=T(v) then T(u-v)=0, so u-v is in the kernel {0} and u=v.";
+  button(root, "Send").click();
+  await tick(60);
+  assert.equal(calls.length, 0, "an answer is not marked until mark");
+  assert.equal($$(root, "button").filter((b: any) => /^Continue/.test(b.textContent.trim())).length, 0, "no Continue in a check");
+  $(root, ".st-composer textarea").value = "mark";
+  button(root, "Send").click();
+  await tick(80);
+  assert.equal(calls.length, 1);
+  assert.match($(root, ".st-messages").textContent, /Outcome check marked:\*\* 1 of 1 met/);
+  view.go("topic");
+  await tick(60);
+  assert.match(root.textContent, /Last outcome check \d{4}-\d{2}-\d{2}: 1 of 1 met\./);
+  await view.onClose();
+});
+
+test("example course: Home adds the C++ concurrency course with no model call, opens it, and a second add keeps the same course", async () => {
+  const fs = new MemFS();
+  const leaves: any[] = [];
+  let plugin: any = null;
+  const app = makeApp(fs, leaves, [], () => plugin);
+  plugin = new (StudyTutorPlugin as any)(app, { id: "study-tutor" }) as StudyTutorPlugin;
+  await plugin.onload();
+  await tick();
+  let calls = 0;
+  plugin.engine.call = async () => {
+    calls++;
+    throw new Error("no model");
+  };
+  const view: any = await plugin.activateView();
+  const root = view.contentEl;
+  assert.match(root.textContent, /Start with a topic/);
+  button(root, "Add example: Signals and systems");
+  const add = button(root, "Add example: C++ concurrency");
+  assert.match(add.getAttribute("aria-label") ?? "", /three-part lock-free queue task/);
+  add.click();
+  await tick(80);
+  assert.equal(calls, 0, "no model call");
+  const topics = await plugin.store.listTopics();
+  assert.deepEqual(topics.map((t: any) => t.title), ["C++ concurrency"]);
+  assert.equal(plugin.data.activeTopic, topics[0].dir);
+  assert.match(notices.at(-1) ?? "", /example course added/);
+  assert.equal(root.getAttribute("data-screen"), "topic", "the new course is opened");
+  // With the course in the vault, Home offers to open it, and that opens the same course.
+  view.go("home");
+  await tick();
+  button(root, "Open example: C++ concurrency").click();
+  await tick(80);
+  assert.equal((await plugin.store.listTopics()).length, 1);
+  assert.match(notices.at(-1) ?? "", /already in your vault/);
 });
