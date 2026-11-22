@@ -72,7 +72,7 @@ Under the progress line is the **unseen-task score**: how you did on sealed ques
 
 ### Review
 
-Built-in spaced flashcards from the question bank, with no tokens. Multiple-choice and exact short answers are marked by the plugin. For anything else you rate yourself, or ask Claude to grade that one answer. A self-rating schedules the card; it does not count as evidence for a level. With the Spaced Repetition plugin enabled, Review shows its due and new counts and starts its review of the topic instead.
+Built-in spaced flashcards from the question bank, with no tokens, using FSRS-6 at 90% desired retention by default. Multiple-choice and exact short answers are marked by the plugin. For anything else you rate yourself, or ask Claude to grade that one answer. A self-rating schedules the card; it does not count as evidence for a level. You can explicitly hand reviews to the Spaced Repetition plugin in Settings; Review then shows its due and new counts and starts its review of the topic instead.
 
 ### Knowledge graph
 
@@ -163,7 +163,7 @@ Everything is markdown, so you can read, edit, link and search it. Edits to `_sk
 ## Working with other plugins
 
 - **Bases** (core): `Tutor/Dashboard.base` lists topics with progress and cards due.
-- **Spaced Repetition** (community): when it is enabled, flashcards are handed to it. Each topic's question bank is kept as a note tagged `#flashcards/<topic>`, Spaced Repetition schedules and reviews it with your other decks (including on mobile), and the Review screen shows its due and new counts and starts its review on the topic. Regenerating the note keeps the review history. Without that plugin, or with the setting off, the built-in review is used. Checked against Spaced Repetition 1.15.4, including its own card parser.
+- **Spaced Repetition** (community, optional): enable the handoff in Study Tutor settings to let it own scheduling. Each topic's question bank is kept as a note tagged `#flashcards/<topic>`, Spaced Repetition schedules and reviews it with your other decks (including on mobile), and the Review screen shows its due and new counts and starts its review on the topic. Regenerating the note keeps the review history. Built-in FSRS is the default for new settings; existing explicit scheduler and handoff choices are preserved. Checked against Spaced Repetition 1.15.4, including its own card parser.
 - **Execute Code** (community): chat files are notes, so code blocks the tutor writes can be run from the chat file.
 - Maths is written in LaTeX and renders in the chat and in every file.
 
@@ -191,7 +191,7 @@ Every push and pull request runs `npm run build`, `npm test` and the browser tes
 - Replies are not streamed; a turn appears when it is complete.
 - A model can grade maths wrongly. With SymPy switched on, results are checked and a wrong one is rewritten or flagged, but the steps of a derivation or a proof are still judged by the model alone. Treat a surprising verdict with care.
 - The course graph spans topics. Prerequisites and other relations are stored separately from learner evidence.
-- The flashcard schedule is a simple SM-2 style scheme, not FSRS.
+- Built-in review uses FSRS-6 by default (90% desired retention). SM-2 remains selectable. Switching replays stored review logs, or initializes memory from legacy SM-2 fields when no log exists; existing unversioned schedules are still interpreted as SM-2 for migration. External Spaced Repetition scheduling remains separate and is used only when the handoff setting is enabled.
 - Replies and researched pages are filtered so that nothing in them loads from outside the vault: a remote picture becomes a link you can click, and a `dataviewjs` block is shown as plain code. The filter reads text, not Obsidian's own parse of it, so treat it as a strong default, not a guarantee.
 
 ## Licence

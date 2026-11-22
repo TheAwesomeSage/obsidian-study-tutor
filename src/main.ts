@@ -33,7 +33,7 @@ export interface TutorSettings extends EngineSettings {
   bankQuiz: boolean;
   /** Hand flashcard review and scheduling to the Spaced Repetition community plugin when it is enabled. */
   useSpacedRepetition: boolean;
-  /** The built-in review's card scheduler. SM-2 is what every version before 0.10 used. */
+  /** The built-in review's card scheduler. FSRS is the default; old state without a record is read as SM-2. */
   scheduler: SchedulerId;
   /** FSRS only: the chance of recall each card is scheduled for. */
   desiredRetention: number;
@@ -102,8 +102,8 @@ const DEFAULTS: TutorSettings = {
   singlePassWords: 6000,
   newCardsPerDay: 10,
   bankQuiz: true,
-  useSpacedRepetition: true,
-  scheduler: "sm2",
+  useSpacedRepetition: false,
+  scheduler: "fsrs",
   desiredRetention: DEFAULT_RETENTION,
   mathCheck: true,
   codePlacement: true,
@@ -207,6 +207,7 @@ export default class StudyTutorPlugin extends Plugin {
     this.data = { settings: { ...DEFAULTS, ...(saved.settings ?? {}) }, activeTopic: saved.activeTopic ?? "", activeChat: saved.activeChat ?? {}, skills: saved.skills ?? {}, settingsVersion: saved.settingsVersion ?? 1, drafts: saved.drafts ?? {}, graphLayout: saved.graphLayout ?? {}, graphLayoutMode:layoutMode, graphLayouts:saved.graphLayouts??{} };
     // Settings saved by an older version have no weights; a partly filled set is completed from the defaults.
     this.data.settings.weights = { ...DEFAULT_WEIGHTS, ...(saved.settings?.weights ?? {}) };
+    this.data.settings.scheduler = saved.settings?.scheduler === "sm2" ? "sm2" : "fsrs";
     // Up to 0.9 a toggle chose whether Ollama selected passages; off is the main strategy now.
     const legacy = this.data.settings as TutorSettings & { localCompilation?: boolean };
     if (!saved.settings?.compileStrategy && legacy.localCompilation === false) legacy.compileStrategy = "main";
@@ -351,7 +352,7 @@ export default class StudyTutorPlugin extends Plugin {
 
   /** The built-in review's scheduler, as the settings choose it. */
   schedulerChoice(): SchedulerChoice {
-    return { id: this.opts.scheduler === "fsrs" ? "fsrs" : "sm2", retention: clampRetention(this.opts.desiredRetention) };
+    return { id: this.opts.scheduler === "sm2" ? "sm2" : "fsrs", retention: clampRetention(this.opts.desiredRetention) };
   }
 
   /** Brings the topic's flashcard note up to date, opens it, and starts that plugin's review on it. */
@@ -688,7 +689,7 @@ class TutorSettingTab extends PluginSettingTab {
       .setDesc("Built-in review only. Every card keeps a log of its latest reviews and its SM-2 dates, so going back to SM-2 restores them exactly. Switching to FSRS rebuilds each card from its log; a card not reviewed since this version starts from its SM-2 interval and ease. Each topic's state records the scheduler and every switch.")
       .addDropdown((d) =>
         d
-          .addOptions({ sm2: `${schedulerFor({ id: "sm2", retention: DEFAULT_RETENTION }).label} (default)`, fsrs: schedulerFor({ id: "fsrs", retention: DEFAULT_RETENTION }).label })
+          .addOptions({ fsrs: `${schedulerFor({ id: "fsrs", retention: DEFAULT_RETENTION }).label} (default)`, sm2: schedulerFor({ id: "sm2", retention: DEFAULT_RETENTION }).label })
           .setValue(s.scheduler)
           .onChange(async (v) => {
             s.scheduler = v === "fsrs" ? "fsrs" : "sm2";
