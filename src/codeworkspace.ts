@@ -1,5 +1,6 @@
 import type { CodeLanguage, CodeRunReport, CodeRunner, CodeTraceStep } from "./codetask";
 import type { CodeWalkthrough } from "./codewalkthrough";
+import { ART } from "./visuals/art";
 
 export interface CodeWorkspaceOptions {
   source: string; language: CodeLanguage; runner?: CodeRunner;
@@ -13,6 +14,11 @@ export function mountCodeWorkspace(host: HTMLElement, options: CodeWorkspaceOpti
   const el = <K extends keyof HTMLElementTagNameMap>(tag: K, parent: HTMLElement, text = "", cls = ""): HTMLElementTagNameMap[K] => {
     const node = doc.createElement(tag); node.textContent = text; node.className = cls; parent.append(node); return node;
   };
+  // Fixed approved library IDs only: no model-supplied image URLs or asset-generation call.
+  const asset = (parent: HTMLElement, id: string) => {
+    const image = el("img", parent, "", "st-code-asset");
+    image.src = ART[id]; image.alt = ""; image.setAttribute("aria-hidden", "true"); image.dataset.assetId = id;
+  };
   const tools = el("div", host, "", "st-code-tools");
   const language = el("select", tools); language.setAttribute("aria-label", "Program language");
   for (const [value, name] of [["python", "Python"], ["cpp", "C++"], ["c", "C"]]) { const option = el("option", language, name); option.value = value; }
@@ -20,6 +26,8 @@ export function mountCodeWorkspace(host: HTMLElement, options: CodeWorkspaceOpti
   const planButton = el("button", tools, "Build walkthrough");
   const runButton = el("button", tools, "Run program");
   const stop = el("button", tools, "Stop"); stop.hidden = true;
+  const runState = el("span", tools, "", "st-code-run-state"); runState.hidden = true;
+  runState.title = "Execution completed. This does not verify correctness.";
   el("p", host, "Build once for a narrated trace and flow diagram. Run to see actual output; Python also records real line-by-line state. Stepping, replay and diagrams use no model tokens.", "st-code-intro");
   const editor = el("details", host); editor.open = true; el("summary", editor, "Program source and input");
   const source = el("textarea", editor, options.source, "st-code-source"); source.value = options.source; source.spellcheck = false; source.setAttribute("aria-label", "Program source");
@@ -56,7 +64,9 @@ export function mountCodeWorkspace(host: HTMLElement, options: CodeWorkspaceOpti
       toggle.onclick = () => { useActual = !useActual; selected = 0; render(); };
     }
     const step = steps()[selected];
-    el("span", controls, `${selected + 1} / ${steps().length} · ${useActual ? "Observed execution" : "Model-planned illustration"}`);
+    const position = el("span", controls, "", "st-code-position");
+    asset(position, "kenney.physics.flag-blue");
+    el("span", position, `${selected + 1} / ${steps().length} · ${useActual ? "Observed execution" : "Model-planned illustration"}`);
     const layout = el("div", teaching, "", "st-code-layout");
     const code = el("ol", layout, "", "st-code-lines");
     for (const [i, line] of source.value.split(/\r?\n/).entries()) {
@@ -103,7 +113,7 @@ export function mountCodeWorkspace(host: HTMLElement, options: CodeWorkspaceOpti
       diagram.append(svg);
     }
   };
-  const changed = () => { revision++; plan = null; actual = []; selected = 0; consoleText.textContent = "Source or input changed. Run again for current output."; render(); };
+  const changed = () => { revision++; plan = null; actual = []; selected = 0; runState.hidden = true; consoleText.textContent = "Source or input changed. Run again for current output."; render(); };
   source.oninput = stdin.oninput = language.onchange = changed;
   stop.onclick = () => { stopped = true; abort?.abort(); kill?.(); };
   planButton.onclick = async () => {
@@ -114,13 +124,16 @@ export function mountCodeWorkspace(host: HTMLElement, options: CodeWorkspaceOpti
   };
   runButton.onclick = async () => {
     if (busy) return; if (!options.runner) { status.textContent = "No code runner is installed."; return; }
-    stopped = false; setBusy(true); abort = new AbortController(); status.textContent = "Running your program…";
+    stopped = false; setBusy(true); runState.hidden = true; abort = new AbortController(); status.textContent = "Running your program…";
     try {
       await options.onHelp?.();
       if (disposed || stopped) throw new Error("Stopped.");
       const report: CodeRunReport = await options.runner.run({language: language.value as CodeLanguage, inspect: true, tests:[{name:"Console run (not marked)",stdin:stdin.value,expected:""}]}, source.value, abort.signal);
       if (disposed) return;
       const result = report.tests[0]; actual = result?.trace ?? []; useActual = actual.length > 0; selected = 0;
+      if (report.status === "ran" && result && ["pass", "fail"].includes(result.status)) {
+        runState.replaceChildren(); asset(runState, "kenney.ui.checkmark-blue"); el("span", runState, "Executed"); runState.hidden = false;
+      }
       if (report.status === "ran") editor.open = false;
       consoleText.textContent = [report.message, result?.stdout, result && ["error","timeout"].includes(result.status) ? result.detail : ""].filter(x => x !== undefined && x !== "").join("\n") || "(no output)";
       status.textContent = `${report.backend || report.status}. ${report.limits}${actual.length ? ` Observed Python trace: ${actual.length} events, capped at 120. Line events show state before execution.` : language.value !== "python" && report.status === "ran" ? " C/C++ output is real; its narrated line trace is model-planned, not a debugger recording." : ""}`;

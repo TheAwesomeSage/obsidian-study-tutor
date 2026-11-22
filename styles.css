@@ -2115,3 +2115,6 @@
 .st-code-workspace button:disabled { opacity: .45; }
 .st-code-workspace summary { cursor: pointer; margin-bottom: 8px; }
 .st-code-workspace button:focus-visible, .st-code-flow g:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.st-code-position, .st-code-run-state { display: inline-flex; align-items: center; gap: 6px; }
+.st-code-run-state[hidden] { display: none; }
+.st-code-asset { width: 18px; height: 18px; object-fit: contain; flex: 0 0 auto; }

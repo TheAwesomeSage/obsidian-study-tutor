@@ -4,6 +4,9 @@ for (const theme of ['light','dark']) test(`code workspace steps, draws arrows a
   await page.goto(`/?module=code&theme=${theme}`);
   await page.getByRole('button',{name:'Build walkthrough',exact:true}).click();
   await expect(page.getByText('1 / 2 · Model-planned illustration')).toBeVisible();
+  await expect(page.locator('img[data-asset-id="kenney.physics.flag-blue"]')).toBeVisible();
+  await expect(page.locator('img[data-asset-id="kenney.physics.flag-blue"]')).toHaveAttribute('src', /^data:image\/png/);
+  await expect(page.locator('.st-code-run-state')).toBeHidden();
   await expect(page.locator('.st-code-lines [aria-current=step]')).toContainText('input()');
   await expect(page.locator('.st-code-flow svg path')).toHaveCount(2);
   await page.getByRole('button',{name:'Next',exact:true}).click();
@@ -12,6 +15,9 @@ for (const theme of ['light','dark']) test(`code workspace steps, draws arrows a
   await expect(page.getByText('1 / 2 · Model-planned illustration')).toBeVisible();
   await page.getByRole('button',{name:'Run program',exact:true}).click();
   await expect(page.getByText('1 / 3 · Observed execution')).toBeVisible();
+  await expect(page.locator('img[data-asset-id="kenney.ui.checkmark-blue"]')).toBeVisible();
+  await expect(page.locator('.st-code-run-state')).toHaveText('Executed');
+  await expect(page.locator('.st-code-run-state')).toHaveAttribute('title', /does not verify correctness/);
   await expect(page.locator('.st-code-workspace > details pre')).toHaveText('6\n');
   await page.getByRole('button',{name:'Next',exact:true}).click();
   await expect(page.getByRole('cell',{name:'3',exact:true})).toBeVisible();
@@ -23,5 +29,6 @@ for (const theme of ['light','dark']) test(`code workspace steps, draws arrows a
   await page.getByRole('textbox',{name:'Program source'}).fill('print(99)');
   await expect(page.getByText('Source or input changed. Run again for current output.')).toBeVisible();
   await expect(page.locator('.st-code-flow')).toHaveCount(0);
+  await expect(page.locator('.st-code-run-state')).toBeHidden();
   expect(errors).toEqual([]);
 });
