@@ -17,10 +17,14 @@ for (const theme of ["light", "dark"]) test(`chat confidence drags through five 
   await expect(page.getByRole("radio")).toHaveCount(0);
   expect((await page.locator(".st-composer").boundingBox())!.height).toBeLessThanOrEqual(95);
   await expect(page.getByRole("textbox",{name:"Your answer or message"})).toHaveAttribute("rows","1");
-  await expect(slider).toHaveAttribute("aria-valuetext", /Not set/);
-  expect(await page.evaluate(() => window.confidenceHarness.value)).toBeNull();
-  // Clicking the untouched middle position must explicitly select it even if the native
-  // input's starting value is already 2 and the browser produces no input/change event.
+  await expect(slider).toHaveAttribute("aria-valuetext", "Medium");
+  expect(await page.evaluate(() => window.confidenceHarness.value)).toBe(0.5);
+  await expect(slider).not.toHaveAttribute("title");
+  await expect(slider).not.toHaveAttribute("aria-label");
+  await expect(page.locator(".st-conf")).not.toHaveAttribute("aria-label");
+  await expect(page.locator(".st-conf")).toHaveCSS("--st-conf-fill", "50%");
+  // Clearing remains available on the keyboard; choosing the middle restores 50%.
+  await slider.focus();await slider.press("Delete");
   await slider.click();
   await expect(slider).toHaveAttribute("aria-valuetext", "Medium");
   expect(await page.evaluate(() => window.confidenceHarness.value)).toBe(0.5);

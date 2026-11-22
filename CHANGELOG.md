@@ -4,6 +4,7 @@ What changed in each version of Study Tutor, newest first.
 
 ## Unreleased
 
+- Confidence now starts at 50% for each answer and returns to 50% after a successful submission. Removed the slider's hover tooltips while preserving its accessible label, five stops and keyboard controls.
 - Centred the confidence thumb against Obsidian's native slider offset, removed the adjacent × button, and shortened the message box to one line by default. The slider's colours, size, stops and surrounding controls are unchanged; resizing and keyboard clearing remain available.
 - Reduced the chat composer to a shallow answer box and compact icon toolbar. Confidence is now one blue five-stop slider with a white thumb, accessible spoken values and Clear; the separate level buttons are removed. Topics controls wrap within their column so example buttons cannot overlap recent sessions.
 - Added optional local neural embedding retrieval through Ollama for paraphrases missed by keyword search. It ranks up to 64 cited snippets, caches vectors by exact content and model digest, preserves source quotes, refuses cloud inference and falls back within four seconds. It does not grade answers or change mastery, and does not download models automatically.

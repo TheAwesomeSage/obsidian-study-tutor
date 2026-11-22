@@ -22,7 +22,7 @@ import { askCourse, askCourseSeed } from "./engine-ask";
 import { coverageOf, coverageSummary } from "./coverage";
 import { codeRunSummary, codeTestRows } from "./codequestions";
 import { expansionLine } from "./expansion";
-import { ConfidencePicker, confidenceLabel } from "./confidence";
+import { ConfidencePicker, confidenceLabel, DEFAULT_CONFIDENCE } from "./confidence";
 export { CONFIDENCE_LEVELS, confidenceLabel } from "./confidence";
 import { activityContext, calibrationCue, type ActivityContext } from "./learning-context";
 import type { Screen, TutorView } from "./view";
@@ -44,8 +44,8 @@ export class StudyScreen implements Screen {
   /** The attempt marked on the last turn, shown with how it was checked and a way to dispute it. */
   private marked: Attempt | null = null;
   private markedNote = "";
-  /** Self-reported confidence for the answer being written, one of CONFIDENCE_LEVELS. Null until one is chosen. */
-  private confidence: number | null = null;
+  /** Confidence for the answer being written; defaults to 50%, or null if explicitly cleared. */
+  private confidence: number | null = DEFAULT_CONFIDENCE;
   private attach = false;
   private visualContext: { chatPath: string; value: ActivityContext } | null = null;
   private whyOpen = false;
@@ -862,8 +862,8 @@ export class StudyScreen implements Screen {
       this.last = r;
       this.changes = r.changes;
       this.marked = r.attempt ?? null;
-      // The answer was marked, so the next one starts with no confidence set.
-      this.confidence = null;
+      // The answer was marked, so the next one starts at the default 50%.
+      this.confidence = DEFAULT_CONFIDENCE;
       if (v.dir === dir) {
         await v.openChat(r.rotatedTo ?? chatPath);
         if (r.rotatedTo) new Notice("This chat was getting long, so the finished part was summarised and the chat continues in a new file. The full transcript is linked from the summary.", 8000);

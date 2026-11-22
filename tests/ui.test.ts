@@ -190,11 +190,14 @@ test("home, study, review, topic page and graph work together from the normal en
   const confOn = () => $(root,".st-conf").classList.contains("is-set")?[$(root,".st-conf-slider").getAttribute("aria-valuetext")]:[];
   const confPick = (label: string) => {const slider=$(root,".st-conf-slider");slider.value=String(["None","Low","Medium","High","Very high"].indexOf(label));fire(slider,"input");};
   assert.equal($$(root,".st-conf-opt").length,0,"confidence labels are no longer separate buttons");
-  assert.deepEqual(confOn(), [], "confidence is unset until one is chosen");
+  assert.deepEqual(confOn(), ["Medium"], "new answers default to 50% confidence");
   assert.equal($(root, ".st-conf-slider").step, "1");
   const confSlider = () => $(root, ".st-conf-slider");
   assert.equal(confSlider().type, "range");
-  assert.match(confSlider().getAttribute("aria-valuetext"), /Not set/);
+  assert.equal(confSlider().getAttribute("aria-valuetext"), "Medium");
+  assert.equal(confSlider().hasAttribute("title"), false, "no native confidence tooltip");
+  assert.equal(confSlider().hasAttribute("aria-label"), false, "Obsidian must not add a hover tooltip");
+  assert.equal($(root, ".st-conf-label").htmlFor, confSlider().id, "the visible label still names the slider accessibly");
   button(root, "Start session").click();
   await tick(80);
   assert.match($(root, ".st-messages").textContent, /Is \$f\(x\)=x\+1\$ linear\?/);
@@ -280,8 +283,8 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal(calls[1].system, calls[0].system, "the stable part of the prompt is byte-identical between turns");
   assert.match($(root, ".st-feedback").textContent, /Marked incorrectgraded by the model, unverified · your confidence: very high/);
   assert.match($(root, ".st-feedback-more").textContent, /How this was checkedBasis: one model judgement, not independently checked\.This counts as unaided evidence\.thinks translation is linear/);
-  assert.deepEqual(confOn(), [], "confidence resets for the next answer");
-  assert.match(confSlider().getAttribute("aria-valuetext"), /Not set/, "the slider also resets after marking");
+  assert.deepEqual(confOn(), ["Medium"], "confidence resets to 50% for the next answer");
+  assert.equal(confSlider().getAttribute("aria-valuetext"), "Medium", "the slider also resets after marking");
   const state1 = parseState(await fs.read(`${dir}/state.md`));
   assert.equal(state1.levels[1], 1, "a first wrong answer places the concept at 1; the model's proposed level 4 is ignored");
   assert.deepEqual(state1.misconceptions, ["thinks translation is linear"]);
