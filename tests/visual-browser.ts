@@ -5,6 +5,8 @@ import { GraphScreen } from "../src/graphscreen";
 import { ConfidencePicker } from "../src/confidence";
 import { StudyScreen } from "../src/study";
 import { HomeScreen } from "../src/home";
+import {mountCodeWorkspace} from '../src/codeworkspace';
+import {plan as codePlan, source as codeSource} from './fixtures/code-walkthrough';
 import { parseState } from "../src/formats";
 import { topicInfo } from "../src/overview";
 import type { Course } from "../src/course";
@@ -16,7 +18,10 @@ const params=new URLSearchParams(location.search),kind=params.get("module")??"pr
 const host=document.querySelector<HTMLElement>("#app")!;
 document.body.classList.add(params.get("theme")==="dark"?"theme-dark":"theme-light");
 const events:PlayerEvent[]=[];(window as unknown as {events:PlayerEvent[]}).events=events;
-if(kind==="confidence") {
+  if(kind==="code") {
+    host.style.maxWidth='1080px';host.style.margin='auto';
+    mountCodeWorkspace(host, {source:codeSource,language:'python',plan:async()=>structuredClone(codePlan),runner:{available:async()=>({ok:true,backend:'fixture'}),run:async()=>({status:'ran',language:'python',backend:'Fixture runtime',message:'',limits:'Synthetic browser test; real Pyodide execution is tested separately.',passed:1,total:1,ms:1,tests:[{name:'console',hidden:false,status:'pass',detail:'',ms:1,stdout:'6\n',trace:[{line:1,event:'line',function:'<module>',variables:[],output:''},{line:2,event:'line',function:'<module>',variables:[{name:'n',value:'3'}],output:''},{line:2,event:'return',function:'<module>',variables:[{name:'n',value:'3'}],output:'6\n'}]}]})}});
+  } else if(kind==="confidence") {
   host.className="study-tutor graph-preview";
   const state=parseState("");state.focus=1;state.names[1]="Linear maps";state.levels[1]=0;
   const view={contentEl:host,dir:"t0",mode:"auto",free:false,today:"2026-11-22",state,topic:{title:"Linear maps"},chatPath:"fixture/chat.md",chat:{fm:{mode:"auto"},summary:"",messages:[{role:"tutor",text:"Synthetic chat fixture: is f(x) = x + 1 linear? Explain why."}]},sessionUsage:{input:0,cacheRead:0,cacheWrite:0,output:0,costUsd:0,calls:0},app:{workspace:{getActiveFile:()=>null}},plugin:{data:{drafts:{}},engine:{},store:{root:"Tutor",loadQuestions:async()=>[]},opts:{},save:async()=>{}},md:(el:HTMLElement,text:string)=>{el.textContent=text;},go:()=>{}};

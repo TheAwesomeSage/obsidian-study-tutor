@@ -26,6 +26,8 @@ export interface CodeTestCase {
 
 export interface CodeTask {
   language: CodeLanguage;
+  /** Explicit code workspace run: retain visible console output and Python line events. */
+  inspect?: boolean;
   /** Python only: the function to call with each test's args. Absent: a whole program reading stdin. */
   entry?: string;
   /** 1 to 30 tests. */
@@ -49,6 +51,16 @@ export interface CodeTestResult {
   /** Bounded text: expected against actual for a failure, or the start of stderr for an error. */
   detail: string;
   ms: number;
+  stdout?: string;
+  trace?: CodeTraceStep[];
+}
+
+export interface CodeTraceStep {
+  line: number;
+  event: string;
+  function: string;
+  variables: { name: string; value: string }[];
+  output: string;
 }
 
 export interface CodeRunReport {

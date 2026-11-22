@@ -14,6 +14,8 @@ import { bktShadow, mcqOptions } from "./bkt";
 import { activityBrief, calibrationCue, COACH_RULE } from "./learning-context";
 import type { ResearchProvider } from "./compile-research";
 import type { CodeRunner } from "./codetask";
+import { sessionForPrompt } from "./prompt-context";
+import { chatAttachment } from "./chat-attachment";
 import { LocalModel } from "./ollama";
 import { PRESENT_RULE, extractPresent, presentationNote, readPresentationRequest } from "./presentation";
 import { ModuleRegistry } from "./visualcontract";
@@ -277,6 +279,10 @@ export class Engine {
     const chat = await this.store.loadChat(chatPath);
     if (fmStr(chat.fm, "probe") === "yes") return probeFns.probeTurn(this, dir, chatPath, message, opts);
     if (fmStr(chat.fm, "assess") === "outcome") return assessFns.assessTurn(this, dir, chatPath, message, opts);
+    if (opts.attached) {
+      chatAttachment(chat, opts.attached);
+      await this.store.saveChat(chatPath, chat);
+    }
     if (/^(start|stop) coding coach[.!]?$/i.test(message.trim())) {
       const on = /^start/i.test(message.trim());
       chat.fm.coding_coach = on ? "yes" : "";
@@ -419,6 +425,8 @@ export class Engine {
     const topic = await this.store.loadTopic(dir);
     let state = await this.store.loadState(dir, s.targetLevel);
     const chat = await this.store.loadChat(chatPath);
+    const attached = chatAttachment(chat, opts.attached);
+    if (opts.attached && !message.trim()) await this.store.saveChat(chatPath, chat);
     if (message.trim()) {
       chat.messages.push({ role: "you", text: message.trim() });
       // Kept with the message, so a failed turn that is retried still has the confidence given.
@@ -590,7 +598,7 @@ export class Engine {
       const brief = coverageBrief(focusSkill.name, cover, lastIdea && move ? { idea: lastIdea, move } : null);
       if (brief) extras.push(brief);
     }
-    extras.push(`# Session record\n${JSON.stringify(session)}`);
+    extras.push(`# Session record\n${JSON.stringify(sessionForPrompt(session, chat))}`);
     if (decision) extras.push(`Instructional action: ${decision.action}. ${ACTION_GUIDE[decision.action]}\nWhy: ${decision.reason}${decision.suggestIndependent ? "\nThe learner looks ready to practise this unaided. Say so in one line and let them choose; stay in guided practice unless they switch." : ""}`);
     if (move) extras.push(moveBrief(move));
     // An answer to mark: its result, method and assumptions are judged apart, and a misconception it shows is named.
@@ -603,7 +611,7 @@ export class Engine {
     if (note) extras.push(note);
     // The tutor may propose an interactive in the reply it is writing anyway, but only where one could exist.
     else if (this.visuals && focusSkill?.visual && ["simulation", "game"].includes(focusSkill.visual.kind) && ["auto", "quiz", "tutor"].includes(mode)) extras.push(PRESENT_RULE);
-    const input = `${buildTurnInput({ state, today: this.today(), chat, attached: opts.attached, gaps: prereqGaps(state, pre) })}\n\n${extras.join("\n\n")}\n`;
+    const input = `${buildTurnInput({ state, today: this.today(), chat, attached, gaps: prereqGaps(state, pre) })}\n\n${extras.join("\n\n")}\n`;
 
     let res = await this.call({ model, effort, system, input, onSpawn: opts.onSpawn }, s);
     let usage = res.usage;

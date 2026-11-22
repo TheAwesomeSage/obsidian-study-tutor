@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import "./codeworkspace.test";
 import assert from "node:assert/strict";
 import * as F from "../src/formats";
 import { BUNDLED, buildSystem, buildTurnInput, topicForPrompt, utilityPrompt } from "../src/prompts";

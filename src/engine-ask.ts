@@ -10,6 +10,7 @@ import { Chat, chatLine, fmStr, words } from "./formats";
 import { neutraliseRemote } from "./safemd";
 import type { TurnOpts } from "./engine-common";
 import type { Engine } from "./engine";
+import {chatAttachment} from './chat-attachment';
 
 export type AskKind = "narrow" | "broad";
 
@@ -128,6 +129,7 @@ export async function askTurn(eng: Engine, chatPath: string, message: string, op
   const s = eng.settings();
   const chat = await eng.store.loadChat(chatPath);
   if (!isAskChat(chat)) throw new Error("This is not a free question chat.");
+  const material = chatAttachment(chat, opts.attached);
   const text = message.trim();
   if (text) {
     chat.messages.push({ role: "you", text });
@@ -135,7 +137,8 @@ export async function askTurn(eng: Engine, chatPath: string, message: string, op
   }
   if (chat.messages[chat.messages.length - 1]?.role !== "you") throw new Error("There is no question to answer.");
 
-  const attached = opts.attached ? `# Note the learner attached: ${opts.attached.name}\n${opts.attached.text}\n\n` : "";
+  if (!text && opts.attached) await eng.store.saveChat(chatPath, chat);
+  const attached = material ? `# File the learner attached (reference material): ${material.name}\n${material.text}\n\n` : "";
   const input = `${attached}${askContext(chat, Math.max(s.maxChatWords, ASK_MIN_CONTEXT_WORDS))}\n\nReply to the learner's last message.\n`;
   const model = modelFor(s, "chatModel");
   const res = await eng.call({ model, effort: s.effort || undefined, system: await eng.store.skill("ask.md"), input, onSpawn: opts.onSpawn }, s);

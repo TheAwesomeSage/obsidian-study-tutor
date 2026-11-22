@@ -14,6 +14,8 @@ import { parseCompileOutput, parseState } from "../src/formats";
 import { MemFS } from "./memfs";
 import { FIXTURES } from "../src/visuals/fixtures";
 import { dropRemote } from "../src/safemd";
+import {attachmentMaterial, chooseAttachment} from "../src/attachments";
+import {mountCodeWorkspace} from '../src/codeworkspace';
 
 const COMPILED = `# Linear maps
 subject: linear-algebra
@@ -197,6 +199,7 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal(confSlider().getAttribute("aria-valuetext"), "Medium");
   assert.equal(confSlider().hasAttribute("title"), false, "no native confidence tooltip");
   assert.equal(confSlider().hasAttribute("aria-label"), false, "Obsidian must not add a hover tooltip");
+  assert.equal($(root, ".st-attach").disabled, false, "the attachment picker works with no active note");
   assert.equal($(root, ".st-conf-label").htmlFor, confSlider().id, "the visible label still names the slider accessibly");
   button(root, "Start session").click();
   await tick(80);
@@ -212,7 +215,7 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal(root.querySelector(".st-pending"), null);
   assert.ok($(root, ".st-composer > .st-quick.st-side"), "help buttons sit at the side of the answer box");
   assert.ok($(root, ".st-composer > .st-side.is-right .st-send"), "Send sits at the other side");
-  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent, b.disabled]), [["Coding coach", false], ["Hint", false], ["Explain", false], ["Skip", false], ["Visual", false]]);
+  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent, b.disabled]), [["Coding coach", false], ["Code walkthrough", false], ["Hint", false], ["Explain", false], ["Skip", false], ["Visual", false]]);
   // The reasoning behind the action is one click away.
   $(root, ".st-why-btn").click();
   assert.equal($(root, ".st-why-btn").getAttribute("aria-expanded"), "true");
@@ -486,7 +489,7 @@ test("home, study, review, topic page and graph work together from the normal en
   // ----- the More menu, the new-topic modal and settings -----
   labelled(root, "More tools").click();
   const menu = menus[menus.length - 1];
-  assert.deepEqual(menu.items.map((i) => i.title), ["Topic overview", "Open topic card", "Open question bank", "Open evidence log", "How levels and choices are decided", "Compare policy with logged decisions", "Edit teaching instructions", "Reload from vault"]);
+  assert.deepEqual(menu.items.map((i) => i.title), ["Study Tutor settings", "Topic overview", "Open topic card", "Open question bank", "Open evidence log", "How levels and choices are decided", "Compare policy with logged decisions", "Edit teaching instructions", "Reload from vault"]);
   opened.length = 0;
   menu.items.find((i) => i.title === "Compare policy with logged decisions")!.run();
   await tick(60);
@@ -987,7 +990,7 @@ test("ask anything: with no topic, Home asks a question straight away, the study
   assert.ok(!$(root, ".st-messages").textContent.includes("!["), "a remote picture in the reply is made inert before it is rendered");
   assert.match(root.textContent, /Free question\. Nothing here counts toward a level\./);
   // Topic controls are not offered: hints, explanations, visuals, skip, modes, confidence, the guide's step.
-  assert.equal($$(root, ".st-quick .st-btn").length, 0);
+  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => b.textContent), ["Code walkthrough"], "free chats offer code inspection, without topic tutoring controls");
   assert.equal($(root, ".st-modes"), null);
   assert.equal($(root, ".st-mode-select"), null);
   assert.equal($(root, ".st-why-btn"), null);
@@ -1383,4 +1386,26 @@ test("example course: Home adds the C++ concurrency course with no model call, o
   await tick(80);
   assert.equal((await plugin.store.listTopics()).length, 1);
   assert.match(notices.at(-1) ?? "", /already in your vault/);
+});
+
+test('the paperclip picker reads vault notes without an active editor and preserves code whitespace', async () => {
+  const file={path:'Examples/program.md'};
+  const source='---\ntitle: Example\n---\n```python\ndef f():\n    print("hello")\n```';
+  const chosen=chooseAttachment({vault:{getMarkdownFiles:()=>[file],cachedRead:async()=>source}} as any);
+  const picker=document.querySelector('.st-attachment-list')!;
+  (picker.querySelector('button') as HTMLButtonElement).click();
+  assert.deepEqual(await chosen,{name:file.path,text:'```python\ndef f():\n    print("hello")\n```'});
+  assert.equal(attachmentMaterial('program.py','for x in range(2):\n    print(x)').text,'for x in range(2):\n    print(x)');
+  assert.throws(()=>attachmentMaterial('image.png','fake'),/note, text/);
+  assert.throws(()=>attachmentMaterial('big.txt','x'.repeat(128*1024+1)),/nothing was truncated/);
+});
+
+test('closing a code workspace before its preparation completes never starts generation or execution', async()=>{
+  const root=document.createElement('div');
+  let release!:()=>void;let calls=0;
+  const preparation=new Promise<void>(resolve=>{release=resolve;});
+  const workspace=mountCodeWorkspace(root,{source:'print(1)',language:'python',onHelp:()=>preparation,plan:async()=>{calls++;throw new Error('must not run');}});
+  (Array.from(root.querySelectorAll('button')).find(b=>b.textContent==='Build walkthrough') as HTMLButtonElement).click();
+  workspace.dispose();release();await tick();
+  assert.equal(calls,0);
 });

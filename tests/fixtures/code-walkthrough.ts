@@ -1,0 +1,3 @@
+import type {CodeWalkthrough} from '../../src/codewalkthrough';
+export const source='n = int(input())\nprint(n * 2)';
+export const plan:CodeWalkthrough={title:'Double the input',overview:'Follow input through a calculation to output.',compilation:['The Python parser checks the source before execution.'],blocks:[{id:'read',line:1,label:'Read input',next:['output']},{id:'output',line:2,label:'Print double',next:[]}],steps:[{line:1,explanation:'Read an integer.',variables:[{name:'n',value:'3'}],output:''},{line:2,explanation:'Multiply and print.',variables:[{name:'n',value:'3'}],output:'6\n'}],limitations:'Synthetic model-planned teaching fixture.'};

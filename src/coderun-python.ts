@@ -12,14 +12,15 @@
 // (or, for a function, its return value as JSON) and the comparison happens out here. No
 // Obsidian imports.
 
-import type { CodeRunReport, CodeTask, CodeTestResult } from "./codetask";
+import type { CodeRunReport, CodeTask, CodeTestResult, CodeTraceStep } from "./codetask";
 import { CODE_LIMITS, type CodeBackend, boundDetail, boundMessage, codeReport, judgeOutput, testOutcome, timeLimitOf } from "./coderun";
 import { type BundleFiles, PYODIDE_WORKER_PRELUDE } from "./sympy";
 
 /** The trusted Python side. `_make_runner()` locks the interpreter down and returns `run(request_json) -> result_json`. */
 export const PY_HARNESS = String.raw`
 def _make_runner():
-    import sys, io, json, traceback, linecache, builtins
+    import sys, io, json, traceback, linecache, builtins, itertools
+    take = itertools.islice
 
     BRIDGES = {"js", "pyodide", "pyodide_js", "_pyodide", "_pyodide_core", "micropip", "pyodide_http"}
 
@@ -114,6 +115,31 @@ def _make_runner():
         linecache.cache["<solution>"] = (len(source), None, source.splitlines(True), "<solution>")
         out, err = Sink(req["maxOut"], True), Sink(req["maxErr"], False)
         res = {"status": "ok"}
+        events = []
+        def show_value(value, depth=0):
+            if type(value) in (str, int, float, bool, type(None)):
+                return repr(value)[:160]
+            if depth < 2 and type(value) in (list, tuple):
+                return "[" + ", ".join(display(v, depth+1) for v in value[:12]) + (", ..." if len(value)>12 else "") + "]"
+            if depth < 2 and type(value) is dict:
+                return "{" + ", ".join(display(k, depth+1)+": "+display(v, depth+1) for k,v in take(value.items(), 12)) + "}"
+            return "<" + type(value).__name__[:40] + ">"
+        def display(value, depth=0):
+            try:
+                return show_value(value, depth)
+            except BaseException:
+                return "<value not displayable>"
+        def observe(frame, event, arg):
+            if len(events) >= 120:
+                sys.settrace(None)
+                return None
+            if frame.f_code.co_filename == "<solution>" and event in ("line", "return", "exception") and len(events) < 120:
+                named = ((k,v) for k,v in frame.f_locals.items() if type(k) is str and not k.startswith("__"))
+                variables = [{"name": k[:80], "value": display(v)} for k,v in take(named, 20)]
+                if event == "return":
+                    variables.append({"name": "return", "value": display(arg)})
+                events.append({"line": frame.f_lineno, "event": event, "function": frame.f_code.co_name[:80], "variables": variables, "output": out.text()[-2000:]})
+            return observe
         saved = (sys.stdin, sys.stdout, sys.stderr)
         sys.stdin = io.TextIOWrapper(io.BytesIO(req.get("stdin", "").encode("utf-8")), encoding="utf-8")
         sys.stdout, sys.stderr = stream(out), stream(err)
@@ -126,6 +152,8 @@ def _make_runner():
             if code is not None and mode != "check":
                 try:
                     ns = {"__name__": "__main__" if mode == "program" else "solution", "__builtins__": builtins}
+                    if req.get("inspect"):
+                        sys.settrace(observe)
                     exec(code, ns)
                     if mode == "function":
                         fn = ns.get(req["entry"])
@@ -148,6 +176,7 @@ def _make_runner():
                 except BaseException as e:
                     res = {"status": "exception", "detail": trace(e)}
         finally:
+            sys.settrace(None)
             for s in (sys.stdout, sys.stderr):
                 try:
                     s.flush()
@@ -158,6 +187,8 @@ def _make_runner():
             res = {"status": "output"}
         res["stdout"] = out.text()
         res["stderr"] = err.text()
+        if req.get("inspect"):
+            res["trace"] = events
         return json.dumps(res)
 
     return run
@@ -373,6 +404,22 @@ class PySession {
 
 const str = (x: unknown): string => (typeof x === "string" ? x : "");
 
+/** Treat even the isolated worker's trace as untrusted, bounded data. */
+export function readCodeTrace(value: unknown, lines: number): CodeTraceStep[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 120).flatMap((item: unknown) => {
+    if (!item || typeof item !== "object") return [];
+    const x = item as Record<string, unknown>;
+    if (!Number.isInteger(x.line) || Number(x.line) < 1 || Number(x.line) > lines || !["line", "return", "exception"].includes(str(x.event))) return [];
+    const variables = Array.isArray(x.variables) ? x.variables.slice(0, 21).flatMap((v: unknown) => {
+      if (!v || typeof v !== "object") return [];
+      const p = v as Record<string, unknown>;
+      return typeof p.name === "string" && typeof p.value === "string" ? [{ name: p.name.slice(0, 80), value: p.value.slice(0, 400) }] : [];
+    }) : [];
+    return [{ line: Number(x.line), event: str(x.event), function: str(x.function).slice(0, 80), variables, output: str(x.output).slice(-2000) }];
+  });
+}
+
 /** Python tasks: whole programs reading stdin, or an entry function called with each test's args. */
 export class PythonRunner implements CodeBackend {
   private seen = "";
@@ -417,7 +464,7 @@ export class PythonRunner implements CodeBackend {
       if (s.version) this.seen = `Pyodide ${s.version} (Python ${s.python.split(".").slice(0, 2).join(".")})`;
       return s;
     };
-    const base = { maxOut: CODE_LIMITS.outputBytes, maxErr: CODE_LIMITS.errorBytes, source };
+    const base = { maxOut: CODE_LIMITS.outputBytes, maxErr: CODE_LIMITS.errorBytes, source, inspect: task.inspect === true };
     try {
       let s: PySession | string = await open();
       if (signal?.aborted) return report({ status: "unavailable", message: "The run was cancelled." });
@@ -446,7 +493,12 @@ export class PythonRunner implements CodeBackend {
         const ms = Date.now() - t0;
         used += ms;
         if (signal?.aborted) break;
-        tests.push(this.judge(task, i, r, ms, limitMs));
+        const judged = this.judge(task, i, r, ms, limitMs);
+        if (task.inspect && !t.hidden && r.kind === "done") {
+          judged.stdout = str(r.data.stdout).slice(0, CODE_LIMITS.outputBytes);
+          judged.trace = readCodeTrace(r.data.trace, source.split(/\r?\n/).length);
+        }
+        tests.push(judged);
       }
       if (signal?.aborted) return report({ status: "unavailable", message: "The run was cancelled.", tests });
       return report({ status: "ran", tests });
