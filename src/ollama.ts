@@ -78,6 +78,17 @@ export interface LocalModel {
   describe?(signal?: AbortSignal): Promise<LocalModelInfo>;
 }
 
+export interface LocalEmbeddings {
+  vectors: number[][];
+  model: string;
+  inputTokens: number;
+}
+export interface LocalEmbeddingModel {
+  readonly model: string;
+  describe(signal?: AbortSignal): Promise<LocalModelInfo>;
+  embed(input: string[], o: {signal?: AbortSignal; timeoutMs: number}): Promise<LocalEmbeddings>;
+}
+
 export type Transport = (method: "GET" | "POST", url: string, body: string | null, timeoutMs: number, signal?: AbortSignal) => Promise<{ status: number; body: string }>;
 
 /**
@@ -215,6 +226,28 @@ export class OllamaClient implements LocalModel {
   chatJson(o: ChatJsonOptions): Promise<LocalReply> {
     const run = this.queue.then(() => this.request(o), () => this.request(o));
     this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Bounded embedding batches; never pulls a model or forwards text to a cloud model. */
+  embed(input: string[], o: {signal?: AbortSignal; timeoutMs: number}): Promise<LocalEmbeddings> {
+    const run=this.queue.then(async()=>{
+      if(o.signal?.aborted)throw new Error("Local embedding request cancelled.");
+      if(!isLoopback(this.baseUrl)||cloudModelName(this.model))throw new LocalModelError("not-local","Embeddings require an installed local model.");
+      if(!input.length||input.length>65||input.some(t=>typeof t!=="string"||t.length>600))throw new LocalModelError("bad-response","Embedding inputs exceed the local search budget.");
+      const info=await this.describe(o.signal);
+      if(info.runs!=="local")throw new LocalModelError("not-local","The embedding model is not proven local.");
+      const response=await this.transport("POST",`${this.baseUrl}/api/embed`,JSON.stringify({model:this.model,input,truncate:false,keep_alive:this.keepAlive}),o.timeoutMs,o.signal);
+      let data: {embeddings?:unknown; model?:unknown; error?:unknown; prompt_eval_count?:unknown};
+      try{data=JSON.parse(response.body);}catch{throw new LocalModelError("bad-response","The embedding reply is not JSON.");}
+      if(response.status!==200||data.error)throw new LocalModelError("http","The installed model could not produce embeddings.");
+      const vectors=data.embeddings;
+      if(!Array.isArray(vectors)||vectors.length!==input.length||vectors.some(v=>!Array.isArray(v)||!v.length||v.length>4096||v.some(x=>typeof x!=="number"||!Number.isFinite(x))))throw new LocalModelError("bad-response","Invalid local embedding vectors.");
+      const dims=vectors[0].length;
+      if(vectors.some(v=>v.length!==dims||v.every((x:number)=>x===0)))throw new LocalModelError("bad-response","Inconsistent local embedding vectors.");
+      return {vectors:vectors as number[][],model:typeof data.model==="string"?data.model:this.model,inputTokens:typeof data.prompt_eval_count==="number"?data.prompt_eval_count:0};
+    });
+    this.queue=run.catch(()=>undefined);
     return run;
   }
 

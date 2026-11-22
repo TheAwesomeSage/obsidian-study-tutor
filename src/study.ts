@@ -82,16 +82,14 @@ export class StudyScreen implements Screen {
     this.listEl = column.createDiv({ cls: "st-messages" });
     this.tailEl = column.createDiv({ cls: "st-tail" });
 
-    // The answer area keeps to one compact block: help buttons on the left of the box, Send on
-    // the right, confidence and attach under the text. The open question is the last message in
-    // the chat itself, so it is not pinned again here.
+    // A shallow answer box with one compact toolbar below it leaves more room for the chat.
     const dock = page.createDiv({ cls: "st-dock" });
     const inner = dock.createDiv({ cls: "st-column" });
     const composer = inner.createDiv({ cls: "st-composer" });
     this.quickEl = composer.createDiv({ cls: "st-quick st-side", attr: { role: "group", "aria-label": "Help with the open question" } });
     const main = composer.createDiv({ cls: "st-composer-main" });
     const right = composer.createDiv({ cls: "st-side is-right" });
-    this.input = main.createEl("textarea", { cls: "st-input", attr: { rows: "3", "aria-label": "Your answer or message" } });
+    this.input = main.createEl("textarea", { cls: "st-input", attr: { rows: "2", "aria-label": "Your answer or message" } });
     this.input.oninput = () => this.keepDraft();
     this.input.onkeydown = (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -636,7 +634,7 @@ export class StudyScreen implements Screen {
     q.empty();
     if (!probe && !assess && !v.free) {
       const coach = v.chat && fmStr(v.chat.fm, "coding_coach") === "yes";
-      const coachButton = button(q, { label: coach ? "Stop coding coach" : "Coding coach", icon: "code", tone: "ghost", onClick: () => void this.send(coach ? "Stop coding coach" : "Start coding coach") });
+      const coachButton = button(q, { label: coach ? "Stop coding coach" : "Coding coach", title:coach?"Stop coding coach":"Start coding coach", icon: "code", tone: "ghost", onClick: () => void this.send(coach ? "Stop coding coach" : "Start coding coach") });
       coachButton.disabled = this.busy;
       if (v.chat && fmStr(v.chat.fm, "placement") === "on") {
         const skip = button(q, { label: "Skip pretest", icon: "skip-forward", tone: "ghost", onClick: () => void this.send("Skip pretest") });

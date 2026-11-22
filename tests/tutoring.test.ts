@@ -29,6 +29,8 @@ import { SEED_GOAL_CHARS, askCourse, askCourseSeed } from "../src/engine-ask";
 import { ASSESS_ADDED, ASSESS_NO_HELP, WHOLE_TASK, assessmentLine, outcomeTask, readVerdicts } from "../src/engine-assess";
 import { activityContext, activityBrief, calibrationCue, calibrationReview } from "../src/learning-context";
 import { LocalPassageSelector } from "../src/semantic-retrieval";
+import { EmbeddingPassageSelector } from "../src/embedding-retrieval";
+import { OllamaClient,type LocalEmbeddingModel } from "../src/ollama";
 import type { LocalModel, LocalReply } from "../src/ollama";
 import type { Retrieval } from "../src/retrieval";
 
@@ -41,6 +43,58 @@ function semanticModel(text = '{"indices":[0]}', runs: "local" | "cloud" | "unkn
   };
   return { model, calls: () => calls };
 }
+
+test("local embeddings recover later candidates, reuse vectors, and invalidate edits and model changes",async()=>{
+  let calls=0,digest="v1";
+  const model:LocalEmbeddingModel={model:"fixture-embed",describe:async()=>({model:"fixture-embed",digest,runs:"local",detail:""}),embed:async input=>{calls++;return{model:"fixture-embed",inputTokens:input.length,vectors:input.map(t=>t==="query"||t==="matching passage"?[1,0]:[0,1])};}};
+  const selector=new EmbeddingPassageSelector(model),candidates=Array.from({length:12},(_,i)=>({id:`p${i}`,text:i===11?"matching passage":"unrelated"}));
+  const first=await selector.select("query",candidates);
+  assert.deepEqual(first.ids,["p11"],"the relevant passage is beyond the text selector's first eight");
+  assert.equal(first.outputTokens,0,"embeddings generate no answer text");
+  assert.equal((await selector.select("query",candidates)).cacheHit,true);
+  assert.equal(calls,1);
+  candidates[11].text="edited away";
+  assert.equal((await selector.select("query",candidates)).status,"abstained");
+  assert.equal(calls,2);
+  digest="v2";await selector.select("query",candidates);
+  assert.equal(calls,3,"a changed model digest cannot reuse old vectors");
+});
+
+test("embedding recovery preserves exact quoted evidence and refuses cloud, invalid and timed-out inference",async()=>{
+  const source="Shared counters lose updates when simultaneous threads overwrite values read before another write. A mutex protects the entire read modify write operation.";
+  let calls=0;
+  const model:LocalEmbeddingModel={model:"fixture-embed",describe:async()=>({model:"fixture-embed",digest:"v1",runs:"local",detail:""}),embed:async input=>{calls++;return{model:"fixture-embed",inputTokens:1,vectors:input.map(()=>[1,0])};}};
+  const recovered=await retrieve(new NoteSourceStore(async()=>source),{query:"Why are increments vanishing?",focus:{id:"c",name:"Concurrency",sources:["Notes"]},neighbours:[],selector:new EmbeddingPassageSelector(model)});
+  assert.equal(recovered.passages[0].excerpt,source);
+  assert.equal(recovered.passages[0].sourceId,"Notes");
+  assert.equal(calls,1);
+  const cloud={...model,describe:async()=>({model:"fixture-embed",digest:"",runs:"cloud" as const,detail:"remote"})};
+  assert.equal((await new EmbeddingPassageSelector(cloud).select("query",[{id:"p",text:source}])).status,"unavailable");
+  assert.equal(calls,1,"no note excerpt is embedded when inference is remote");
+  const invalid={...model,embed:async()=>({model:"fixture-embed",inputTokens:0,vectors:[[1,0],[0]]})};
+  assert.equal((await new EmbeddingPassageSelector(invalid).select("query",[{id:"p",text:source}])).status,"unavailable");
+  const slow={...model,embed:async()=>new Promise<never>(()=>{})},timed=new EmbeddingPassageSelector(slow,5);
+  assert.equal((await timed.select("query",[{id:"p",text:source}])).status,"unavailable");
+  assert.equal((await timed.select("query",[{id:"p",text:source}])).status,"unavailable");
+});
+
+test("Ollama embeddings use bounded local batches and verify locality before sending text",async()=>{
+  const sent:{url:string;body:string|null}[]=[];
+  const client=new OllamaClient({model:"local-embed",transport:async(_method,url,body)=>{
+    sent.push({url,body});
+    return{status:200,body:JSON.stringify(url.endsWith("/show")?{}:url.endsWith("/tags")?{models:[{name:"local-embed",digest:"v1"}]}:{model:"local-embed",embeddings:[[1,0],[0.8,0.6]],prompt_eval_count:4})};
+  }});
+  const reply=await client.embed(["query","passage"],{timeoutMs:100});
+  assert.equal(reply.vectors.length,2);
+  const request=JSON.parse(sent.find(p=>p.url.endsWith("/embed"))!.body!);
+  assert.deepEqual(request.input,["query","passage"]);assert.equal(request.truncate,false);
+  assert.ok(sent[0].url.endsWith("/show"));
+  const remote=new OllamaClient({model:"local-looking-name",transport:async(_method,url)=>({status:200,body:JSON.stringify(url.endsWith("/show")?{remote_host:"https://ollama.com"}:{models:[]})})});
+  await assert.rejects(remote.embed(["private passage"],{timeoutMs:100}),/not proven local/);
+  const nonlocal=new OllamaClient({model:"embed",baseUrl:"https://remote.example"});
+  await assert.rejects(nonlocal.embed(["private passage"],{timeoutMs:100}),/installed local model/);
+  await assert.rejects(client.embed(Array(66).fill("text"),{timeoutMs:100}),/exceed/);
+});
 
 test("semantic recovery finds a paraphrase without fabricating source text", async () => {
   const store = new NoteSourceStore(async () => "Shared counters lose updates when simultaneous threads overwrite values read before another write. A mutex protects the entire read modify write operation.");

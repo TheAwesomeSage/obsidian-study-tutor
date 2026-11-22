@@ -187,12 +187,11 @@ test("home, study, review, topic page and graph work together from the normal en
   await tick(40);
   assert.equal(root.getAttribute("data-screen"), "study");
   assert.match($(root, ".st-tail .st-empty").textContent, /Adaptive · Linear maps/);
-  const conf = () => $$(root, ".st-conf-opt");
-  const confOn = () => conf().filter((b: any) => b.getAttribute("aria-checked") === "true").map((b: any) => b.textContent);
-  const confPick = (label: string) => conf().find((b: any) => b.textContent === label).click();
-  assert.deepEqual(conf().map((b: any) => b.textContent), ["None", "Low", "Medium", "High", "Very high"], "confidence is five discrete points");
+  const confOn = () => $(root,".st-conf").classList.contains("is-set")?[$(root,".st-conf-slider").getAttribute("aria-valuetext")]:[];
+  const confPick = (label: string) => {const slider=$(root,".st-conf-slider");slider.value=String(["None","Low","Medium","High","Very high"].indexOf(label));fire(slider,"input");};
+  assert.equal($$(root,".st-conf-opt").length,0,"confidence labels are no longer separate buttons");
   assert.deepEqual(confOn(), [], "confidence is unset until one is chosen");
-  assert.equal($(root, ".st-conf-points").getAttribute("role"), "radiogroup");
+  assert.equal($(root, ".st-conf-slider").step, "1");
   const confSlider = () => $(root, ".st-conf-slider");
   assert.equal(confSlider().type, "range");
   assert.match(confSlider().getAttribute("aria-valuetext"), /Not set/);
@@ -218,8 +217,8 @@ test("home, study, review, topic page and graph work together from the normal en
   $(root, ".st-why-btn").click();
   assert.equal(root.querySelector(".st-why-detail"), null);
 
-  // Confidence: choosing a point sets it, choosing it again or Delete clears it, arrows move it.
-  assert.equal(conf()[0].disabled, false);
+  // Confidence: dragging selects a stop; Clear and Delete unset it; arrows move it.
+  assert.equal(confSlider().disabled, false);
   confSlider().value = "1";
   fire(confSlider(), "input");
   assert.deepEqual(confOn(), ["Low"], "dragging the slider selects a confidence stop");
@@ -227,12 +226,12 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal(confSlider().value, "3", "clicking a label also moves the slider");
   assert.deepEqual(confOn(), ["High"]);
   assert.ok($(root, ".st-conf").classList.contains("is-set"));
-  confPick("High");
-  assert.deepEqual(confOn(), [], "choosing the same point again clears it");
+  labelled(root,"Clear confidence").click();
+  assert.deepEqual(confOn(), [], "Clear unsets the value");
   confPick("Medium");
-  conf()[2].dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+  confSlider().dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
   assert.deepEqual(confOn(), ["High"], "arrow keys move between points");
-  conf()[3].dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+  confSlider().dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
   assert.deepEqual(confOn(), []);
   assert.ok(!$(root, ".st-conf").classList.contains("is-set"));
   confSlider().value = "4";
@@ -652,7 +651,7 @@ test("a chat saved by an older version reopens with its question open, and nothi
   assert.equal(root.getAttribute("data-screen"), "study");
   assert.equal($$(root, ".st-msg").length, 1);
   assert.match($(root, ".st-messages").textContent, /What does it print, and why\?/);
-  assert.equal($(root, ".st-conf-opt").disabled, false);
+  assert.equal($(root, ".st-conf-slider").disabled, false);
   assert.equal(await fs.read(`${dir}/chats/2026-11-12 1701 tutor.md`), old, "opening a chat does not rewrite it");
   // Answering it carries the question into the record, and the transcript keeps every earlier line.
   let seen = "";
