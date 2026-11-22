@@ -27,6 +27,8 @@ SymPy (Pyodide) is checked by its own maths tests; the journey runs without it, 
 
 ## How to run what was not run
 
+The combined question-to-course and semantic-support update was checked on 22 November 2026 with the production build, the unit suite, and headless Edge. Regression checks cover exact numeric prediction endpoints and supplied units; bridge confidence, persisted retries and independent source eligibility; the first-success timestamp; prerequisite-tree ordering with shared parents, saved layout switching/reloading, arrows, filters, evidence colour modes, and the five-stop confidence slider. Browser checks use synthetic fixtures and the production renderer; no paid provider calls or real learner outcome comparison were run.
+
 ```
 npm run test:journey-live
 npm run bench:base

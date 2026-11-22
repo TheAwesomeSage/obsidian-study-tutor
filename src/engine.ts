@@ -2,7 +2,7 @@
 // can mark, calling the model for the rest, recording the evidence, and keeping the session
 // record. No Obsidian imports, so it can be exercised from Node.
 
-import { CallResult, ModelCliError, Usage, addUsage } from "./claude";
+import { CallResult, ModelCliError, Usage, addUsage, zeroUsage } from "./claude";
 import { callModel, modelFor, type ModelRequest } from "./model-provider";
 import { dependentCounts } from "./course";
 import { Attempt, EVIDENCE_RULES, Grading, Outcome, checkDue, recordAttempt } from "./evidence";
@@ -11,6 +11,7 @@ import { secondsPerItem } from "./scheduler";
 import { Chat, LearnerState, Mode, NextStep, Prereqs, Question, Topic, dueCount, objectiveStamp, applyStateUpdate, chatWords, extractStateTrailer, fmList, fmStr, mastery, placementQuestions, prereqGaps, setLevel, ymd } from "./formats";
 import { ACTION_GUIDE, DEFAULT_WEIGHTS, Decision, POLICY_VERSION, PolicyInput, decide, examSignals, homeStep } from "./policy";
 import { bktShadow, mcqOptions } from "./bkt";
+import { activityBrief, calibrationCue, COACH_RULE } from "./learning-context";
 import type { ResearchProvider } from "./compile-research";
 import type { CodeRunner } from "./codetask";
 import { LocalModel } from "./ollama";
@@ -88,6 +89,7 @@ export class Engine {
   local: LocalModel | null = null;
   /** Uses the same serial client as visual activities in the desktop plugin. */
   compilationLocal: LocalModel | null = null;
+  semanticSelector: import("./semantic-retrieval").PassageSelector | null = null;
   researchProvider: ResearchProvider | null = null;
   readonly tools = new ToolRegistry();
 
@@ -275,6 +277,21 @@ export class Engine {
     const chat = await this.store.loadChat(chatPath);
     if (fmStr(chat.fm, "probe") === "yes") return probeFns.probeTurn(this, dir, chatPath, message, opts);
     if (fmStr(chat.fm, "assess") === "outcome") return assessFns.assessTurn(this, dir, chatPath, message, opts);
+    if (/^(start|stop) coding coach[.!]?$/i.test(message.trim())) {
+      const on = /^start/i.test(message.trim());
+      chat.fm.coding_coach = on ? "yes" : "";
+      if (on) {
+        const state = await this.store.loadState(dir, s.targetLevel);
+        const record = sessionFor(chat, state, (fmStr(chat.fm, "mode", "tutor") as Mode));
+        if (record.pendingQuestion) record.helpGiven = [...record.helpGiven, "coding coach enabled for this question"];
+        chat.fm.session = JSON.stringify(record);
+        if (fmStr(chat.fm, "card")) chat.fm.card_help = "yes";
+      }
+      chat.messages.push({ role: "tutor", text: on ? "Coding coach is on for this chat. Share your goal, code and what you expect it to do. You can request a solution or stop coaching at any time." : "Coding coach is off. Your normal study mode continues." });
+      await this.store.saveChat(chatPath, chat);
+      return { reply: chat.messages[chat.messages.length - 1].text, changes: [], state: await this.store.loadState(dir, s.targetLevel), usage: zeroUsage(), local: true };
+    }
+    if (fmStr(chat.fm, "coding_coach") === "yes") return this.turn(dir, chatPath, message, opts);
     const mode = (fmStr(chat.fm, "mode", "tutor") as Mode) || "tutor";
     const placing = fmStr(chat.fm, "placement") === "on";
     if (mode === "tutor" && s.codePlacement !== false && (!chat.messages.length || placing)) {
@@ -514,6 +531,11 @@ export class Engine {
 
     // The part that changes each turn: state, chat, and only the extra context this turn needs.
     const extras: string[] = [];
+    const visualContext = opts.activityContext?.skill === state.focus ? activityBrief(opts.activityContext) : "";
+    if (visualContext) extras.push(visualContext);
+    if (fmStr(chat.fm, "coding_coach") === "yes") extras.push(COACH_RULE);
+    const calibration = calibrationCue(state.attempts, state.focus ?? undefined);
+    if (calibration) extras.push("# Confidence follow-up\n" + calibration + "\nDo not change a mark based on confidence. Use the normal delayed-check policy.");
     const linked = await this.store.linkedContext(dir, state, external);
     if (linked) extras.push(`# Cross-topic prerequisites\n${linked}`);
     if (said && fmStr(chat.fm, "previous") && LOOKS_BACK.test(said)) {

@@ -109,8 +109,8 @@ export function registerTools(eng: Engine): void {
             return other ? [{ edge: e, concept: { id: other.id, name: other.name, sources: other.sources, topic: other.topic } }] : [];
           });
       }
-      const r = await retrieve(eng.sourceStore(), { query: input.query, focus, neighbours, maxWords: input.maxWords });
-      return { output: { ...r, excerpts: r.passages.map((x) => renderRetrieval({ ...r, via: null, passages: [x] })) }, assumptions: ["ranked by shared words with the question; quoted exactly from the saved source", ...(r.via ? [`followed one ${r.via.type} link to ${r.via.otherName}`] : []), ...(r.gap ? [`${r.gap.name}: ${r.gap.reason}`] : [])] };
+      const r = await retrieve(eng.sourceStore(), { query: input.query, focus, neighbours, maxWords: input.maxWords, selector: eng.semanticSelector });
+      return { output: { ...r, excerpts: r.passages.map((x) => renderRetrieval({ ...r, via: null, passages: [x] })) }, assumptions: ["quoted exactly from the saved source; relevance is not independent fact verification", ...(r.semantic ? [`local semantic selection: ${r.semantic.status}, ${r.semantic.wallMs}ms, ${r.semantic.promptTokens} input / ${r.semantic.outputTokens} output tokens${r.semantic.cacheHit ? ", cached" : ""}`] : ["ranked by shared words with the question"]), ...(r.via ? [`followed one ${r.via.type} link to ${r.via.otherName}`] : []), ...(r.gap ? [`${r.gap.name}: ${r.gap.reason}`] : [])] };
     },
   });
   eng.tools.register<{ id: string; around: number; topic?: string }, { text: string; found: boolean }>({

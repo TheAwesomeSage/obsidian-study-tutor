@@ -27,6 +27,168 @@ import { gradingLabel } from "../src/evidence";
 import { compileCourse } from "../src/compiler";
 import { SEED_GOAL_CHARS, askCourse, askCourseSeed } from "../src/engine-ask";
 import { ASSESS_ADDED, ASSESS_NO_HELP, WHOLE_TASK, assessmentLine, outcomeTask, readVerdicts } from "../src/engine-assess";
+import { activityContext, activityBrief, calibrationCue, calibrationReview } from "../src/learning-context";
+import { LocalPassageSelector } from "../src/semantic-retrieval";
+import type { LocalModel, LocalReply } from "../src/ollama";
+import type { Retrieval } from "../src/retrieval";
+
+function semanticModel(text = '{"indices":[0]}', runs: "local" | "cloud" | "unknown" = "local") {
+  let calls = 0;
+  const model: LocalModel = {
+    model: "fixture-local",
+    describe: async () => ({ model: "fixture-local", digest: "v1", runs, detail: "" }),
+    chatJson: async () => { calls++; return { text, model: "fixture-local", doneReason: "stop", timing: { wallMs: 1, loadMs: 0, promptTokens: 20, promptMs: 0, evalTokens: 4, evalMs: 0, totalMs: 1 } } as LocalReply; },
+  };
+  return { model, calls: () => calls };
+}
+
+test("semantic recovery finds a paraphrase without fabricating source text", async () => {
+  const store = new NoteSourceStore(async () => "Shared counters lose updates when simultaneous threads overwrite values read before another write. A mutex protects the entire read modify write operation.");
+  const input = { query: "Why are increments vanishing?", focus: { id: "c", name: "Concurrency", sources: ["Notes"] }, neighbours: [] };
+  const lexical = await retrieve(store, input);
+  assert.equal(lexical.passages.length, 0);
+  const m = semanticModel();
+  const recovered = await retrieve(store, { ...input, selector: new LocalPassageSelector(m.model) });
+  assert.equal(recovered.passages.length, 1);
+  assert.match(recovered.passages[0].excerpt, /Shared counters lose updates/);
+  assert.equal(recovered.passages[0].sourceId, "Notes");
+  assert.equal(recovered.semantic?.status, "selected");
+  assert.equal(m.calls(), 1);
+});
+
+test("adequate lexical evidence avoids neural inference", async () => {
+  const text = "The power rule differentiates powers by multiplying the coefficient by the exponent and reducing that exponent by one. This operation applies to each polynomial term separately and produces another polynomial with a lower degree. Constant terms disappear because their rates of change are zero.";
+  const m = semanticModel();
+  await retrieve(new NoteSourceStore(async () => text), { query: "power rule", focus: { id: "p", name: "Power rule", sources: ["Notes"] }, neighbours: [], selector: new LocalPassageSelector(m.model) });
+  assert.equal(m.calls(), 0);
+});
+
+test("semantic selection refuses cloud/unknown models before sending excerpts", async () => {
+  for (const location of ["cloud", "unknown"] as const) {
+    const m = semanticModel('{"indices":[0]}', location);
+    assert.equal((await new LocalPassageSelector(m.model).select("q", [{ id: "a", text: "private note" }])).status, "unavailable");
+    assert.equal(m.calls(), 0);
+  }
+});
+
+test("semantic cache uses content and model identity; cached metrics count no new tokens", async () => {
+  const m = semanticModel();
+  const selector = new LocalPassageSelector(m.model);
+  const candidate = [{ id: "a", text: "old passage" }];
+  await selector.select("q", candidate);
+  const cached = await selector.select("q", candidate);
+  assert.equal(cached.cacheHit, true);
+  assert.equal(cached.outputTokens, 0);
+  await selector.select("q", [{ id: "a", text: "changed passage" }]);
+  assert.equal(m.calls(), 2);
+  m.model.describe = async () => ({ model: "fixture-local", digest: "v2", runs: "local", detail: "" });
+  await selector.select("q", candidate);
+  assert.equal(m.calls(), 3);
+});
+
+test("invalid neural selections and abstention preserve a real source gap", async () => {
+  for (const text of ['{"indices":[99]}', '{"indices":[0,0]}', '{"indices":[]}', '{"answer":"invented"}']) {
+    const m = semanticModel(text);
+    const r = await retrieve(new NoteSourceStore(async () => "A mutex prevents simultaneous writes to shared memory locations."), { query: "photosynthesis", focus: { id: "c", name: "Biology", sources: ["Notes"] }, neighbours: [], selector: new LocalPassageSelector(m.model) });
+    assert.equal(r.passages.length, 0);
+    assert.ok(r.gap);
+    assert.equal(r.semantic?.outputTokens, 4, "invalid responses still report consumed tokens");
+  }
+});
+
+test("the engine source tool uses optional semantic recovery and exposes its diagnostics", async () => {
+  const t = await setup();
+  t.engine.sources = new NoteSourceStore(async () => "Shared counters lose updates when simultaneous threads overwrite values read before another write. A mutex protects the entire read modify write operation.");
+  t.engine.semanticSelector = new LocalPassageSelector(semanticModel().model);
+  const result = await t.engine.tools.run<Retrieval>("vault.source", { notes: ["Notes"], query: "Why are increments vanishing?" });
+  assert.equal(result.ok, true);
+  assert.equal(result.output?.semantic?.status, "selected");
+  assert.match(result.output?.passages[0].excerpt ?? "", /Shared counters/);
+  assert.ok(result.assumptions.some(x => /local semantic selection/.test(x)));
+  assert.equal(t.calls.length, 0, "recovery does not call the main provider");
+});
+
+test("semantic timeout aborts, falls back and cools down instead of delaying every turn", async () => {
+  const m = semanticModel();
+  let aborted = false;
+  m.model.chatJson = async o => new Promise((_, reject) => o.signal?.addEventListener("abort", () => { aborted = true; reject(new Error("aborted")); }, { once: true }));
+  const selector = new LocalPassageSelector(m.model, 10);
+  const r = await selector.select("q", [{ id: "a", text: "p" }]);
+  assert.equal(r.status, "unavailable");
+  assert.equal(aborted, true);
+  assert.equal((await selector.select("q", [{ id: "a", text: "p" }])).status, "unavailable");
+});
+
+test("activity snapshots preserve prediction and changed controls without sharing mutable objects", () => {
+  const lesson = { moduleId: "projectile", objective: "Predict range", settings: { speed: 10 } } as any;
+  let p = activityContext(lesson, { version: 1, type: "prediction", text: "20 metres" });
+  const settings = { speed: 20 };
+  p = activityContext(lesson, { version: 1, type: "settings", settings }, p);
+  settings.speed = 99;
+  assert.equal((p.settings as any).speed, 20);
+  assert.equal(p.prediction, "20 metres");
+  assert.match(activityBrief(p), /helped work/);
+  p = activityContext(lesson, { version: 1, type: "reset", position: 0 }, p);
+  assert.equal(p.prediction, "");
+  assert.equal((p.settings as any).speed, 10);
+  assert.ok(activityBrief({ ...p, prediction: "x".repeat(10000) }).length < 3300);
+});
+
+test("confidence follow-up excludes probes and helped work and closes on a later fresh check", () => {
+  const a = attempt({ id: "confident", confidence: 1, assisted: false, timestamp: "2026-11-10T10:00:00Z" });
+  assert.match(calibrationCue([a]), /assumption/);
+  assert.equal(calibrationReview([a], "2026-11-10"), null);
+  assert.equal(calibrationReview([a], "2026-11-11")?.id, a.id);
+  assert.equal(calibrationCue([{ ...a, probe: true }]), "");
+  assert.equal(calibrationCue([{ ...a, assisted: true }]), "");
+  assert.equal(calibrationCue([{ ...a, verification: "disputed" }]), "");
+  assert.equal(calibrationReview([{ ...a, verification: "disputed" }], "2026-11-11"), null);
+  const later = attempt({ id: "fresh", questionId: "different", result: "correct", timestamp: "2026-11-12T10:00:00Z" });
+  assert.equal(calibrationReview([a, later], "2026-11-13"), null);
+  assert.match(calibrationCue([{ ...later, confidence: 0.25 }]), /low confidence/);
+});
+
+test("coding coach is opt-in, persists, protects an open bank answer and is absent after stop", async () => {
+  const t = await setup();
+  const path = await t.chatIn("quiz");
+  const chat = await t.store.loadChat(path);
+  chat.fm.card = "Q4";
+  await t.store.saveChat(path, chat);
+  await t.engine.study(t.dir, path, "Start coding coach");
+  assert.equal(t.calls.length, 0);
+  assert.equal((await t.store.loadChat(path)).fm.card_help, "yes");
+  await t.engine.study(t.dir, path, "I expect my loop to terminate.");
+  assert.match(t.calls.at(-1).input, /Coding coach is explicitly enabled/);
+  await t.engine.study(t.dir, path, "Stop coding coach");
+  assert.equal((await t.store.loadChat(path)).fm.coding_coach, "");
+});
+
+test("a learner can leave placement without recording unanswered items as failures", async () => {
+  const t = await setup();
+  const path = await t.chatIn("tutor");
+  const state = await t.store.loadState(t.dir, 4);
+  for (const n of Object.keys(state.levels)) state.levels[Number(n)] = null;
+  await t.store.saveState(t.dir, state);
+  await t.engine.study(t.dir, path, "");
+  assert.equal((await t.store.loadChat(path)).fm.placement, "on");
+  const r = await t.engine.study(t.dir, path, "Skip pretest");
+  assert.match(r.reply, /Unanswered questions were not marked/);
+  assert.equal(r.state.attempts.length, 0);
+  assert.equal(t.calls.length, 0);
+  assert.equal((await t.store.loadChat(path)).fm.card, "");
+});
+
+test("visual context reaches only the matching focus and stays outside mastery evidence", async () => {
+  const t = await setup();
+  const path = await t.chatIn("expert");
+  const context = { skill: 2, moduleId: "projectile", objective: "Predict range", prediction: "20 metres", action: "pause", position: 1, settings: { speed: 10 }, response: null, hintUsed: false };
+  await t.engine.study(t.dir, path, "Why was my prediction wrong?", { activityContext: context });
+  assert.match(t.calls.at(-1).input, /Recent visual interaction/);
+  assert.match(t.calls.at(-1).input, /20 metres/);
+  assert.equal((await t.store.loadState(t.dir, 4)).attempts.length, 0);
+  await t.engine.study(t.dir, path, "Explain further", { activityContext: { ...context, skill: 1 } });
+  assert.doesNotMatch(t.calls.at(-1).input, /Recent visual interaction/);
+});
 
 // ---------- fixtures ----------
 

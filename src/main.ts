@@ -7,6 +7,7 @@ import { CompileResult, Engine, EngineSettings, Material } from "./engine";
 import { Frontmatter, SourceMode, fmList, fmStr, splitFrontmatter, words } from "./formats";
 import { DEFAULT_WEIGHTS, PolicyWeights, WEIGHT_LABELS } from "./policy";
 import { DEFAULT_LOCAL_MODEL, DEFAULT_OLLAMA_URL, OllamaClient, locateLocal } from "./ollama";
+import { LocalPassageSelector } from "./semantic-retrieval";
 import { FS, Store } from "./store";
 import { BundleFiles, SympyWorker } from "./sympy";
 import { LocalCodeRunner } from "./coderun";
@@ -45,6 +46,8 @@ export interface TutorSettings extends EngineSettings {
   minutes: number;
   /** Configure existing visual modules with a local Ollama model when no saved configuration fits. */
   localActivities: boolean;
+  /** Optional semantic source selection using the configured local model. */
+  semanticRetrieval: boolean;
   /** Which models compile a course (model-provider.ts). Settings from before it was added are migrated from `localCompilation`. */
   compileStrategy: CompileStrategy;
   /** Plan diagrams and simulations at compile time with the main provider ("main" compile strategy only). */
@@ -106,6 +109,7 @@ const DEFAULTS: TutorSettings = {
   weights: { ...DEFAULT_WEIGHTS },
   minutes: 25,
   localActivities: true,
+  semanticRetrieval: false,
   compileStrategy: "hybrid",
   compileBlueprints: true,
   researchLimits: DEFAULT_RESEARCH_LIMITS,
@@ -195,7 +199,8 @@ export default class StudyTutorPlugin extends Plugin {
       native: new NativeRunner(() => this.opts.compilerPath),
     });
     const saved = ((await this.loadData()) ?? {}) as Partial<PluginData>;
-    this.data = { settings: { ...DEFAULTS, ...(saved.settings ?? {}) }, activeTopic: saved.activeTopic ?? "", activeChat: saved.activeChat ?? {}, skills: saved.skills ?? {}, settingsVersion: saved.settingsVersion ?? 1, drafts: saved.drafts ?? {}, graphLayout: saved.graphLayout ?? {} };
+    const layoutMode=saved.graphLayoutMode&&["tree","connected","clusters"].includes(saved.graphLayoutMode)?saved.graphLayoutMode:undefined;
+    this.data = { settings: { ...DEFAULTS, ...(saved.settings ?? {}) }, activeTopic: saved.activeTopic ?? "", activeChat: saved.activeChat ?? {}, skills: saved.skills ?? {}, settingsVersion: saved.settingsVersion ?? 1, drafts: saved.drafts ?? {}, graphLayout: saved.graphLayout ?? {}, graphLayoutMode:layoutMode, graphLayouts:saved.graphLayouts??{} };
     // Settings saved by an older version have no weights; a partly filled set is completed from the defaults.
     this.data.settings.weights = { ...DEFAULT_WEIGHTS, ...(saved.settings?.weights ?? {}) };
     // Up to 0.9 a toggle chose whether Ollama selected passages; off is the main strategy now.
@@ -295,9 +300,10 @@ export default class StudyTutorPlugin extends Plugin {
   /** Share one generation queue between compilation and visual activities. */
   buildLocal(): void {
     const compiles = compileStrategyFor(this.opts) !== "main";
-    const client = this.opts.localActivities || compiles ? new OllamaClient({ model: this.opts.localModel || DEFAULT_LOCAL_MODEL, baseUrl: this.opts.ollamaUrl || DEFAULT_OLLAMA_URL }) : null;
+    const client = this.opts.localActivities || compiles || this.opts.semanticRetrieval ? new OllamaClient({ model: this.opts.localModel || DEFAULT_LOCAL_MODEL, baseUrl: this.opts.ollamaUrl || DEFAULT_OLLAMA_URL }) : null;
     this.engine.local = this.opts.localActivities ? client : null;
     this.engine.compilationLocal = compiles ? client : null;
+    this.engine.semanticSelector = this.opts.semanticRetrieval && client ? new LocalPassageSelector(client) : null;
   }
 
   /** Opens Obsidian's settings on this plugin's tab. The settings API is not typed, so every step is guarded. */
@@ -909,6 +915,13 @@ class TutorSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl).setName("Interactive activities").setHeading();
+    new Setting(containerEl).setName("Semantic source recovery").setDesc(
+      "Optional: when keyword search finds too little source evidence, ask the configured local Ollama model to select relevant saved passages, including paraphrases. At most 8 short candidates and 4 seconds; otherwise keyword search continues. No cloud fallback, downloads, grading or mastery changes.",
+    ).addToggle(t => t.setValue(s.semanticRetrieval).onChange(async enabled => {
+      s.semanticRetrieval = enabled;
+      this.plugin.buildLocal();
+      await this.plugin.save();
+    }));
     new Setting(containerEl)
       .setName("Configure activities with a local model")
       .setDesc("When you ask for a diagram, simulation or game, or the tutor offers one and you open it, an existing module is configured from a short excerpt of your notes by a small model on this computer, through Ollama. Saved activities reopen with no model at all, and moving their controls never calls a model. Nothing here ever calls Claude, and a model that Ollama runs in the cloud is refused. Off: only saved activities open.")

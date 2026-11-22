@@ -7,7 +7,8 @@
 //     placed, so the map stays familiar as topics are added;
 //   - it stays fast with thousands of nodes, because repulsion only looks at nearby nodes
 //     through a grid instead of comparing every pair.
-// Topics form clusters, and within a cluster foundations sit low and what builds on them rises.
+// Map layouts cluster topics with foundations below dependents. The optional tree layout
+// follows every prerequisite in levels from top to bottom and preserves shared parents.
 
 import {treePositions} from "./graphtree";
 

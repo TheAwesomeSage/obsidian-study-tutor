@@ -102,6 +102,19 @@ function makeApp(fs: MemFS, leaves: any[], opened: string[], getPlugin: () => an
   return app;
 }
 
+test("graph layout choices and each layout's coordinates survive plugin reload",async()=>{
+  const fs=new MemFS(),leaves:any[]=[],opened:string[]=[];
+  let plugin:any=null;
+  const app=makeApp(fs,leaves,opened,()=>plugin);
+  plugin=new (StudyTutorPlugin as any)(app,{id:"study-tutor"});
+  const positions={tree:{a:[0,0],b:[0,85]},connected:{a:[12,34],b:[56,78]}};
+  await plugin.saveData({settingsVersion:3,graphLayoutMode:"connected",graphLayout:positions.connected,graphLayouts:positions});
+  await plugin.onload();
+  assert.equal(plugin.data.graphLayoutMode,"connected");
+  assert.deepEqual(plugin.data.graphLayouts,positions);
+  assert.deepEqual(plugin.data.graphLayout,positions.connected);
+});
+
 test("home, study, review, topic page and graph work together from the normal entry points", async () => {
   const fs = new MemFS();
   const leaves: any[] = [];
@@ -197,7 +210,7 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal(root.querySelector(".st-pending"), null);
   assert.ok($(root, ".st-composer > .st-quick.st-side"), "help buttons sit at the side of the answer box");
   assert.ok($(root, ".st-composer > .st-side.is-right .st-send"), "Send sits at the other side");
-  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent, b.disabled]), [["Hint", false], ["Explain", false], ["Skip", false], ["Visual", false]]);
+  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent, b.disabled]), [["Coding coach", false], ["Hint", false], ["Explain", false], ["Skip", false], ["Visual", false]]);
   // The reasoning behind the action is one click away.
   $(root, ".st-why-btn").click();
   assert.equal($(root, ".st-why-btn").getAttribute("aria-expanded"), "true");

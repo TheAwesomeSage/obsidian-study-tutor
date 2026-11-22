@@ -4,6 +4,7 @@
 // (no model, no web) and the compiler's store can be swapped in at the boundary.
 
 import { contentHash, words } from "./formats";
+import type { PassageSelector, SemanticSelection } from "./semantic-retrieval";
 import type { CourseEdge, Relation } from "./course";
 
 /**
@@ -122,6 +123,7 @@ export interface RetrievalConcept {
 }
 
 export interface RetrievalInput {
+  selector?: PassageSelector | null;
   query: string;
   focus: RetrievalConcept;
   /** Typed edges touching the focus, each with the concept at its other end. Rejected edges may be passed; they are never followed. */
@@ -147,6 +149,7 @@ export interface RetrievedPassage {
 }
 
 export interface Retrieval {
+  semantic?: SemanticSelection;
   passages: RetrievedPassage[];
   /** The one typed edge followed because the question spans two concepts, or null. */
   via: { type: Relation; other: string; otherName: string; status: CourseEdge["status"]; crossTopic: boolean } | null;
@@ -211,6 +214,7 @@ export async function retrieve(store: SourceStore | null, p: RetrievalInput): Pr
 
   const gather = async (c: RetrievalConcept, tier: "focus" | "neighbour") => {
     const out: (RetrievedPassage & { rank: number[] })[] = [];
+    const candidates: (RetrievedPassage & { rank: number[] })[] = [];
     const named = terms(c.name);
     const additional = c.topic && store?.citations ? await store.citations(c.topic, c.id).catch(() => []) : [];
     const sources = [...new Set([...c.sources, ...additional])];
@@ -222,15 +226,29 @@ export async function retrieve(store: SourceStore | null, p: RetrievalInput): Pr
         const have = terms(`${s.heading} ${s.text}`);
         // Words of the question count fully; the concept's own name only breaks ties between them.
         const score = hits(have, q) + 0.25 * hits(have, named);
-        if (hits(have, q) === 0) continue;
-        out.push({ id: s.id, sourceId: s.sourceId, title: s.title, heading: s.heading, ...(s.url ? { url: s.url } : {}), tier, concept: c.id, topic: c.topic, score, excerpt: s.text, truncated: false, rank: [-score, si, s.order] });
+        const item = { id: s.id, sourceId: s.sourceId, title: s.title, heading: s.heading, ...(s.url ? { url: s.url } : {}), tier, concept: c.id, topic: c.topic, score, excerpt: s.text, truncated: false, rank: [-score, si, s.order] };
+        candidates.push(item);
+        if (hits(have, q) > 0) out.push(item);
       }
     }
     out.sort((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1] || a.rank[2] - b.rank[2] || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    return { out, readable, cited: sources.length };
+    candidates.sort((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1] || a.rank[2] - b.rank[2]);
+    return { out, candidates, readable, cited: sources.length };
   };
 
   const focus = await gather(p.focus, "focus");
+  let semantic: SemanticSelection | undefined;
+  if (p.selector && focus.out.reduce((n, x) => n + words(x.excerpt), 0) < MIN_FOCUS_WORDS && focus.candidates.length) {
+    // Source scope is unchanged. Only exact saved passages can become evidence.
+    try {
+      semantic = await p.selector.select(p.query, focus.candidates.map(x => ({ id: x.id, text: x.heading + "\n" + x.excerpt })));
+      const chosen = [...new Set(semantic.ids)].slice(0, 3).flatMap(id => {
+        const x = focus.candidates.find(p => p.id === id);
+        return x ? [x] : [];
+      });
+      focus.out = [...chosen, ...focus.out.filter(x => !chosen.some(c => c.id === x.id))];
+    } catch { /* lexical evidence and explicit gaps remain available */ }
+  }
   const other = edge ? await gather(edge.concept, "neighbour") : { out: [], readable: 0, cited: 0 };
 
   const picked: RetrievedPassage[] = [];
@@ -288,7 +306,7 @@ export async function retrieve(store: SourceStore | null, p: RetrievalInput): Pr
   const via = edge && picked.some((x) => x.tier === "neighbour")
     ? { type: edge.edge.type, other: edge.concept.id, otherName: edge.concept.name, status: edge.edge.status, crossTopic: !!edge.concept.topic && !!p.focus.topic && edge.concept.topic !== p.focus.topic }
     : null;
-  return { passages: picked, via, gap, fallback, words: maxWords - budget };
+  return { passages: picked, via, gap, fallback, words: maxWords - budget, ...(semantic ? { semantic } : {}) };
 }
 
 /** How one excerpt is cited: the note and heading as an Obsidian link, or the page and section as a web link. */

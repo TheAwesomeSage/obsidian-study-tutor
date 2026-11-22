@@ -3,6 +3,7 @@
 // Obsidian imports.
 
 import { Usage } from "./claude";
+import { calibrationReview } from "./learning-context";
 import { daysBetween as dayGap } from "./dates";
 import type { ModelProviderSettings } from "./model-provider";
 import { Attempt, Grading, TASK_TYPES, TaskType } from "./evidence";
@@ -150,6 +151,8 @@ export interface TurnResult {
 }
 
 export interface TurnOpts {
+  /** Latest visual state from this chat; never used to award mastery. */
+  activityContext?: import("./learning-context").ActivityContext;
   attached?: Material;
   onSpawn?: (kill: () => void) => void;
   /** The learner's stated confidence in this answer, 0 to 1, given before feedback. Null when not given. */
@@ -284,7 +287,9 @@ export function pickQuizQuestion(questions: Question[], s: LearnerState, asked: 
   const order = (q: Question) => (seenToday.has(q.id) ? 3 : s.cards[q.id] ? (s.cards[q.id].due <= today ? 0 : 2) : 1);
   // `rank` puts questions on ideas not yet asked first (coverage.ts); without it only level, freshness and due date decide.
   const rank = opts.rank ?? (() => 0);
-  return [...left].sort((a, b) => level(a) - level(b) || rank(a) - rank(b) || fresh(a) - fresh(b) || order(a) - order(b))[0];
+  const check = calibrationReview(s.attempts, today);
+  const calibrationRank = (q: Question) => check && q.subskill === check.skill && q.id !== baseQuestionId(check.questionId) ? 0 : 1;
+  return [...left].sort((a, b) => level(a) - level(b) || rank(a) - rank(b) || fresh(a) - fresh(b) || order(a) - order(b) || calibrationRank(a) - calibrationRank(b))[0];
 }
 
 /** Picks the texts that share the most words with the query, in their original order, within a word budget. */
