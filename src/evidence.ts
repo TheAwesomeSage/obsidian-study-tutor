@@ -112,6 +112,11 @@ export interface Attempt {
    * a lever: it is recorded, and levels, estimates, BKT, card schedules and misconceptions ignore it.
    */
   probe?: boolean;
+  /**
+   * A bridge answer: given before this concept was taught, by mapping onto it a concept from another
+   * topic with the same deep structure (structures.ts). That concept's stable id.
+   */
+  transferFrom?: string;
 }
 
 /** One change of level, with what caused it. Every change is logged so it can be explained later. */
@@ -200,6 +205,7 @@ export function normaliseAttempt(raw: unknown): Attempt | null {
     ...(Array.isArray(r.objectives) ? { objectives: r.objectives.filter((x): x is string => typeof x === "string" && OBJECTIVE_REF.test(x)).slice(0, 12) } : {}),
     ...(code ? { code } : {}),
     ...(r.probe === true ? { probe: true } : {}),
+    ...(typeof r.transferFrom === "string" && r.transferFrom ? { transferFrom: r.transferFrom.slice(0, 80) } : {}),
   };
 }
 

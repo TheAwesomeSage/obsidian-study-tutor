@@ -53,6 +53,13 @@ export interface GraphColors {
 const SMALL_MAP = 40;
 const DASH: Record<Relation, number[]> = { synoptic: [10, 4, 3, 4], requires: [], supports: [7, 4], applies_to: [2, 4], contrasts_with: [9, 3, 2, 3], derived_from: [1, 3] };
 
+/** Stable topic identity, independent of filtering, insertion and display ordering. */
+export function topicColorSlot(topic: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < topic.length; i++) hash = Math.imul(hash ^ topic.charCodeAt(i), 16777619);
+  return (hash >>> 0) % 6 + 1;
+}
+
 export class GraphCanvas {
   /** Null where there is no canvas support (a test environment): everything but drawing still works. */
   private ctx: CanvasRenderingContext2D | null;
@@ -350,7 +357,6 @@ export class GraphCanvas {
 
     // ----- edges: thin and quiet, so the nodes read first -----
     ctx.lineCap = "round";
-    const many = this.edges.length > 1500;
     for (const pass of [0, 1]) {
       for (const e of this.edges) {
         if (e.status === "rejected" || !this.shown(e.from) || !this.shown(e.to)) continue;
@@ -362,10 +368,10 @@ export class GraphCanvas {
         const ax = this.sx(a.x), ay = this.sy(a.y), bx = this.sx(b.x), by = this.sy(b.y);
         if (!on(ax, ay, 0) && !on(bx, by, 0) && !(Math.min(ax, bx) < w && Math.max(ax, bx) > 0 && Math.min(ay, by) < h && Math.max(ay, by) > 0)) continue;
         const ordering = e.type === "requires";
-        ctx.globalAlpha = lit ? (lit === "near" ? 0.75 : 0.9) : sel ? 0.07 : (ordering ? 0.3 : 0.22) * (e.status === "inferred" ? 0.8 : 1);
+        ctx.globalAlpha = lit ? (lit === "near" ? 0.65 : 0.85) : sel ? 0.055 : (ordering ? 0.22 : 0.16) * (e.status === "inferred" ? 0.8 : 1);
         ctx.strokeStyle = lit === "pre" ? colors.pre : lit === "dep" ? colors.dep : lit === "near" ? colors.text : colors.edge;
-        ctx.lineWidth = (lit ? 1.7 : e.status === "reviewed" ? 1.1 : 0.8) * Math.max(0.7, Math.min(1.5, Math.sqrt(k)));
-        ctx.setLineDash(e.status === "inferred" && ordering ? [4, 4] : ordering || (many && !lit) ? [] : DASH[e.type]);
+        ctx.lineWidth = (lit ? 1.25 : e.status === "reviewed" ? 0.7 : 0.55) * Math.max(0.7, Math.min(1.5, Math.sqrt(k)));
+        ctx.setLineDash(e.status === "inferred" && ordering ? [4, 4] : ordering ? [] : DASH[e.type]);
         ctx.beginPath();
         ctx.moveTo(ax, ay);
         // A slight bow keeps parallel edges apart and gives the map its woven look.

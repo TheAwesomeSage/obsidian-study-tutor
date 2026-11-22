@@ -761,3 +761,11 @@ test("backward design: synthesis is told the outcome only when there is one, a r
   for (const input of batches.inputs.plan.slice(1)) assert.ok(input.outcome?.task, "a later batch plans against the stated outcome");
   assert.equal(batches.inputs.plan[0].outcome, undefined, "the first batch states it");
 });
+
+test("a proposed deep structure is written only when it is on the list", async () => {
+  const r = await run({ call: fake({ synth: (_input, reply: any) => ({ ...reply, units: reply.units.map((u: any, i: number) => ({ ...u, structure: i === 0 ? "first-order-decay" : "made-up-structure" })) }) }) });
+  const lines = r.topicBody.match(/^structure: .*$/gm) ?? [];
+  assert.deepEqual(lines, ["structure: first-order-decay"], "an invented slug is dropped, never written");
+  const topic = parseTopic(`# Linear maps\n\n${r.topicBody}`);
+  assert.equal(topic.subskills.filter((k) => k.structure).length, 1);
+});

@@ -11,6 +11,7 @@ import type { PolicyCase } from "./policy";
 import { SEAL_SIMILARITY, splitSealed, type SealedSection } from "./sealed";
 import { SessionRecord, sessionMarkdown } from "./session";
 import type { ActivityRecord } from "./configure";
+import { structureOf, type StructureTwin } from "./structures";
 import type { CoursePackage } from "./coursepkg";
 import type { Assessment } from "./engine-assess";
 import { passageWindow, type SourceRevision } from "./compile-sources";
@@ -373,6 +374,34 @@ export class Store {
         topics.set(c.topic, await this.loadTopic(c.topic));
       }
       out.push({ skill: mine.get(e.from)!, id: e.to, name: c.name, topic: c.topicTitle, dir: c.topic, n: c.n, level: states.get(c.topic)!.levels[c.n] ?? null, section: topics.get(c.topic)!.subskills.find((k) => k.n === c.n)?.section ?? "" });
+    }
+    return out;
+  }
+
+  /**
+   * Concepts in other topics with the same deep structure as one of this topic's, matched by the
+   * slug on both cards and nothing else, with the learner's level there.
+   */
+  async structureTwins(dir: string, target: number): Promise<StructureTwin[]> {
+    const topic = await this.loadTopic(dir);
+    const mine = topic.subskills.filter((k) => structureOf(k.structure));
+    if (!mine.length) return [];
+    const out: StructureTwin[] = [];
+    for (const ref of await this.listTopics()) {
+      if (ref.dir === dir) continue;
+      let other: Topic;
+      try {
+        other = await this.loadTopic(ref.dir);
+      } catch {
+        continue;
+      }
+      const theirs = other.subskills.filter((k) => structureOf(k.structure));
+      if (!theirs.length) continue;
+      const state = await this.loadState(ref.dir, target);
+      for (const k of mine) for (const t of theirs) {
+        if (t.structure !== k.structure || !state.concepts[t.n]) continue;
+        out.push({ skill: k.n, structure: k.structure!, id: state.concepts[t.n], name: t.name, topic: other.title, dir: ref.dir, level: state.levels[t.n] ?? null, section: t.section });
+      }
     }
     return out;
   }

@@ -181,6 +181,12 @@ export interface Subskill {
   visual?: { kind: string; reason: string } | null;
   /** The compiled concise worked example, when the card has one. */
   worked?: string;
+  /**
+   * The deep structure this subskill has, as a slug from structures.ts ("structure: first-order-decay").
+   * A concept in another topic with the same one can be a bridge to it. Kept as written; a slug
+   * not on the list is reported on the topic page and matches nothing.
+   */
+  structure?: string;
 }
 
 /** One specification objective from the card's "## Objectives" section. */
@@ -232,7 +238,8 @@ export function parseTopic(md: string): Topic {
     const vis = /^visual:\s*([a-z-]+)\s*(?:[|—–:-]\s*(.*))?$/im.exec(sec);
     const visualKind = vis ? vis[1].toLowerCase() : "";
     // "worked example:" starts a block of lines that runs to the next "key:" line or the end.
-    const worked = /^worked example:\s*\n?([\s\S]*?)(?=^\s*(?:misconceptions|objectives|visual|prerequisites|relations):|(?![\s\S]))/im.exec(sec);
+    const worked = /^worked example:\s*\n?([\s\S]*?)(?=^\s*(?:misconceptions|objectives|visual|prerequisites|relations|structure):|(?![\s\S]))/im.exec(sec);
+    const structure = /^structure:\s*([A-Za-z0-9-]+)\s*$/im.exec(sec);
     subskills.push({
       n: h.n,
       name: h.name,
@@ -243,6 +250,7 @@ export function parseTopic(md: string): Topic {
       objectives: obj ? obj[1].split(/[;,]/).map((x) => x.trim()).filter((x) => x && !/^none$/i.test(x)) : [],
       visual: VISUAL_KINDS.includes(visualKind) && visualKind !== "none" ? { kind: visualKind, reason: (vis![2] ?? "").trim().slice(0, 200) } : null,
       worked: worked ? worked[1].trim() : "",
+      ...(structure ? { structure: structure[1].toLowerCase() } : {}),
     });
   });
   const objectives: Objective[] = [];

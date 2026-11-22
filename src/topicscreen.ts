@@ -9,6 +9,7 @@ import { isActive, misconceptionLine } from "./misconceptions";
 import { ago } from "./overview";
 import { assessmentLine } from "./engine-assess";
 import { PROBE_MIN_SHOWN, type ProbeStatus } from "./probe";
+import { structureOf } from "./structures";
 import type { Screen, TutorView } from "./view";
 import { MODE_INFO, button, chip, emptyState, iconButton, levelPips, panel, pct, progressBar } from "./ui";
 
@@ -125,6 +126,13 @@ export class TopicScreen implements Screen {
       name.createSpan({ text: s.names[n] });
       if (s.focus === n) chip(name, "Focus", "accent");
       if (e.lapse) chip(name, "Slipped", "warn", "alert-triangle");
+      // The deep structure the card names, which links it to concepts in other topics (structures.ts).
+      const slug = topic?.subskills.find((k) => k.n === n)?.structure;
+      if (slug) {
+        const known = structureOf(slug);
+        if (known) chip(name, known.name);
+        else name.createDiv({ cls: "st-meta st-warn-text", text: `structure: ${slug} is not on the list of structures, so it links to nothing.` });
+      }
       const lv = tr.createEl("td", { cls: "st-td-level" });
       levelPips(lv, m.level, s.target, m.backed || m.level === null);
       lv.createSpan({ cls: "st-num", text: m.level === null ? " not placed" : ` ${m.level}` });

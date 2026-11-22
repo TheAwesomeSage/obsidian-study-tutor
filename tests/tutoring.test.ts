@@ -1714,3 +1714,90 @@ test("signals example: with no visual modules the plot part is typed and marked 
   assert.deepEqual([r.attempt?.result, r.attempt?.grading, r.attempt?.assisted], ["correct", "deterministic", true]);
   assert.match(r.attempt!.assistance.join(" "), /solution to an earlier part/);
 });
+
+// ---------- cross-topic transfer: bridges between concepts with the same deep structure ----------
+
+const STRUCT_CARD = (title: string, name: string, structure: string) => [`# ${title}`, "", "## Overview", `About ${name}.`, "", "## Subskills", "", `### 1. ${name}`, "prerequisites: none", `structure: ${structure}`, `- A key claim about ${name}.`, ""].join("\n");
+
+async function twoTopics(twinLevel: number | null, structure = "first-order-decay") {
+  const t = await setup();
+  const nuclear = await t.store.saveCompiled({ title: "Nuclear physics", fm: { subject: "none" }, topicBody: STRUCT_CARD("Nuclear physics", "Radioactive decay", "first-order-decay"), questionsBody: "", target: 4 });
+  const circuits = await t.store.saveCompiled({ title: "Circuits", fm: { subject: "none" }, topicBody: STRUCT_CARD("Circuits", "RC charging", structure), questionsBody: "", target: 4 });
+  const ns = await t.store.loadState(nuclear, 4);
+  ns.levels = { 1: twinLevel };
+  await t.store.saveState(nuclear, ns);
+  return { ...t, nuclear, circuits, twinId: ns.concepts[1] };
+}
+
+test("structures: a slug on the card is read, a twin is matched by slug alone, and an unknown slug matches nothing", async () => {
+  const card = F.parseTopic(STRUCT_CARD("Circuits", "RC charging", "First-Order-Decay"));
+  assert.equal(card.subskills[0].structure, "first-order-decay");
+  const t = await twoTopics(3);
+  const twins = await t.store.structureTwins(t.circuits, 4);
+  assert.deepEqual(twins.map((x) => [x.skill, x.name, x.topic, x.level, x.structure]), [[1, "Radioactive decay", "Nuclear physics", 3, "first-order-decay"]]);
+  assert.deepEqual(await t.store.structureTwins(t.dir, 4), [], "a topic with no structure lines has no twins");
+  const u = await twoTopics(3, "made-up-structure");
+  assert.deepEqual(await u.store.structureTwins(u.circuits, 4), [], "a slug not on the list links to nothing");
+  const { STRUCTURES } = await import("../src/structures");
+  const compile = await import("node:fs").then((fs) => fs.readFileSync("skills/compile.md", "utf8"));
+  for (const s of STRUCTURES) assert.ok(compile.includes(s.slug), `compile.md lists ${s.slug}`);
+});
+
+test("bridge: a new concept whose twin elsewhere is held is bridged from it first, by code, and the assessor marks the answer", async () => {
+  const t = await twoTopics(3);
+  const chat = await t.store.newChat(t.circuits, "Circuits", "auto", new Date(2026, 10, 15, 10, 0));
+  let r = await t.engine.study(t.circuits, chat, "");
+  assert.equal(r.decision?.action, "bridge");
+  assert.equal(r.decision?.bridgeFrom, t.twinId);
+  assert.match(r.reply, /\*\*Bridge from Nuclear physics\*\*[\s\S]*Radioactive decay[\s\S]*RC charging/);
+  assert.equal(t.calls.length, 0, "the bridge question is written by code");
+  // Help is refused: the answer comes before any teaching.
+  r = await t.engine.study(t.circuits, chat, "can you give me a hint?");
+  assert.match(r.reply, /no help with it/);
+  assert.equal(t.calls.length, 0);
+  t.settings.compileModel = "assessor-model";
+  t.replies.push(JSON.stringify({ grade: "good", feedback: "The charge plays the role of the undecayed nuclei.", reasoning: { result: "correct", method: "sound", certainty: "complete" } }));
+  r = await t.engine.study(t.circuits, chat, "The capacitor's missing charge is like the undecayed nuclei: both fall by the same fraction each time constant. RC is the mean life. It breaks if the source voltage changes.");
+  const a = r.attempt!;
+  assert.deepEqual([a.result, a.taskType, a.transferFrom, a.assisted, a.questionId, a.activity], ["correct", "transfer", t.twinId, false, `bridge:${t.twinId}`, "bridge"]);
+  assert.equal(t.calls.at(-1).model, "assessor-model", "the compile model, as the separate assessor");
+  assert.equal(t.calls.at(-1).effort, "high");
+  assert.match(t.calls.at(-1).input, /Rubric: maps the corresponding parts/);
+  assert.match(r.reply, /Marked by the separate assessor[\s\S]*Where the comparison breaks/);
+  const ch = await t.store.loadChat(chat);
+  assert.deepEqual([ch.fm.bridge, ch.fm.await_continue], ["", "yes"]);
+  // Once answered, the bridge is not asked again: the concept is taught as usual.
+  const next = await t.engine.plan(t.circuits, ch, "auto", "");
+  assert.notEqual(next.action, "bridge");
+  const saved = (await t.store.loadState(t.circuits, 4)).attempts.find((x) => x.transferFrom);
+  assert.equal(saved?.transferFrom, t.twinId, "transferFrom survives a save and reload");
+});
+
+test("bridge: none while the twin is not yet held, none in Learn mode, and a skip goes straight to the lesson", async () => {
+  const weak = await twoTopics(2);
+  const c1 = await weak.store.newChat(weak.circuits, "Circuits", "auto", new Date(2026, 10, 15, 10, 0));
+  assert.notEqual((await weak.engine.plan(weak.circuits, await weak.store.loadChat(c1), "auto", "")).action, "bridge", "a twin at level 2 is not something to build from");
+  const t = await twoTopics(4);
+  const learn = await t.store.newChat(t.circuits, "Circuits", "teach", new Date(2026, 10, 15, 10, 0));
+  assert.notEqual((await t.engine.plan(t.circuits, await t.store.loadChat(learn), "teach", "")).action, "bridge");
+  const chat = await t.store.newChat(t.circuits, "Circuits", "auto", new Date(2026, 10, 15, 10, 1));
+  await t.engine.study(t.circuits, chat, "");
+  const r = await t.engine.study(t.circuits, chat, "skip");
+  assert.deepEqual([r.attempt?.result, r.attempt?.transferFrom], ["skipped", t.twinId]);
+  assert.equal(t.calls.length, 0, "a skip is not marked");
+  assert.match(r.reply, /\*\*Skipped\.\*\*[\s\S]*Continue\*\* for the lesson on RC charging/);
+});
+
+test("time to independence: attempts and days to the first unaided success, split by whether a bridge was answered", async () => {
+  const { timeToIndependence, bridgeComparison } = await import("../src/structures");
+  const at = (id: string, day: string, over: Partial<Attempt> = {}) => attempt({ id, skill: 1, timestamp: `${day}T10:00:00.000Z`, ...over });
+  const bridged = [at("b", "2026-11-01", { transferFrom: "nuclear/decay", result: "partial" }), at("c", "2026-11-02", { result: "correct" }), at("d", "2026-11-05", { result: "correct" })];
+  const plain = [at("e", "2026-11-01"), at("f", "2026-11-03"), at("g", "2026-11-04"), at("h", "2026-11-06", { result: "correct" })];
+  const a = timeToIndependence(bridged, 1, "2026-11-02");
+  const b = timeToIndependence(plain, 1, "2026-11-06");
+  assert.deepEqual(a, { attempts: 2, days: 1, bridgedFrom: "nuclear/decay" });
+  assert.deepEqual(b, { attempts: 4, days: 5, bridgedFrom: "" });
+  assert.equal(timeToIndependence(plain, 1, null), null, "nothing to measure before an unaided success");
+  assert.deepEqual(bridgeComparison([a, b, null]), { bridged: { n: 1, attempts: 2, days: 1 }, unbridged: { n: 1, attempts: 4, days: 5 } });
+  assert.equal(normaliseAttempt({ ...bridged[0] } as any)!.transferFrom, "nuclear/decay");
+});

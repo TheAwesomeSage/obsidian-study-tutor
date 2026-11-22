@@ -44,6 +44,7 @@ With RC = 1 s and a unit step in, V(s) = 1/(s(s + 1)) = 1/s − 1/(s + 1), so v(
 
 ### 3. First-order systems and the time constant
 prerequisites: 1, 2
+structure: first-order-decay
 - The step response of a first-order low-pass filter is v(t) = 1 − e^{−t/τ} for t ≥ 0, with τ = RC.
 - It starts at 0, rises with initial slope 1/τ, reaches about 63% at t = τ and about 95% at t = 3τ, and settles at the input's level.
 - The cutoff frequency is ω_c = 1/τ rad/s, where the gain has fallen to 1/√2.

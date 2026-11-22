@@ -1,4 +1,5 @@
 import { addUsage, zeroUsage, type CallOptions, type CallResult } from "./claude";
+import { STRUCTURES, structureOf } from "./structures";
 import { canonicalPage, researchLimits, type ResearchLimits, type ResearchProvider } from "./compile-research";
 import { digest, excerpt, indexSource, passageWindow, rankPassages, type SourceInput, type SourcePassage, type SourceRevision } from "./compile-sources";
 import { parseQuestions, type Question, type SourceMode } from "./formats";
@@ -121,6 +122,8 @@ type DraftQuestion = Pick<Question, "question" | "options" | "answer" | "explana
 type DraftUnit = {
   objective: string; name: string; prerequisites: string[]; claims: string[]; example: string; misconceptions: string[];
   details: string; passages: string[]; questions: DraftQuestion[]; visualKind: string; visualReason: string;
+  /** A deep structure from structures.ts, or empty. Optional, so a reply from before it existed still passes. */
+  structure?: string;
 };
 type Synthesis = { overview: string; subject: string; units: DraftUnit[] };
 const VERSION = "2026-11-staged-2";
@@ -152,12 +155,15 @@ const REVIEW = obj({ fetch: arr(obj({ objective: str, url: str }), 6), searches:
 const DRAFT_QUESTION = obj({ type: { ...str, enum: ["short", "mcq", "open", "code"] }, question: str, options: arr(str, 4), answer: str, explanation: str, rubric: str, task: str, family: str, difficulty: integer, generator: str });
 // `code` is optional, so a reply written before coding exercises existed still passes.
 const DRAFT_QUESTION_CODE: Schema = { ...DRAFT_QUESTION, properties: { ...(DRAFT_QUESTION.properties as Record<string, Schema>), code: str } };
-const SYNTHESIS = obj({ overview: str, subject: str, units: arr(obj({
+const UNIT = obj({
   objective: str, name: str, prerequisites: arr(str, 6), claims: arr(str, 6), example: str, misconceptions: arr(str, 4), details: str, passages: arr(str, 8),
   // 2–3 aligned questions and one probe, with one to spare.
   questions: arr(DRAFT_QUESTION_CODE, 5),
   visualKind: str, visualReason: str,
-}), 6) });
+});
+// `structure` is optional, like `code`: only a slug on the list, or empty.
+const UNIT_WITH_STRUCTURE: Schema = { ...UNIT, properties: { ...(UNIT.properties as Record<string, Schema>), structure: { ...str, enum: ["", ...STRUCTURES.map((x) => x.slug)] } } };
+const SYNTHESIS = obj({ overview: str, subject: str, units: arr(UNIT_WITH_STRUCTURE, 6) });
 const AUDIT = obj({ rows: arr(obj({ objective: str, sources: arr(str, 8), teaching: bool, questions: arr(str, 24), gap: str }), 12) });
 const AUDIT_PROMPT = `Audit every supplied objective by its exact ID. Sources must support its explanation; a title, mere mention or syllabus clause is not supporting evidence. An uncertain selector flag means inspect the original text yourself. Mark teaching true if a supplied lesson genuinely teaches the objective with a usable worked example or application and any needed assumptions. List the IDs of questions aligned to that objective and answerable from that lesson; a lesson's probes are questions too, so judge each probe by the same test and list it when it passes. If all three are sufficient leave gap empty. ${REFERENCE_RULE}`;
 
@@ -651,7 +657,7 @@ export async function compileCourse(p: {
   const teachable = inventory.filter(o => !o.unmapped);
   const cohorts = groups(teachable, OBJECTIVES_PER_SYNTHESIS);
   const prerequisites = new Map<number, number[]>();
-  const synthPrompt = `Write structured teaching units, one per supplied objective that you can teach. Use the exact supplied objective ID in each unit. Keep claims and the compact worked example concise; use details for the full lesson, including definitions, assumptions, and a worked example with reasoning. Reference only verified passage IDs from that objective's packet. If a source is insufficient, leave it uncited. Write 2–3 aligned questions with an answer and explanation; use a rubric for open questions, an empty options array for other than multiple choice, and one fresh application when useful. Then write exactly one more question per unit with task "probe": a fresh problem in a setting unlike every other question of the unit, the transfer one included, still answerable from the lesson. The app seals it away for cold probes, so the learner never practises it. Any other task is a short label such as "application" or "transfer"; difficulty is 1–5. ${GENERATOR_RULE} ${CODE_RULE} Choose visualKind only if an existing diagram, simulation or game helps; otherwise use the empty string. List prerequisites by objective ID from this group or earlier topics only when required. Omit outside material. ${REFERENCE_RULE}\n\nUse pedagogical guidance from the saved compilation skill where compatible. Its legacy output formatting does not apply:\n${p.skill.split(/^FORMAT[ \t]*$/m)[0].slice(0, 1800)}`;
+  const synthPrompt = `Write structured teaching units, one per supplied objective that you can teach. Use the exact supplied objective ID in each unit. Keep claims and the compact worked example concise; use details for the full lesson, including definitions, assumptions, and a worked example with reasoning. Reference only verified passage IDs from that objective's packet. If a source is insufficient, leave it uncited. Write 2–3 aligned questions with an answer and explanation; use a rubric for open questions, an empty options array for other than multiple choice, and one fresh application when useful. Then write exactly one more question per unit with task "probe": a fresh problem in a setting unlike every other question of the unit, the transfer one included, still answerable from the lesson. The app seals it away for cold probes, so the learner never practises it. Any other task is a short label such as "application" or "transfer"; difficulty is 1–5. ${GENERATOR_RULE} ${CODE_RULE} Choose visualKind only if an existing diagram, simulation or game helps; otherwise use the empty string. Set structure only when the unit is clearly a case of one of these deep structures, in any subject: ${STRUCTURES.map((x) => x.slug).join(", ")}; otherwise the empty string. It links the unit to concepts with the same structure in other topics, so a wrong one teaches a false analogy. List prerequisites by objective ID from this group or earlier topics only when required. Omit outside material. ${REFERENCE_RULE}\n\nUse pedagogical guidance from the saved compilation skill where compatible. Its legacy output formatting does not apply:\n${p.skill.split(/^FORMAT[ \t]*$/m)[0].slice(0, 1800)}`;
   // Told only when there is an outcome, so courses without one keep their synthesis checkpoints.
   const aimedPrompt = outcome ? `${synthPrompt}\n\nThe supplied outcome is the task the whole course builds to. It is the learner's goal, not a source: write each worked example and the transfer question so they move toward it, and never cite it.` : synthPrompt;
   metrics.groups = lessonGroups.total = cohorts.length;
@@ -699,6 +705,8 @@ export async function compileCourse(p: {
       const citations = unique(cited.map(x => x.url ? `[${x.title.replace(/[\[\]]/g, "")}](${x.url})` : `[[${(x.path?.replace(/\.md$/, "") || x.title).replace(/[\[\]|]/g, "")}]]`));
       sections.push([`### ${n}. ${inline(u.name, 100)}`, `prerequisites: ${prereqs.join(", ") || "none"}`, `objectives: ${u.objective}`,
         ...(["diagram", "simulation", "game"].includes(u.visualKind) && u.visualReason.trim() ? [`visual: ${u.visualKind} | ${inline(u.visualReason, 150)}`] : []),
+        // Only a slug on the list is written: the model's proposal is checked here, never taken as given.
+        ...(structureOf(u.structure) ? [`structure: ${structureOf(u.structure)!.slug}`] : []),
         ...u.claims.filter(x => x.trim()).map(x => `- ${inline(x, 330)}`), ...(citations.length ? [`- Sources: ${citations.join(", ")}`] : []),
         ...(u.misconceptions.length ? ["misconceptions:", ...u.misconceptions.map(x => `- ${inline(x)}`)] : []),
         ...(u.example.trim() ? ["worked example:", inline(u.example, 720)] : []),

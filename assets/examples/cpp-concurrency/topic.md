@@ -32,6 +32,7 @@ Two threads each run `x++` once on `int x = 0`. One interleaving: T1 reads 0, T2
 
 ### 2. Mutexes and condition variables
 prerequisites: 1
+structure: mutual-exclusion
 - A std::mutex makes the code between lock and unlock run in one thread at a time; unlocking happens-before the next lock of the same mutex.
 - A condition variable waits for a condition under a mutex. The wait goes in a loop on the condition, because wake-ups can be spurious and another thread may take the item first.
 - The condition must change while the mutex is held, or a notify can arrive between the check and the wait and be lost.

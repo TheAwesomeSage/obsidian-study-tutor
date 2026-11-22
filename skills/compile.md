@@ -27,6 +27,7 @@ prerequisites: <comma-separated subskill numbers, or none>
 relations: <optional; other links to subskills, such as: supports 4; contrasts_with 2; derived_from 1; applies_to 6>
 objectives: <the objective ids this subskill covers, such as O1, O3>
 visual: <optional; diagram, simulation or game | why manipulating or seeing it helps, in under 15 words>
+structure: <optional; one slug from the list of deep structures below>
 - <a key claim, definition or technique on one line, LaTeX in $...$> ([[Note name]])
 - <3 to 7 such lines>
 misconceptions:
@@ -64,6 +65,7 @@ RULES
 - List every objective under "## Objectives", and give every subskill an "objectives:" line. Every objective must be covered by at least one subskill. If something cannot be covered from the material, still list it, and leave it uncovered: the app shows the gap.
 - "visual:" is optional. Add it only where a diagram, a manipulable simulation or a short game would clearly help with this subskill (a changing quantity, a spatial relationship, tracing execution over time). It records eligibility only; nothing is built at compile time.
 - "prerequisites:" lists only the subskills this one cannot be learned without. Do not simply list the one before it: the app draws these as a graph and uses them to decide what to study first, so a chain where every subskill needs the previous one is right only when that is really so. Two subskills may share a prerequisite, and a subskill may have none.
+- "structure:" is optional. Add it only when the subskill is clearly a case of one of these deep structures, whatever the subject: first-order-decay, bounded-buffer, negative-feedback, positive-feedback, superposition, conservation, equilibrium, divide-and-conquer, rate-and-accumulation, resonance, mutual-exclusion, trade-off-optimum. Use the slug exactly; never invent one. It links the subskill to concepts with the same structure in other topics, so a wrong one teaches a false analogy: leave it out when unsure.
 - "relations:" is optional and never orders study. Use it only where the link is real: "supports N" (knowing this helps with N without being needed for it), "applies_to N" (this is used in the application N), "contrasts_with N" (learners confuse this with N), "derived_from N" (this is derived mathematically from N). Leave the line out when there is nothing to say.
 - Write 8 questions per subskill: three mcq whose wrong options are real misconceptions, three short, and two open that ask for a reason, a prediction or an error to find. Order them from easiest to hardest within the subskill, and make no two test the same fact.
 - Group each subskill's questions into at least three families. Make at least one family "task: transfer": an unfamiliar setting for the same idea. The app keeps those for assessment. Also write one more family per subskill with "task: probe": a fresh problem in a setting unlike every other family, the transfer one included. The app seals it away for cold probes, so the learner never practises it.

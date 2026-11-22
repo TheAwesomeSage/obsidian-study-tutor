@@ -6,6 +6,16 @@ import * as F from "../src/formats";
 import { joinCourse, neighbourhood, syncTopicGraph } from "../src/course";
 import { LayoutEdge, LayoutNode, bounds, depths, layoutGraph } from "../src/graphlayout";
 import { ago, recommend, topicInfo } from "../src/overview";
+import { topicColorSlot } from "../src/graphcanvas";
+
+test("topic colours are stable by identity rather than topic ordering or count", () => {
+  const topics = ["Tutor/Algebra", "Tutor/Physics", "Tutor/Biology", "Tutor/中文"];
+  const colors = Object.fromEntries(topics.map(t => [t, topicColorSlot(t)]));
+  for (const t of ["New topic", ...topics].reverse()) {
+    assert.ok(topicColorSlot(t) >= 1 && topicColorSlot(t) <= 6);
+    if (t in colors) assert.equal(topicColorSlot(t), colors[t]);
+  }
+});
 
 /** A synthetic course: `topics` clusters of `size` concepts, each a small prerequisite tree, with a few links between clusters. */
 function course(topics: number, size: number): { nodes: LayoutNode[]; edges: LayoutEdge[] } {

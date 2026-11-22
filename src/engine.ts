@@ -40,6 +40,8 @@ import * as compileFns from "./engine-compile";
 import * as expansionFns from "./engine-expansion";
 import * as markFns from "./engine-marks";
 import * as probeFns from "./engine-probe";
+import * as bridgeFns from "./engine-bridge";
+import { BRIDGE_FROM_LEVEL, type StructureTwin } from "./structures";
 import * as askFns from "./engine-ask";
 import * as assessFns from "./engine-assess";
 import { probeStatus as probeStatusOf, type ProbeStatus } from "./probe";
@@ -179,7 +181,7 @@ export class Engine {
   // ---------- the study policy ----------
 
   /** Everything the policy looks at, gathered into one plain object that can be logged and replayed. */
-  private policyInput(p: { mode: Mode; state: LearnerState; pre: Prereqs; chat: Chat; session: SessionRecord; intent: Intent; questions: Question[]; external: ExternalPrereq[]; topic?: Topic }): PolicyInput {
+  private policyInput(p: { mode: Mode; state: LearnerState; pre: Prereqs; chat: Chat; session: SessionRecord; intent: Intent; questions: Question[]; external: ExternalPrereq[]; topic?: Topic; twins?: StructureTwin[] }): PolicyInput {
     const s = this.settings();
     const { state } = p;
     const today = this.today();
@@ -190,6 +192,12 @@ export class Engine {
     // Exam metadata scales priority (bounded, policy.ts); BKT rides along in shadow and is only logged.
     const exam = p.topic ? examSignals(p.topic, today) : {};
     const options = mcqOptions(p.questions);
+    // A twin the learner can do on their own is a bridge, until a bridge has been answered on this concept.
+    const bridgeFor = (n: number): { bridge?: { id: string; name: string; topic: string } } => {
+      if (state.attempts.some((a) => a.skill === n && a.transferFrom)) return {};
+      const t = (p.twins ?? []).find((x) => x.skill === n && (x.level ?? 0) >= BRIDGE_FROM_LEVEL);
+      return t ? { bridge: { id: t.id, name: t.name, topic: t.topic } } : {};
+    };
     const skills = Object.keys(state.names).map(Number).sort((a, b) => a - b).map((n) => {
       const m = mastery(state, n);
       const e = m.evidence;
@@ -217,6 +225,7 @@ export class Engine {
         nextCheck: e.nextCheck,
         ...(e.recheck ? { recheck: e.recheck.why } : {}),
         transferReady: !e.firstIndependentDay || e.firstIndependentDay < today,
+        ...bridgeFor(n),
         needsTeachBack: !e.teachBack,
         needsEdgeCase: !e.edgeCase,
         ...(unasked.length ? { uncovered: unasked.length, uncoveredNames: unasked.slice(0, 2).map((i) => ideaLabel(i, 60)) } : {}),
@@ -249,7 +258,7 @@ export class Engine {
     const state = await this.store.loadState(dir, s.targetLevel);
     const chat: Chat = { fm: {}, summary: "", messages: [] };
     const questions = await this.store.loadQuestions(dir);
-    const input = this.policyInput({ mode: "auto", state, pre: await this.store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions, external: await this.store.externalPrereqs(dir, state.target), topic });
+    const input = this.policyInput({ mode: "auto", state, pre: await this.store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions, external: await this.store.externalPrereqs(dir, state.target), topic, twins: await this.store.structureTwins(dir, state.target) });
     const decision = decide(input);
     const ns = Object.keys(state.names).map(Number);
     const atTarget = ns.length > 0 && input.skills.every((k) => (k.level ?? 0) >= state.target && (k.level ?? 0) <= k.supported && !k.checkDue && !k.uncovered);
@@ -278,6 +287,11 @@ export class Engine {
         const placed = await this.placementTurn(dir, chatPath, message, opts);
         if (placed) return placed;
       }
+      // A bridge question is open: the assessor marks its answer.
+      if (fmStr(chat.fm, "bridge")) {
+        const bridged = await bridgeFns.bridgeTurn(this, dir, chatPath, message, opts);
+        if (bridged) return bridged;
+      }
       // A bank question the guide asked is still open: its answer is marked by code.
       if (fmStr(chat.fm, "card") && s.bankQuiz !== false) return this.quizTurn(dir, chatPath, message, { ...opts, adaptive: true });
       if (!message.trim() && chat.messages[chat.messages.length - 1]?.role !== "you") {
@@ -287,6 +301,7 @@ export class Engine {
           if (placed) return { ...placed, decision: plan };
         }
         if (plan.local === "bank" && plan.focus !== null) return this.quizTurn(dir, chatPath, "", { ...opts, adaptive: true, decision: plan });
+        if (plan.local === "bridge") return bridgeFns.askBridge(this, dir, chatPath, plan);
       }
     }
     return this.turn(dir, chatPath, message, opts);
@@ -299,7 +314,7 @@ export class Engine {
     const state = await this.store.loadState(dir, s.targetLevel);
     const session = sessionFor(chat, state, mode);
     return decide(
-      this.policyInput({ mode, state, pre: await this.store.prereqs(dir, topic), chat, session, intent: readIntent(message, !!session.pendingQuestion), questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target), topic }),
+      this.policyInput({ mode, state, pre: await this.store.prereqs(dir, topic), chat, session, intent: readIntent(message, !!session.pendingQuestion), questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target), topic, twins: await this.store.structureTwins(dir, state.target) }),
     );
   }
 
@@ -310,7 +325,7 @@ export class Engine {
     const state = await this.store.loadState(dir, s.targetLevel);
     if (n in state.names) state.focus = n;
     const chat: Chat = { fm: {}, summary: "", messages: [] };
-    const input = this.policyInput({ mode: "auto", state, pre: await this.store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target), topic });
+    const input = this.policyInput({ mode: "auto", state, pre: await this.store.prereqs(dir, topic), chat, session: sessionFor(chat, state, "auto"), intent: "none", questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target), topic, twins: await this.store.structureTwins(dir, state.target) });
     input.placementReady = false;
     return decide(input);
   }
@@ -418,7 +433,7 @@ export class Engine {
     const external = await this.store.externalPrereqs(dir, state.target);
     let decision: Decision | null = null;
     if (mode === "auto" || mode === "teach") {
-      const input = this.policyInput({ mode, state, pre, chat, session, intent, questions: await this.store.loadQuestions(dir), external, topic });
+      const input = this.policyInput({ mode, state, pre, chat, session, intent, questions: await this.store.loadQuestions(dir), external, topic, twins: await this.store.structureTwins(dir, state.target) });
       decision = decide(input);
       if (decision.focus !== null && decision.focus in state.names && decision.focus !== state.focus) {
         state.focus = decision.focus;
@@ -430,6 +445,7 @@ export class Engine {
       if (decision.action === "diagnose-prerequisite" && decision.assesses) setPrereqCheck(chat, decision.assesses, "asked");
       else if (decision.action === "diagnose-prerequisite" && decision.focus !== null && external.some((e) => e.skill === decision!.focus && !e.id)) chat.fm.checked = [...new Set([...fmList(chat.fm, "checked"), String(decision.focus)])];
       void this.store.logDecision({ t: now, topic: topic.title, input, decision: { version: POLICY_VERSION, action: decision.action, focus: decision.focus, local: decision.local } });
+      if (decision.action === "bridge") return bridgeFns.askBridge(this, dir, chatPath, decision);
     } else {
       session.action = intent === "attempt" ? "check" : intent === "hint" ? "hint" : "continue";
       session.reason = `${MODE_NAME[mode]} mode, chosen by you.`;
@@ -972,7 +988,7 @@ export class Engine {
   async planFrom(dir: string, chat: Chat, state: LearnerState, mode: Mode, continuing: number | null): Promise<Decision> {
     const topic = await this.store.loadTopic(dir);
     const session = { ...sessionFor(chat, state, mode), pendingQuestion: "", completedStep: true };
-    const input = this.policyInput({ mode, state, pre: await this.store.prereqs(dir, topic), chat, session, intent: "none", questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target), topic });
+    const input = this.policyInput({ mode, state, pre: await this.store.prereqs(dir, topic), chat, session, intent: "none", questions: await this.store.loadQuestions(dir), external: await this.store.externalPrereqs(dir, state.target), topic, twins: await this.store.structureTwins(dir, state.target) });
     input.continuing = continuing;
     const decision = decide(input);
     void this.store.logDecision({ t: new Date().toISOString(), topic: topic.title, input, decision: { version: POLICY_VERSION, action: decision.action, focus: decision.focus, local: decision.local } });
