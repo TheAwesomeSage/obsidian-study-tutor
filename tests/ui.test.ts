@@ -117,6 +117,37 @@ test("graph layout choices and each layout's coordinates survive plugin reload",
   assert.deepEqual(plugin.data.graphLayout,positions.connected);
 });
 
+test("FSRS is default for fresh and missing settings while explicit scheduler and handoff choices survive", async()=>{
+  const cases = [
+    {saved:null,id:"fsrs",external:false},
+    {saved:{settings:{},settingsVersion:3},id:"fsrs",external:false},
+    {saved:{settings:{scheduler:"invalid"},settingsVersion:3},id:"fsrs",external:false},
+    {saved:{settings:{scheduler:"sm2",useSpacedRepetition:false},settingsVersion:3},id:"sm2",external:false},
+    {saved:{settings:{scheduler:"fsrs",useSpacedRepetition:true,desiredRetention:.85},settingsVersion:3},id:"fsrs",external:true},
+  ];
+  for (const item of cases) {
+    const fs=new MemFS(),leaves:any[]=[],opened:string[]=[];let plugin:any=null;
+    const app=makeApp(fs,leaves,opened,()=>plugin);
+    app.plugins={enabledPlugins:new Set(["obsidian-spaced-repetition"])};
+    plugin=new (StudyTutorPlugin as any)(app,{id:"study-tutor"});
+    if(item.saved) await plugin.saveData(item.saved);
+    await plugin.onload();
+    assert.equal(plugin.opts.scheduler,item.id);
+    assert.equal(plugin.schedulerChoice().id,item.id);
+    assert.equal(plugin.usesSr(),item.external,"external review is an explicit choice even when its plugin is enabled");
+    assert.equal(plugin.schedulerChoice().retention,item.external?.85:.9);
+    const out=parseCompileOutput(COMPILED);
+    const dir=await plugin.store.saveCompiled({title:"Linear maps",fm:{},topicBody:out.topicBody,questionsBody:out.questionsBody,target:4});
+    const state=await plugin.store.loadState(dir,4);
+    assert.equal(state.scheduler?.id ?? "sm2",item.id,"new topics use the configured scheduler");
+    const tab=plugin.settingTabs[0];tab.display();
+    const row=$$(tab.containerEl,".setting-item").find((el:any)=>/^Card scheduler/.test(el.textContent));
+    assert.match($(row,'option[value="fsrs"]').textContent,/FSRS-6.*default/);
+    assert.equal($(row,'option[value="sm2"]').textContent,"SM-2");
+    plugin.onunload();
+  }
+});
+
 test("home, study, review, topic page and graph work together from the normal entry points", async () => {
   const fs = new MemFS();
   const leaves: any[] = [];
@@ -529,6 +560,8 @@ test("home, study, review, topic page and graph work together from the normal en
   const ran: string[] = [];
   app.plugins = { enabledPlugins: new Set(["obsidian-spaced-repetition"]) };
   app.commands = { executeCommandById: (id: string) => (ran.push(id), true) };
+  assert.equal(plugin.usesSr(), false, "installing Spaced Repetition does not override the built-in FSRS default");
+  plugin.opts.useSpacedRepetition = true;
   assert.equal(plugin.usesSr(), true);
   // Pretend that plugin has already reviewed the first card and scheduled it for a past date.
   const note = await fs.read(`${dir}/flashcards.md`);
