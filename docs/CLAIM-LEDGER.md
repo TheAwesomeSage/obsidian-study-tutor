@@ -20,6 +20,7 @@ Review date: 2026-11-21. Sources below support particular design choices, not th
 | C14 Learned sequencing | https://educationaldatamining.org/edm2024/proceedings/2024.EDM-long-papers.21/index.html | 2024; logic tutor experiment | Reduced training time vs all-practice; reported random-skip comparisons did not establish superiority | Compare learned policies with simple baselines and delayed outcomes |
 | C15 Contextual bandit sequencing | https://arxiv.org/abs/2207.14003 | 2022; trained on thousands of student trajectories and trial | Completion/engagement differ from retained understanding | Future bounded experiment with action-probability logs |
 | C16 Checkpoints, objective versions, holdouts, planning | src/compiler.ts; src/objective-version.ts; src/sealed.ts; src/probe.ts; docs/PILOT.md | Repository architecture / engineering proposals | Code existence and test success are not human learning results | Preserve provenance, migration and separate evaluation; measure end-to-end costs |
+| C17 Local neural embedding retrieval | https://docs.ollama.com/api/embed and https://docs.ollama.com/capabilities/embeddings | Living primary API documentation; checked 2026-11-22 | Supports batch vectors and cosine retrieval, not measured teaching effectiveness. Cutoff, latency and real-note relevance require evaluation. | Optional bounded local search over cited passages, content/model-aware in-memory caching, exact quotations and keyword fallback; never grading or mastery updates. |
 
 ## Maintenance
 

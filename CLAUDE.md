@@ -10,7 +10,7 @@ Desktop-only Obsidian plugin in strict TypeScript, bundled by esbuild into `main
 - `test:live`, `test:features`, `test:session`, `test:compile-live`, `bench:qwen` call a real model and spend usage: run them only when asked.
 
 ## Hard rules
-- Done means `npm run build` and `npm test` pass. CI runs both on Windows and Ubuntu, and the browser tests on Windows.
+- Validate changes with the build/type check and focused tests for the functionality changed. Do not rerun the full suite for routine rebuilds; broaden coverage when shared changes, failures or integration risk justify it. CI still runs the full build and unit suite on Windows and Ubuntu, and browser tests on Windows.
 - `main.js`, `player.js`, `plot.js`, `release/`, `vendor/`, `tests/out/` are build output: edit `src/`, never the bundles.
 - Model replies and researched pages must never load anything from outside the vault. Pass that text through `src/safemd.ts` before it is saved or rendered.
 - Works on Windows and Linux: no case-only path differences, build paths with `path` joins.

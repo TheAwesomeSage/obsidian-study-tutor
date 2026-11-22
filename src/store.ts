@@ -1098,6 +1098,17 @@ export class Store {
   }
 
   /** Writes a note under the tutor folder and returns its path. */
+  async loadCodeWalkthrough(key: string): Promise<unknown> {
+    if (!/^[a-f0-9]+$/i.test(key)) return null;
+    try { return JSON.parse(await this.fs.read(`${this.root}/_cache/code/${key}.json`)); } catch { return null; }
+  }
+
+  async saveCodeWalkthrough(key: string, plan: unknown): Promise<void> {
+    if (!/^[a-f0-9]+$/i.test(key)) throw new Error("Invalid code walkthrough cache key.");
+    await this.writeFile(`${this.root}/_cache/code/${key}.json`, JSON.stringify(plan));
+  }
+
+  /** Writes a note under the tutor folder and returns its path. */
   async writeNote(rel: string, text: string): Promise<string> {
     const p = `${this.root}/${rel}`;
     await this.writeFile(p, text);

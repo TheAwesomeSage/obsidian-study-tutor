@@ -14,6 +14,8 @@ import { parseCompileOutput, parseState } from "../src/formats";
 import { MemFS } from "./memfs";
 import { FIXTURES } from "../src/visuals/fixtures";
 import { dropRemote } from "../src/safemd";
+import {attachmentMaterial, chooseAttachment} from "../src/attachments";
+import {mountCodeWorkspace} from '../src/codeworkspace';
 
 const COMPILED = `# Linear maps
 subject: linear-algebra
@@ -187,15 +189,18 @@ test("home, study, review, topic page and graph work together from the normal en
   await tick(40);
   assert.equal(root.getAttribute("data-screen"), "study");
   assert.match($(root, ".st-tail .st-empty").textContent, /Adaptive · Linear maps/);
-  const conf = () => $$(root, ".st-conf-opt");
-  const confOn = () => conf().filter((b: any) => b.getAttribute("aria-checked") === "true").map((b: any) => b.textContent);
-  const confPick = (label: string) => conf().find((b: any) => b.textContent === label).click();
-  assert.deepEqual(conf().map((b: any) => b.textContent), ["None", "Low", "Medium", "High", "Very high"], "confidence is five discrete points");
-  assert.deepEqual(confOn(), [], "confidence is unset until one is chosen");
-  assert.equal($(root, ".st-conf-points").getAttribute("role"), "radiogroup");
+  const confOn = () => $(root,".st-conf").classList.contains("is-set")?[$(root,".st-conf-slider").getAttribute("aria-valuetext")]:[];
+  const confPick = (label: string) => {const slider=$(root,".st-conf-slider");slider.value=String(["None","Low","Medium","High","Very high"].indexOf(label));fire(slider,"input");};
+  assert.equal($$(root,".st-conf-opt").length,0,"confidence labels are no longer separate buttons");
+  assert.deepEqual(confOn(), ["Medium"], "new answers default to 50% confidence");
+  assert.equal($(root, ".st-conf-slider").step, "1");
   const confSlider = () => $(root, ".st-conf-slider");
   assert.equal(confSlider().type, "range");
-  assert.match(confSlider().getAttribute("aria-valuetext"), /Not set/);
+  assert.equal(confSlider().getAttribute("aria-valuetext"), "Medium");
+  assert.equal(confSlider().hasAttribute("title"), false, "no native confidence tooltip");
+  assert.equal(confSlider().hasAttribute("aria-label"), false, "Obsidian must not add a hover tooltip");
+  assert.equal($(root, ".st-attach").disabled, false, "the attachment picker works with no active note");
+  assert.equal($(root, ".st-conf-label").htmlFor, confSlider().id, "the visible label still names the slider accessibly");
   button(root, "Start session").click();
   await tick(80);
   assert.match($(root, ".st-messages").textContent, /Is \$f\(x\)=x\+1\$ linear\?/);
@@ -210,7 +215,7 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal(root.querySelector(".st-pending"), null);
   assert.ok($(root, ".st-composer > .st-quick.st-side"), "help buttons sit at the side of the answer box");
   assert.ok($(root, ".st-composer > .st-side.is-right .st-send"), "Send sits at the other side");
-  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent, b.disabled]), [["Coding coach", false], ["Hint", false], ["Explain", false], ["Skip", false], ["Visual", false]]);
+  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => [b.textContent, b.disabled]), [["Coding coach", false], ["Code walkthrough", false], ["Hint", false], ["Explain", false], ["Skip", false], ["Visual", false]]);
   // The reasoning behind the action is one click away.
   $(root, ".st-why-btn").click();
   assert.equal($(root, ".st-why-btn").getAttribute("aria-expanded"), "true");
@@ -218,8 +223,8 @@ test("home, study, review, topic page and graph work together from the normal en
   $(root, ".st-why-btn").click();
   assert.equal(root.querySelector(".st-why-detail"), null);
 
-  // Confidence: choosing a point sets it, choosing it again or Delete clears it, arrows move it.
-  assert.equal(conf()[0].disabled, false);
+  // Confidence: dragging selects a stop; Clear and Delete unset it; arrows move it.
+  assert.equal(confSlider().disabled, false);
   confSlider().value = "1";
   fire(confSlider(), "input");
   assert.deepEqual(confOn(), ["Low"], "dragging the slider selects a confidence stop");
@@ -227,12 +232,12 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal(confSlider().value, "3", "clicking a label also moves the slider");
   assert.deepEqual(confOn(), ["High"]);
   assert.ok($(root, ".st-conf").classList.contains("is-set"));
-  confPick("High");
-  assert.deepEqual(confOn(), [], "choosing the same point again clears it");
+  confSlider().dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown",{key:"Delete",bubbles:true}));
+  assert.deepEqual(confOn(), [], "Delete unsets the value without a separate button");
   confPick("Medium");
-  conf()[2].dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+  confSlider().dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
   assert.deepEqual(confOn(), ["High"], "arrow keys move between points");
-  conf()[3].dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+  confSlider().dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
   assert.deepEqual(confOn(), []);
   assert.ok(!$(root, ".st-conf").classList.contains("is-set"));
   confSlider().value = "4";
@@ -281,8 +286,8 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal(calls[1].system, calls[0].system, "the stable part of the prompt is byte-identical between turns");
   assert.match($(root, ".st-feedback").textContent, /Marked incorrectgraded by the model, unverified · your confidence: very high/);
   assert.match($(root, ".st-feedback-more").textContent, /How this was checkedBasis: one model judgement, not independently checked\.This counts as unaided evidence\.thinks translation is linear/);
-  assert.deepEqual(confOn(), [], "confidence resets for the next answer");
-  assert.match(confSlider().getAttribute("aria-valuetext"), /Not set/, "the slider also resets after marking");
+  assert.deepEqual(confOn(), ["Medium"], "confidence resets to 50% for the next answer");
+  assert.equal(confSlider().getAttribute("aria-valuetext"), "Medium", "the slider also resets after marking");
   const state1 = parseState(await fs.read(`${dir}/state.md`));
   assert.equal(state1.levels[1], 1, "a first wrong answer places the concept at 1; the model's proposed level 4 is ignored");
   assert.deepEqual(state1.misconceptions, ["thinks translation is linear"]);
@@ -484,7 +489,7 @@ test("home, study, review, topic page and graph work together from the normal en
   // ----- the More menu, the new-topic modal and settings -----
   labelled(root, "More tools").click();
   const menu = menus[menus.length - 1];
-  assert.deepEqual(menu.items.map((i) => i.title), ["Topic overview", "Open topic card", "Open question bank", "Open evidence log", "How levels and choices are decided", "Compare policy with logged decisions", "Edit teaching instructions", "Reload from vault"]);
+  assert.deepEqual(menu.items.map((i) => i.title), ["Study Tutor settings", "Topic overview", "Open topic card", "Open question bank", "Open evidence log", "How levels and choices are decided", "Compare policy with logged decisions", "Edit teaching instructions", "Reload from vault"]);
   opened.length = 0;
   menu.items.find((i) => i.title === "Compare policy with logged decisions")!.run();
   await tick(60);
@@ -652,7 +657,7 @@ test("a chat saved by an older version reopens with its question open, and nothi
   assert.equal(root.getAttribute("data-screen"), "study");
   assert.equal($$(root, ".st-msg").length, 1);
   assert.match($(root, ".st-messages").textContent, /What does it print, and why\?/);
-  assert.equal($(root, ".st-conf-opt").disabled, false);
+  assert.equal($(root, ".st-conf-slider").disabled, false);
   assert.equal(await fs.read(`${dir}/chats/2026-11-12 1701 tutor.md`), old, "opening a chat does not rewrite it");
   // Answering it carries the question into the record, and the transcript keeps every earlier line.
   let seen = "";
@@ -985,7 +990,7 @@ test("ask anything: with no topic, Home asks a question straight away, the study
   assert.ok(!$(root, ".st-messages").textContent.includes("!["), "a remote picture in the reply is made inert before it is rendered");
   assert.match(root.textContent, /Free question\. Nothing here counts toward a level\./);
   // Topic controls are not offered: hints, explanations, visuals, skip, modes, confidence, the guide's step.
-  assert.equal($$(root, ".st-quick .st-btn").length, 0);
+  assert.deepEqual($$(root, ".st-quick .st-btn").map((b: any) => b.textContent), ["Code walkthrough"], "free chats offer code inspection, without topic tutoring controls");
   assert.equal($(root, ".st-modes"), null);
   assert.equal($(root, ".st-mode-select"), null);
   assert.equal($(root, ".st-why-btn"), null);
@@ -1381,4 +1386,26 @@ test("example course: Home adds the C++ concurrency course with no model call, o
   await tick(80);
   assert.equal((await plugin.store.listTopics()).length, 1);
   assert.match(notices.at(-1) ?? "", /already in your vault/);
+});
+
+test('the paperclip picker reads vault notes without an active editor and preserves code whitespace', async () => {
+  const file={path:'Examples/program.md'};
+  const source='---\ntitle: Example\n---\n```python\ndef f():\n    print("hello")\n```';
+  const chosen=chooseAttachment({vault:{getMarkdownFiles:()=>[file],cachedRead:async()=>source}} as any);
+  const picker=document.querySelector('.st-attachment-list')!;
+  (picker.querySelector('button') as HTMLButtonElement).click();
+  assert.deepEqual(await chosen,{name:file.path,text:'```python\ndef f():\n    print("hello")\n```'});
+  assert.equal(attachmentMaterial('program.py','for x in range(2):\n    print(x)').text,'for x in range(2):\n    print(x)');
+  assert.throws(()=>attachmentMaterial('image.png','fake'),/note, text/);
+  assert.throws(()=>attachmentMaterial('big.txt','x'.repeat(128*1024+1)),/nothing was truncated/);
+});
+
+test('closing a code workspace before its preparation completes never starts generation or execution', async()=>{
+  const root=document.createElement('div');
+  let release!:()=>void;let calls=0;
+  const preparation=new Promise<void>(resolve=>{release=resolve;});
+  const workspace=mountCodeWorkspace(root,{source:'print(1)',language:'python',onHelp:()=>preparation,plan:async()=>{calls++;throw new Error('must not run');}});
+  (Array.from(root.querySelectorAll('button')).find(b=>b.textContent==='Build walkthrough') as HTMLButtonElement).click();
+  workspace.dispose();release();await tick();
+  assert.equal(calls,0);
 });

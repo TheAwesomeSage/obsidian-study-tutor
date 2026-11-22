@@ -192,6 +192,23 @@ loadPyodide({ indexURL: workerData.dir, packageCacheDir: workerData.dir, lockFil
 }
 
 const python = () => new LocalCodeRunner({ settings: () => ({ python: true, native: false }), python: new PythonRunner(bundled ? nodePorts() : null, "Pyodide 0.26.4 (Python 3.12)"), native: null });
+
+test("the code workspace observes real Python loops, function returns and stdin/output, with bounded traces", {skip: !bundled, timeout:60000}, async()=>{
+  const runner=python();
+  const source="def double(n):\n    return n * 2\nn = int(input())\nfor i in range(2):\n    print(double(n + i))\n";
+  const result=await runner.run({language:"python",inspect:true,tests:[{name:"console",stdin:"3\n",expected:"6\n8\n"}]},source);
+  assert.equal(result.status,"ran");assert.equal(result.passed,1);
+  assert.equal(result.tests[0].stdout,"6\n8\n");
+  const trace=result.tests[0].trace!;
+  assert.ok(trace.some(s=>s.function==="double" && s.event==="return" && s.variables.some(v=>v.name==="return" && v.value==="8")));
+  assert.ok(trace.some(s=>s.variables.some(v=>v.name==="i" && v.value==="1")));
+  assert.ok(trace.every(s=>s.line>=1 && s.line<=source.split("\n").length));
+  const bounded=await runner.run({language:"python",inspect:true,tests:[{name:"bounded",expected:""}]},"for i in range(1000):\n    x = i\n");
+  assert.equal(bounded.tests[0].trace?.length,120);
+  const hidden=await runner.run({language:"python",inspect:true,tests:[{name:"hidden",hidden:true,expected:"private\n"}]},"print('private')");
+  assert.equal(hidden.tests[0].stdout,undefined);assert.equal(hidden.tests[0].trace,undefined);
+  runner.dispose();
+});
 const noPyodide = bundled ? false : "no bundled Pyodide (run node scripts/vendor-pyodide.mjs)";
 const byName = (r: CodeRunReport) => Object.fromEntries(r.tests.map((t) => [t.name, t]));
 
@@ -375,6 +392,7 @@ test("C++: compile errors, passes, failures, crashes and timeouts", { timeout: 1
     {
       language: "cpp",
       timeLimitMs: 1000,
+      inspect: true,
       tests: [
         { name: "sum", stdin: "2 3\n", expected: "5" },
         { name: "wrong", stdin: "1 1", expected: "3" },
@@ -391,6 +409,7 @@ test("C++: compile errors, passes, failures, crashes and timeouts", { timeout: 1
   assert.match(r.limits, /no sandbox/);
   const t = byName(r);
   assert.equal(t.sum.status, "pass", t.sum.detail);
+  assert.equal(t.sum.stdout?.trim(), "5", "the code workspace retains real native console output");
   assert.equal(t.wrong.status, "fail");
   assert.match(t.wrong.detail, /expected "3", got "2"/);
   assert.equal(t.spin.status, "timeout");

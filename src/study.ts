@@ -5,11 +5,11 @@
 // already reading the end. The screen object outlives its DOM, so a reply that arrives while
 // you are on another screen is waiting when you come back.
 
-import { Notice, TFile, setIcon } from "obsidian";
+import { Notice, setIcon } from "obsidian";
 import { addUsage } from "./claude";
 import { Material, TurnResult, PresentationOutcome } from "./engine";
 import { Attempt, gradingLabel } from "./evidence";
-import { Mode, fmStr, splitFrontmatter } from "./formats";
+import { Mode, fmStr } from "./formats";
 import { ACTION_LABEL, Action, POLICY_VERSION } from "./policy";
 import { bktTrace, brierComparison, comparisonLine, mcqOptions, shadowLine } from "./bkt";
 import { SessionRecord, openQuestion, sessionFor } from "./session";
@@ -22,10 +22,14 @@ import { askCourse, askCourseSeed } from "./engine-ask";
 import { coverageOf, coverageSummary } from "./coverage";
 import { codeRunSummary, codeTestRows } from "./codequestions";
 import { expansionLine } from "./expansion";
-import { ConfidencePicker, confidenceLabel } from "./confidence";
+import { ConfidencePicker, confidenceLabel, DEFAULT_CONFIDENCE } from "./confidence";
 export { CONFIDENCE_LEVELS, confidenceLabel } from "./confidence";
 import { activityContext, calibrationCue, type ActivityContext } from "./learning-context";
 import type { Screen, TutorView } from "./view";
+import { chooseAttachment } from "./attachments";
+import { CodeWorkspaceModal } from "./codeworkspace-modal";
+import { fencedCode, wantsCodeWalkthrough } from "./codewalkthrough";
+import {chatAttachment} from './chat-attachment';
 import { MODE_INFO, button, chip, confirmAction, iconButton, modeInfo } from "./ui";
 
 const ROUTE_NOTE: Record<string, string> = { simple: "utility model", standard: "chat model", complex: "chat model, extra thinking" };
@@ -44,9 +48,11 @@ export class StudyScreen implements Screen {
   /** The attempt marked on the last turn, shown with how it was checked and a way to dispute it. */
   private marked: Attempt | null = null;
   private markedNote = "";
-  /** Self-reported confidence for the answer being written, one of CONFIDENCE_LEVELS. Null until one is chosen. */
-  private confidence: number | null = null;
-  private attach = false;
+  /** Confidence for the answer being written; defaults to 50%, or null if explicitly cleared. */
+  private confidence: number | null = DEFAULT_CONFIDENCE;
+  private attachment?: Material;
+  private attachmentChatPath?: string | null;
+  private lastAttachments = new Map<string, Material>();
   private visualContext: { chatPath: string; value: ActivityContext } | null = null;
   private whyOpen = false;
   private saveDrafts = 0;
@@ -82,16 +88,14 @@ export class StudyScreen implements Screen {
     this.listEl = column.createDiv({ cls: "st-messages" });
     this.tailEl = column.createDiv({ cls: "st-tail" });
 
-    // The answer area keeps to one compact block: help buttons on the left of the box, Send on
-    // the right, confidence and attach under the text. The open question is the last message in
-    // the chat itself, so it is not pinned again here.
+    // A shallow answer box with one compact toolbar below it leaves more room for the chat.
     const dock = page.createDiv({ cls: "st-dock" });
     const inner = dock.createDiv({ cls: "st-column" });
     const composer = inner.createDiv({ cls: "st-composer" });
     this.quickEl = composer.createDiv({ cls: "st-quick st-side", attr: { role: "group", "aria-label": "Help with the open question" } });
     const main = composer.createDiv({ cls: "st-composer-main" });
     const right = composer.createDiv({ cls: "st-side is-right" });
-    this.input = main.createEl("textarea", { cls: "st-input", attr: { rows: "3", "aria-label": "Your answer or message" } });
+    this.input = main.createEl("textarea", { cls: "st-input", attr: { rows: "1", "aria-label": "Your answer or message" } });
     this.input.oninput = () => this.keepDraft();
     this.input.onkeydown = (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -108,8 +112,18 @@ export class StudyScreen implements Screen {
     setIcon(this.attachBtn.createSpan({ cls: "st-btn-icon" }), "paperclip");
     this.attachBtn.createSpan({ cls: "st-btn-label", text: "Attach note" });
     this.attachBtn.onclick = () => {
-      this.attach = !this.attach;
-      this.syncComposer();
+      const chatPath = v.chatPath;
+      void chooseAttachment(v.app, this.attachmentChatPath === chatPath ? this.attachment : v.chat ? chatAttachment(v.chat) : undefined).then(async material => {
+        if (v.chatPath !== chatPath) return;
+        if (material === null && v.chat && chatPath) {
+          const previous = v.chat.fm.attachment;
+          delete v.chat.fm.attachment;
+          try { await v.plugin.store.saveChat(chatPath, v.chat); } catch { if (previous !== undefined) v.chat.fm.attachment = previous; new Notice("Could not remove the saved attachment. Try again."); return; }
+          this.lastAttachments.delete(chatPath);
+        }
+        if (material !== undefined) { this.attachment = material ?? undefined; this.attachmentChatPath = chatPath; }
+        if (this.el) this.syncComposer();
+      });
     };
 
     this.sendBtn = right.createEl("button", { cls: "st-btn is-primary mod-cta st-send" });
@@ -636,14 +650,18 @@ export class StudyScreen implements Screen {
     q.empty();
     if (!probe && !assess && !v.free) {
       const coach = v.chat && fmStr(v.chat.fm, "coding_coach") === "yes";
-      const coachButton = button(q, { label: coach ? "Stop coding coach" : "Coding coach", icon: "code", tone: "ghost", onClick: () => void this.send(coach ? "Stop coding coach" : "Start coding coach") });
+      const coachButton = button(q, { label: coach ? "Stop coding coach" : "Coding coach", title:coach?"Stop coding coach":"Start coding coach", icon: "code", tone: "ghost", onClick: () => void this.send(coach ? "Stop coding coach" : "Start coding coach") });
       coachButton.disabled = this.busy;
       if (v.chat && fmStr(v.chat.fm, "placement") === "on") {
         const skip = button(q, { label: "Skip pretest", icon: "skip-forward", tone: "ghost", onClick: () => void this.send("Skip pretest") });
         skip.disabled = this.busy;
       }
     }
-    q.toggleClass("is-empty", asking);
+    if (!probe && !assess) {
+      const code = button(q, {label:"Code walkthrough",icon:"terminal",tone:"ghost",title:"Open code: step through a program, trace variables, view flow diagrams and run console input/output",onClick:()=>this.openCodeWorkspace()});
+      code.disabled = this.busy;
+    }
+    q.toggleClass("is-empty", assess || probe);
     if (!asking) {
       const quick = (label: string, icon: string, message: string, title: string) => {
         const b = button(q, { label, icon, tone: "ghost", title: `${label}: ${title}`, onClick: () => void this.send(message) });
@@ -660,14 +678,12 @@ export class StudyScreen implements Screen {
     }
 
     this.input.placeholder = assess ? "Your answer to the task…  (Enter to send, Shift+Enter for a new line)" : v.free ? "Ask a follow-up…  (Enter to send, Shift+Enter for a new line)" : asking ? "Ask a question…  (Enter to send, Shift+Enter for a new line)" : question ? "Your answer…  (Enter to send, Shift+Enter for a new line)" : "Message…  (Enter to send, Shift+Enter for a new line)";
-    const active = v.app.workspace.getActiveFile();
-    const canAttach = active instanceof TFile && active.extension === "md" && !active.path.startsWith(v.plugin.store.root + "/");
-    if (!canAttach) this.attach = false;
-    this.attachBtn.disabled = !canAttach || this.busy;
-    this.attachBtn.toggleClass("is-on", this.attach);
-    this.attachBtn.setAttribute("aria-pressed", String(this.attach));
-    this.attachBtn.querySelector(".st-btn-label")?.setText(this.attach && active ? `Attached: ${active.basename}` : "Attach note");
-    this.attachBtn.setAttribute("aria-label", this.attach && active ? `Attached: ${active.basename}. Select to detach.` : "Attach the note you have open to this message");
+    this.attachBtn.disabled = this.busy;
+    const attachment = (this.attachmentChatPath === v.chatPath ? this.attachment : undefined) ?? (v.chat ? chatAttachment(v.chat) : undefined);
+    this.attachBtn.toggleClass("is-on", !!attachment);
+    this.attachBtn.setAttribute("aria-pressed", String(!!attachment));
+    this.attachBtn.querySelector(".st-btn-label")?.setText(attachment ? `Attached: ${attachment.name}` : "Attach note or file");
+    this.attachBtn.setAttribute("aria-label", attachment ? `Attached: ${attachment.name}. Select to change or remove.` : "Attach a vault note or a text/code file");
 
     // Confidence goes with an answer. It can be chosen at any time (it is sent with your next
     // message and counts only if that message is marked), and is not offered in Ask mode.
@@ -752,12 +768,23 @@ export class StudyScreen implements Screen {
   }
 
   private async attachedNote(): Promise<Material | undefined> {
-    if (!this.attach) return undefined;
+    return (this.attachmentChatPath === this.view.chatPath ? this.attachment : undefined) ?? (this.view.chat ? chatAttachment(this.view.chat) : undefined);
+  }
+
+  private codeContext(): string {
     const v = this.view;
-    const f = v.app.workspace.getActiveFile();
-    if (!(f instanceof TFile) || f.extension !== "md" || f.path.startsWith(v.plugin.store.root + "/")) return undefined;
-    const text = splitFrontmatter(await v.app.vault.cachedRead(f)).body.trim();
-    return text ? { name: f.basename, text: text.split(/\s+/).slice(0, 3000).join(" ") } : undefined;
+    const pending = (this.attachmentChatPath === v.chatPath ? this.attachment : undefined) ?? (v.chat ? chatAttachment(v.chat) : undefined);
+    return [v.topic?.subskills?.find(s => s.n === v.state?.focus)?.section, ...(v.chat?.messages.slice(-8).map(m => m.text) ?? []), (pending ?? this.lastAttachments.get(v.chatPath ?? ""))?.text].filter(Boolean).join("\n\n");
+  }
+
+  private openCodeWorkspace(message = ""): void {
+    const v = this.view;
+    if (this.busy || (v.chat && (fmStr(v.chat.fm,"probe") === "yes" || fmStr(v.chat.fm,"assess") === "outcome"))) return;
+    // The most recent message wins; an explicitly attached source file takes precedence.
+    const attached = (this.attachmentChatPath === v.chatPath ? this.attachment : undefined) ?? (v.chat ? chatAttachment(v.chat) : undefined) ?? this.lastAttachments.get(v.chatPath ?? "");
+    const found = attached ? fencedCode(attached.text) ?? (/\.(py|cpp|cc|cxx|c|h|hpp)$/i.test(attached.name) ? {source:attached.text,language:/\.(cpp|cc|cxx|hpp)$/i.test(attached.name)?"cpp" as const:/\.c$/i.test(attached.name)?"c" as const:"python" as const}:null) : null;
+    const latest = fencedCode(message) ?? found ?? fencedCode(this.codeContext());
+    new CodeWorkspaceModal(v, latest?.source ?? "", latest?.language ?? "python").open();
   }
 
   /**
@@ -794,7 +821,6 @@ export class StudyScreen implements Screen {
     this.last = null;
     try {
       const attached = await this.attachedNote();
-      this.attach = false;
       const turn = v.plugin.engine.askTurn(chatPath, text, { attached, onSpawn: (kill) => (this.kill = kill) });
       if (text) {
         v.chat.messages.push({ role: "you", text });
@@ -803,6 +829,8 @@ export class StudyScreen implements Screen {
       }
       this.sync();
       const r = await turn;
+      if (attached) this.lastAttachments.set(chatPath, attached);
+      this.attachment = undefined;
       v.sessionUsage = addUsage(v.sessionUsage, r.usage);
       if (v.chatPath === chatPath) await v.openChat(chatPath);
     } catch (e) {
@@ -831,6 +859,10 @@ export class StudyScreen implements Screen {
   /** Sends a message. An empty message starts a chat, continues, or retries the last turn. */
   async send(message: string): Promise<void> {
     const v = this.view;
+    if (!this.busy && wantsCodeWalkthrough(message, this.codeContext()) && !(v.chat && (fmStr(v.chat.fm,"probe") === "yes" || fmStr(v.chat.fm,"assess") === "outcome"))) {
+      this.openCodeWorkspace(message);
+      return;
+    }
     if (!this.busy && v.free) return this.sendAsk(message);
     if (this.busy || !v.dir || !v.topic) return;
     const dir = v.dir;
@@ -843,13 +875,12 @@ export class StudyScreen implements Screen {
     this.markedNote = "";
     let chatPath = v.chatPath;
     try {
+      const attached = await this.attachedNote();
       if (!chatPath || !v.chat) {
         await v.newChat(v.mode);
         chatPath = v.chatPath;
       }
       if (!chatPath || !v.chat) throw new Error("The chat could not be created.");
-      const attached = await this.attachedNote();
-      this.attach = false;
       // Start the turn first: it decides its path from the chat as it stood before this message.
       const turn = v.plugin.engine.study(dir, chatPath, text, { attached, confidence: this.confidence, activityContext: this.visualContext?.chatPath === chatPath ? this.visualContext.value : undefined, onSpawn: (kill) => (this.kill = kill) });
       if (text) {
@@ -859,13 +890,15 @@ export class StudyScreen implements Screen {
       }
       this.sync();
       const r = await turn;
+      if (attached) this.lastAttachments.set(chatPath, attached);
+      this.attachment = undefined;
       const used = r.rotationUsage ? addUsage(r.usage, r.rotationUsage) : r.usage;
       v.sessionUsage = addUsage(v.sessionUsage, used);
       this.last = r;
       this.changes = r.changes;
       this.marked = r.attempt ?? null;
-      // The answer was marked, so the next one starts with no confidence set.
-      this.confidence = null;
+      // The answer was marked, so the next one starts at the default 50%.
+      this.confidence = DEFAULT_CONFIDENCE;
       if (v.dir === dir) {
         await v.openChat(r.rotatedTo ?? chatPath);
         if (r.rotatedTo) new Notice("This chat was getting long, so the finished part was summarised and the chat continues in a new file. The full transcript is linked from the summary.", 8000);

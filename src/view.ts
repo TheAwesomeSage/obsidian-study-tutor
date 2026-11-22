@@ -479,7 +479,6 @@ export class TutorView extends ItemView {
       sel.onchange = () => void this.selectTopic(sel.value || null);
     }
     iconButton(end, "plus", "New topic", () => this.plugin.openNewTopic());
-    iconButton(end, "settings", "Study Tutor settings", () => this.plugin.openSettings());
     iconButton(end, "more-horizontal", "More tools", (e) => this.moreMenu(e));
   }
 
@@ -488,6 +487,8 @@ export class TutorView extends ItemView {
     const menu = new Menu();
     const open = (path: string) => void this.app.workspace.openLinkText(path, "", true);
     const dir = this.dir;
+    menu.addItem((i) => i.setTitle("Study Tutor settings").setIcon("settings").onClick(() => this.plugin.openSettings()));
+    menu.addSeparator();
     if (dir) {
       menu.addItem((i) => i.setTitle("Topic overview").setIcon("list").onClick(() => this.show("topic")));
       menu.addItem((i) => i.setTitle("Open topic card").setIcon("file-text").onClick(() => open(`${dir}/topic.md`)));

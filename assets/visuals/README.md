@@ -5,6 +5,9 @@ the included license files say CC0. Three unmodified PNGs total; dimensions and 
 are in src/visuals/assets.ts. The build embeds only these approved local files as data URLs.
 The blue flag marks the projectile target; its pixels do not determine the hit geometry.
 The star and checkmark are available decorations, never evidence of independent mastery.
+The code workspace also uses the flag for its current trace step and the checkmark for
+completed execution. Completion is not correctness; neither icon changes a mark or mastery.
+These images are embedded locally and do not enter model prompts.
 
 Physics Assets 1.0: https://kenney.nl/assets/physics-assets
 UI Pack 2.0: https://kenney.nl/assets/ui-pack

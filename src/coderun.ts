@@ -182,7 +182,7 @@ export function codeReport(task: Pick<CodeTask, "language"> & { tests?: unknown 
 
 const bytes = (s: string): number => new TextEncoder().encode(s).length;
 const PY_KEYWORDS = new Set("False None True and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield".split(" "));
-const TASK_KEYS = new Set(["language", "entry", "tests", "timeLimitMs", "concurrent", "sanitizers", "starter"]);
+const TASK_KEYS = new Set(["language", "entry", "tests", "timeLimitMs", "concurrent", "sanitizers", "starter", "inspect"]);
 const TEST_KEYS = new Set(["name", "stdin", "args", "expected", "hidden", "compare"]);
 
 /**
@@ -204,7 +204,7 @@ export function validateCodeTask(task: unknown, source: unknown, opts: { strict?
     if (typeof t.entry !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(t.entry) || PY_KEYWORDS.has(t.entry)) return "the entry must be a plain Python function name";
   }
   if (t.timeLimitMs !== undefined && (typeof t.timeLimitMs !== "number" || !Number.isFinite(t.timeLimitMs) || t.timeLimitMs < CODE_LIMITS.minTimeMs || t.timeLimitMs > CODE_LIMITS.maxTimeMs)) return `the time limit must be between ${CODE_LIMITS.minTimeMs} and ${CODE_LIMITS.maxTimeMs} ms`;
-  for (const k of ["concurrent", "sanitizers"] as const) if (t[k] !== undefined && typeof t[k] !== "boolean") return `${k} must be true or false`;
+  for (const k of ["concurrent", "sanitizers", "inspect"] as const) if (t[k] !== undefined && typeof t[k] !== "boolean") return `${k} must be true or false`;
   if (t.starter !== undefined && (typeof t.starter !== "string" || bytes(t.starter) > CODE_LIMITS.sourceBytes)) return "the starter code must be text of at most 64 KB";
   if (!Array.isArray(t.tests) || !t.tests.length) return "the task has no tests";
   if (t.tests.length > CODE_LIMITS.tests) return `the task has ${t.tests.length} tests; at most ${CODE_LIMITS.tests} are allowed`;

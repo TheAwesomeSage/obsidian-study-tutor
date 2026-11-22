@@ -372,6 +372,7 @@ export class NativeRunner implements CodeBackend {
         else if (r.overflow) tests.push(testOutcome(t, i, "error", `stopped: printed more than ${CODE_LIMITS.outputBytes / 1024} KB`, r.ms));
         else if (r.code !== 0 || r.signal) tests.push(testOutcome(t, i, "error", `${describeExit(r)}${why ? `\n${why}` : ""}`, r.ms));
         else tests.push(judgeOutput(t, i, r.stdout, r.ms));
+        if (task.inspect && !t.hidden) tests[tests.length - 1].stdout = r.stdout.slice(0, CODE_LIMITS.outputBytes);
       }
       // The race detector: the same tests again, looking only at what ThreadSanitizer says. It
       // counts as a race check only when every test ran to the end under it.

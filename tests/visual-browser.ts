@@ -3,6 +3,10 @@ import { mountPlayer } from "../src/visuals/player";
 import { FIXTURES } from "../src/visuals/fixtures";
 import { GraphScreen } from "../src/graphscreen";
 import { ConfidencePicker } from "../src/confidence";
+import { StudyScreen } from "../src/study";
+import { HomeScreen } from "../src/home";
+import {mountCodeWorkspace} from '../src/codeworkspace';
+import {plan as codePlan, source as codeSource} from './fixtures/code-walkthrough';
 import { parseState } from "../src/formats";
 import { topicInfo } from "../src/overview";
 import type { Course } from "../src/course";
@@ -14,19 +18,22 @@ const params=new URLSearchParams(location.search),kind=params.get("module")??"pr
 const host=document.querySelector<HTMLElement>("#app")!;
 document.body.classList.add(params.get("theme")==="dark"?"theme-dark":"theme-light");
 const events:PlayerEvent[]=[];(window as unknown as {events:PlayerEvent[]}).events=events;
-if(kind==="confidence") {
+  if(kind==="code") {
+    host.style.maxWidth='1080px';host.style.margin='auto';
+    mountCodeWorkspace(host, {source:codeSource,language:'python',plan:async()=>structuredClone(codePlan),runner:{available:async()=>({ok:true,backend:'fixture'}),run:async()=>({status:'ran',language:'python',backend:'Fixture runtime',message:'',limits:'Synthetic browser test; real Pyodide execution is tested separately.',passed:1,total:1,ms:1,tests:[{name:'console',hidden:false,status:'pass',detail:'',ms:1,stdout:'6\n',trace:[{line:1,event:'line',function:'<module>',variables:[],output:''},{line:2,event:'line',function:'<module>',variables:[{name:'n',value:'3'}],output:''},{line:2,event:'return',function:'<module>',variables:[{name:'n',value:'3'}],output:'6\n'}]}]})}});
+  } else if(kind==="confidence") {
   host.className="study-tutor graph-preview";
-  const study=host.createDiv({cls:"st-study"});
-  study.createDiv({cls:"st-scroll",text:"Synthetic chat fixture · choose confidence before submitting an answer."});
-  const dock=study.createDiv({cls:"st-dock"}),composer=dock.createDiv({cls:"st-composer"});
-  composer.createDiv({cls:"st-side"});
-  const main=composer.createDiv({cls:"st-composer-main"});
-  main.createEl("textarea",{cls:"st-input",attr:{"aria-label":"Your answer or message",rows:"3"}});
-  const foot=main.createDiv({cls:"st-composer-foot"});
-  const harness:{value:number|null;picker?:ConfidencePicker}={value:null};
-  harness.picker=new ConfidencePicker(foot,value=>{harness.value=value;});
-  composer.createDiv({cls:"st-side is-right"}).createEl("button",{cls:"st-btn st-send",text:"Send"});
+  const state=parseState("");state.focus=1;state.names[1]="Linear maps";state.levels[1]=0;
+  const view={contentEl:host,dir:"t0",mode:"auto",free:false,today:"2026-11-22",state,topic:{title:"Linear maps"},chatPath:"fixture/chat.md",chat:{fm:{mode:"auto"},summary:"",messages:[{role:"tutor",text:"Synthetic chat fixture: is f(x) = x + 1 linear? Explain why."}]},sessionUsage:{input:0,cacheRead:0,cacheWrite:0,output:0,costUsd:0,calls:0},app:{workspace:{getActiveFile:()=>null}},plugin:{data:{drafts:{}},engine:{},store:{root:"Tutor",loadQuestions:async()=>[]},opts:{},save:async()=>{}},md:(el:HTMLElement,text:string)=>{el.textContent=text;},go:()=>{}};
+  const screen=new StudyScreen(view as unknown as TutorView);screen.mount(host);
+  const harness={get value(){return (screen as unknown as {confidence:number|null}).confidence;},picker:(screen as unknown as {confPicker:ConfidencePicker}).confPicker};
   (window as unknown as {confidenceHarness:typeof harness}).confidenceHarness=harness;
+} else if(kind==="home") {
+  host.className="study-tutor graph-preview";
+  const state=parseState("");state.names[1]="Definition";state.levels[1]=0;
+  const overview=[topicInfo("t0","Notes",state,{},"2026-11-22")];
+  const view={contentEl:host,dir:"t0",today:"2026-11-22",topics:[{title:"Notes",dir:"t0"}],topic:{title:"Notes"},overview,info:overview[0],recent:[{path:"fixture/chat.md",dir:"t0",topic:"Notes",mode:"tutor",stamp:"2026-11-12 1701",part:1,unfinished:true,snippet:"What does the bump program print, and why?"}],plugin:{opts:{minutes:25},usesSr:()=>false,save:async()=>{},engine:{probeStatus:async()=>({due:false})},store:{recentAsks:async()=>[]}},md:(el:HTMLElement,text:string)=>{el.textContent=text;},go:()=>{},startAsk:async()=>true};
+  new HomeScreen(view as unknown as TutorView).mount(host);
 } else if(kind!=="graph") {
   void mountPlayer(host,FIXTURES[kind]??FIXTURES.projectile,{reason:"Engineering preview · synthetic fixture. Observe the model, then explain your reasoning.",onEvent:e=>events.push(e)});
 } else {

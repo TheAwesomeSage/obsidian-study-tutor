@@ -8,6 +8,7 @@ import { Frontmatter, SourceMode, fmList, fmStr, splitFrontmatter, words } from 
 import { DEFAULT_WEIGHTS, PolicyWeights, WEIGHT_LABELS } from "./policy";
 import { DEFAULT_LOCAL_MODEL, DEFAULT_OLLAMA_URL, OllamaClient, locateLocal } from "./ollama";
 import { LocalPassageSelector } from "./semantic-retrieval";
+import { EmbeddingPassageSelector } from "./embedding-retrieval";
 import { FS, Store } from "./store";
 import { BundleFiles, SympyWorker } from "./sympy";
 import { LocalCodeRunner } from "./coderun";
@@ -48,6 +49,8 @@ export interface TutorSettings extends EngineSettings {
   localActivities: boolean;
   /** Optional semantic source selection using the configured local model. */
   semanticRetrieval: boolean;
+  /** Blank uses the existing local text selector; otherwise an installed embedding model. */
+  semanticEmbeddingModel: string;
   /** Which models compile a course (model-provider.ts). Settings from before it was added are migrated from `localCompilation`. */
   compileStrategy: CompileStrategy;
   /** Plan diagrams and simulations at compile time with the main provider ("main" compile strategy only). */
@@ -110,6 +113,7 @@ const DEFAULTS: TutorSettings = {
   minutes: 25,
   localActivities: true,
   semanticRetrieval: false,
+  semanticEmbeddingModel: "",
   compileStrategy: "hybrid",
   compileBlueprints: true,
   researchLimits: DEFAULT_RESEARCH_LIMITS,
@@ -303,7 +307,10 @@ export default class StudyTutorPlugin extends Plugin {
     const client = this.opts.localActivities || compiles || this.opts.semanticRetrieval ? new OllamaClient({ model: this.opts.localModel || DEFAULT_LOCAL_MODEL, baseUrl: this.opts.ollamaUrl || DEFAULT_OLLAMA_URL }) : null;
     this.engine.local = this.opts.localActivities ? client : null;
     this.engine.compilationLocal = compiles ? client : null;
-    this.engine.semanticSelector = this.opts.semanticRetrieval && client ? new LocalPassageSelector(client) : null;
+    const embedding=this.opts.semanticEmbeddingModel?.trim()??"";
+    this.engine.semanticSelector = this.opts.semanticRetrieval&&client
+      ? embedding?new EmbeddingPassageSelector(new OllamaClient({model:embedding,baseUrl:this.opts.ollamaUrl||DEFAULT_OLLAMA_URL})):new LocalPassageSelector(client)
+      : null;
   }
 
   /** Opens Obsidian's settings on this plugin's tab. The settings API is not typed, so every step is guarded. */
@@ -916,12 +923,15 @@ class TutorSettingTab extends PluginSettingTab {
 
     new Setting(containerEl).setName("Interactive activities").setHeading();
     new Setting(containerEl).setName("Semantic source recovery").setDesc(
-      "Optional: when keyword search finds too little source evidence, ask the configured local Ollama model to select relevant saved passages, including paraphrases. At most 8 short candidates and 4 seconds; otherwise keyword search continues. No cloud fallback, downloads, grading or mastery changes.",
+      "Optional: use a local model to find relevant saved passages when keyword search finds too little, including paraphrases. A four-second budget, then keyword fallback. No cloud fallback, automatic downloads, grading or mastery changes.",
     ).addToggle(t => t.setValue(s.semanticRetrieval).onChange(async enabled => {
       s.semanticRetrieval = enabled;
       this.plugin.buildLocal();
       await this.plugin.save();
     }));
+    new Setting(containerEl).setName("Local embedding model").setDesc(
+      "Optional installed Ollama embedding model, for example embeddinggemma. Searches up to 64 cited passages by meaning with a four-second budget and a reusable local cache. Blank uses your existing Qwen/text model. No model is downloaded automatically.",
+    ).addText(t=>t.setValue(s.semanticEmbeddingModel).setPlaceholder("Use existing local text model").onChange(async value=>{s.semanticEmbeddingModel=value.trim();this.plugin.buildLocal();await this.plugin.save();}));
     new Setting(containerEl)
       .setName("Configure activities with a local model")
       .setDesc("When you ask for a diagram, simulation or game, or the tutor offers one and you open it, an existing module is configured from a short excerpt of your notes by a small model on this computer, through Ollama. Saved activities reopen with no model at all, and moving their controls never calls a model. Nothing here ever calls Claude, and a model that Ollama runs in the cloud is refused. Off: only saved activities open.")

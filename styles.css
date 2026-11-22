@@ -184,11 +184,11 @@
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: var(--st-3);
-  padding: var(--st-2) var(--st-4);
+  gap: var(--st-2);
+  padding: var(--st-1) var(--st-3);
   border-bottom: 1px solid var(--st-line);
   background: var(--st-raised);
-  min-height: 48px;
+  min-height: 38px;
   /* When the tabs and the topic picker do not fit on one line, the picker moves to a second
      line instead of drawing over the tabs. */
   flex-wrap: wrap;
@@ -215,8 +215,8 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 32px;
-  padding: 0 var(--st-3);
+  height: 30px;
+  padding: 0 var(--st-2);
   border: none;
   border-radius: var(--st-r-s);
   background: none;
@@ -269,7 +269,7 @@
 .study-tutor .st-topic-select {
   max-width: 15rem;
   min-width: 0;
-  height: 32px;
+  height: 30px;
 }
 .study-tutor .st-badge {
   display: inline-flex;
@@ -563,6 +563,28 @@
   align-items: center;
   gap: var(--st-2);
   min-width: 0;
+}
+.study-tutor .st-home .st-panel-tools {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+.study-tutor .st-home .st-topics .st-panel-tools {
+  flex: 1 1 100%;
+  margin-left: 0;
+}
+.study-tutor .st-home .st-panel-tools .st-btn {
+  min-width: 0;
+  max-width: 100%;
+  height: auto;
+  white-space: normal;
+}
+.study-tutor .st-home .st-panel-tools .st-btn-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.study-tutor .st-home .st-panel-tools .st-search {
+  flex: 1 1 10rem;
+  max-width: 100%;
 }
 .study-tutor .st-empty {
   margin: auto;
@@ -1263,7 +1285,8 @@
 .study-tutor .st-composer {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: stretch;
+  grid-template-areas: "input input input" "quick foot send";
+  align-items: center;
   gap: var(--st-2);
   padding: var(--st-2);
   border: 1px solid var(--st-line);
@@ -1275,10 +1298,7 @@
   box-shadow: 0 0 0 3px var(--st-accent-soft);
 }
 .study-tutor .st-composer-main {
-  display: flex;
-  flex-direction: column;
-  gap: var(--st-1);
-  min-width: 0;
+  display: contents;
 }
 .study-tutor .st-side {
   display: flex;
@@ -1286,25 +1306,42 @@
   gap: 2px;
 }
 .study-tutor .st-side.is-right {
+  grid-area: send;
   justify-content: flex-end;
 }
 .study-tutor .st-quick {
-  padding-right: var(--st-2);
-  border-right: 1px solid var(--st-line);
+  grid-area: quick;
+  flex-direction: row;
+  align-items: center;
+  padding: 0;
+  border: none;
 }
 .study-tutor .st-quick .st-btn {
-  justify-content: flex-start;
-  min-height: 26px;
-  padding: 2px var(--st-2);
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 4px;
   font-size: var(--st-smaller);
+}
+.study-tutor .st-quick .st-btn-label,
+.study-tutor .st-attach .st-btn-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 .study-tutor .st-why-btn.is-on {
   color: var(--text-normal);
   background: var(--st-accent-soft);
 }
 .study-tutor textarea.st-input {
+  grid-area: input;
   width: 100%;
-  min-height: 3.2em;
+  min-height: 3em;
+  max-height: 35vh;
   resize: vertical;
   border: none;
   background: transparent;
@@ -1318,11 +1355,17 @@
   box-shadow: none;
   outline: none;
 }
+.study-tutor .st-composer textarea.st-input {
+  min-height: calc(1.55em + 2 * var(--st-1));
+}
 .study-tutor .st-composer-foot {
+  grid-area: foot;
   display: flex;
   align-items: center;
   gap: var(--st-2);
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  min-width: 0;
 }
 .study-tutor .st-attach .st-btn-label {
   max-width: 12rem;
@@ -1330,7 +1373,7 @@
   text-overflow: ellipsis;
 }
 
-/* confidence: five points, none chosen until you choose one */
+/* confidence: five points, defaulting to 50% */
 .study-tutor .st-graph-layout {
   max-width: 11rem;
   height: 28px;
@@ -1341,87 +1384,92 @@
   max-width: calc(100% - 24px);
 }
 .study-tutor .st-conf {
-  display: flex;
-  flex-direction: column;
-  width: 24rem;
+  display: inline-grid;
+  grid-template-columns: auto minmax(72px, 176px) 20px;
+  align-items: center;
+  width: 18rem;
   max-width: 100%;
   min-width: 0;
-  gap: 3px;
+  gap: 6px;
   font-size: var(--st-smaller);
   color: var(--text-muted);
 }
-.study-tutor .st-conf-head {
+.study-tutor .st-conf-track {
+  min-width: 0;
+  height: 24px;
   display: flex;
   align-items: center;
-  gap: var(--st-2);
-}
-.study-tutor .st-conf-value {
-  color: var(--text-normal);
-}
-.study-tutor .st-conf-clear {
-  margin-left: auto;
-  height: 22px;
-  padding: 0 var(--st-1);
-  font-size: inherit;
-  background: transparent;
-  box-shadow: none;
-  color: var(--text-muted);
 }
 .study-tutor input.st-conf-slider {
-  width: 80%;
-  margin: 0 10%;
-  height: 24px;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  height: 20px;
   padding: 0;
+  border: 0;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px #ffffff12;
+  --st-conf-dot: #ffffff55;
+  --st-conf-track: color-mix(in srgb, var(--text-normal) 20%, var(--background-primary));
+  background: radial-gradient(circle at 12px center,var(--st-conf-dot) 1.5px,transparent 2px),
+    radial-gradient(circle at calc(25% + 6px) center,var(--st-conf-dot) 1.5px,transparent 2px),
+    radial-gradient(circle at 50% center,var(--st-conf-dot) 1.5px,transparent 2px),
+    radial-gradient(circle at calc(75% - 6px) center,var(--st-conf-dot) 1.5px,transparent 2px),
+    radial-gradient(circle at calc(100% - 12px) center,var(--st-conf-dot) 1.5px,transparent 2px),
+    linear-gradient(to right,#3b82f6 0 var(--st-conf-fill,0%),var(--st-conf-track) var(--st-conf-fill,0%) 100%);
   cursor: pointer;
-  accent-color: var(--interactive-accent);
 }
-.study-tutor .st-conf:not(.is-set) .st-conf-slider {
-  opacity: 0.55;
+.study-tutor input.st-conf-slider::-webkit-slider-runnable-track {
+  height: 20px;
+  background: transparent;
+  border: 0;
+}
+.study-tutor input.st-conf-slider::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 24px;
+  height: 24px;
+  margin-top: -2px;
+  /* Obsidian positions ordinary thumbs with --slider-thumb-y. This custom
+     24px thumb is already centred on its 20px track by the margin above. */
+  top: 0;
+  transform: none;
+  border: 1px solid #dce1e8;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px #0003;
+}
+.study-tutor input.st-conf-slider::-webkit-slider-thumb:active {
+  top: 0;
+  transform: none;
+}
+.study-tutor input.st-conf-slider::-moz-range-track {
+  height: 20px;
+  background: transparent;
+  border: 0;
+}
+.study-tutor input.st-conf-slider::-moz-range-thumb {
+  width: 24px;
+  height: 24px;
+  border: 1px solid #dce1e8;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px #0003;
 }
 .study-tutor .st-conf-slider:disabled {
   cursor: default;
 }
-.study-tutor .st-conf-slider:focus-visible,
-.study-tutor .st-conf-opt:focus-visible,
-.study-tutor .st-conf-clear:focus-visible {
+.study-tutor .st-conf-slider:focus-visible {
   outline: 2px solid var(--interactive-accent);
   outline-offset: 2px;
-}
-.study-tutor .st-conf-points {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 3px;
 }
 .study-tutor .st-conf-label {
   margin-right: var(--st-1);
   white-space: nowrap;
 }
-.study-tutor .st-conf-opt {
-  min-width: 0;
-  min-height: 24px;
-  height: auto;
-  padding: 2px;
-  border: 1px solid var(--st-line);
-  border-radius: 999px;
-  background: transparent;
-  box-shadow: none;
-  color: var(--text-muted);
-  font-size: var(--st-smaller);
-  white-space: normal;
-  cursor: pointer;
-}
-.study-tutor .st-conf-opt:hover:not(:disabled) {
-  color: var(--text-normal);
-  background: var(--background-modifier-hover);
-}
-.study-tutor .st-conf-opt.is-on,
-.study-tutor .st-conf-opt.is-on:hover:not(:disabled) {
-  border-color: var(--interactive-accent);
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
-  font-weight: var(--font-semibold, 600);
-}
-.study-tutor .st-conf-opt:disabled {
+.study-tutor .st-conf-slider:disabled {
   opacity: 0.5;
   cursor: default;
 }
@@ -1430,6 +1478,14 @@
 }
 .study-tutor .st-send {
   min-width: 5.5rem;
+}
+@container st (max-width: 640px) {
+  .study-tutor .st-composer {
+    grid-template-areas: "input input input" "foot foot send" "quick quick quick";
+  }
+  .study-tutor .st-composer-foot { justify-content: flex-start; }
+  .study-tutor .st-conf { width: auto; flex: 1 1 auto; grid-template-columns: minmax(96px,1fr) 20px; }
+  .study-tutor .st-send { min-width: 32px; width: 32px; padding: 4px; }
 }
 .study-tutor .st-send.is-stop {
   background: transparent;
@@ -2026,3 +2082,39 @@
     background: var(--st-accent-line);
   }
 }
+
+/* Code workspace: trusted local rendering of an explicit teaching plan. */
+.st-code-modal { width: min(1120px, 96vw); max-height: 94vh; }
+.st-code-workspace { display: grid; gap: 12px; min-width: 0; }
+.st-code-workspace textarea { width: 100%; box-sizing: border-box; font-family: var(--font-monospace); tab-size: 4; }
+.st-code-source { min-height: 170px; max-height: 40vh; resize: vertical; white-space: pre; }
+.st-code-stdin { min-height: 50px; }
+.st-code-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.st-code-intro, .st-code-limitations, .st-code-status { font-size: var(--font-ui-small); color: var(--text-muted); }
+.st-code-layout { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px; }
+.st-code-workspace pre, .st-code-workspace td { white-space: pre-wrap; overflow-wrap: anywhere; }
+.st-code-lines { margin: 0; padding: 8px 8px 8px 4em; overflow: auto; max-height: 460px; background: var(--background-secondary); font-family: var(--font-monospace); }
+.st-code-lines li { white-space: pre; padding: 2px 6px; }
+.st-code-lines .is-current { background: var(--text-selection); box-shadow: inset 3px 0 var(--interactive-accent); }
+.st-code-workspace table { width: 100%; border-collapse: collapse; font-size: var(--font-ui-small); }
+.st-code-workspace th, .st-code-workspace td { padding: 5px 8px; text-align: left; border-bottom: 1px solid var(--background-modifier-border); }
+.st-code-flow { max-height: 420px; overflow: auto; }
+.st-code-flow svg { width: min(100%, 600px); display: block; color: var(--text-muted); }
+.st-code-flow rect { fill: var(--background-secondary); stroke: var(--background-modifier-border); }
+.st-code-flow rect.is-current { fill: var(--background-modifier-hover); stroke: var(--interactive-accent); stroke-width: 2; }
+.st-code-flow text { fill: var(--text-normal); font: 12px var(--font-interface); }
+.st-code-flow g[role=button] { cursor: pointer; }
+.st-code-flow g:focus rect { stroke: var(--interactive-accent); stroke-width: 3; }
+.st-attachment-list { display: grid; gap: 4px; max-height: 40vh; overflow: auto; margin-top: 12px; }
+.st-attachment-list button { text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.st-code-workspace > details { min-width: 0; }
+@media (max-width: 650px) { .st-code-layout { grid-template-columns: minmax(0, 1fr); } }
+.study-tutor .st-attach.is-on .st-btn-label { display: inline; max-width: 12rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st-code-workspace textarea, .st-code-workspace select { color: var(--text-normal); background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 6px; padding: 8px; }
+.st-code-workspace button { color: var(--text-normal); background: var(--background-secondary); border: 1px solid var(--background-modifier-border); border-radius: 6px; padding: 6px 10px; font: inherit; }
+.st-code-workspace button:disabled { opacity: .45; }
+.st-code-workspace summary { cursor: pointer; margin-bottom: 8px; }
+.st-code-workspace button:focus-visible, .st-code-flow g:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.st-code-position, .st-code-run-state { display: inline-flex; align-items: center; gap: 6px; }
+.st-code-run-state[hidden] { display: none; }
+.st-code-asset { width: 18px; height: 18px; object-fit: contain; flex: 0 0 auto; }
