@@ -4,7 +4,7 @@
 
 import { zeroUsage, type Usage } from "./claude";
 import { Attempt, Grading, Outcome, TASK_TYPES, TaskType, recordAttempt } from "./evidence";
-import { Chat, Grade, LearnerState, Mode, Question, objectiveStamp, answerText, chatWords, codeMark, differentNumbers, fmList, fmNum, fmStr, formatQuizQuestion, givesUp, looksLikeQuestion, mcqLetter, parseMcqReply, placementQuestions, sameShortAnswer, schedule, setLevel } from "./formats";
+import { Chat, Grade, LearnerState, Mode, Question, objectiveStamp, answerText, chatWords, codeMark, differentNumbers, fmList, fmNum, fmStr, formatQuizQuestion, givesUp, looksLikeQuestion, mcqLetter, nextPart, parseMcqReply, placementQuestions, sameSequence, sameShortAnswer, schedule, setLevel } from "./formats";
 import { Decision } from "./policy";
 import { readPresentationRequest } from "./presentation";
 import { sessionFor } from "./session";
@@ -282,6 +282,10 @@ export async function markBankAnswer(eng: Engine, pending: Question, task: BankT
       return { kind: "reply", reply };
     }
     [grade, note, assumptions, mistake] = [m.grade, m.note, m.assumptions, m.mistake];
+  } else if (pending.type === "short" && pending.part && pending.task === "prediction") {
+    // A traced order in a task of several parts is marked by code, step by step.
+    grade = sameSequence(answer, pending.answer) ? "good" : "again";
+    assumptions = "the traced order was compared step by step with the expected one; separators, case and spacing were ignored";
   } else if (pending.type === "short" && sameShortAnswer(answer, pending.answer)) [grade, assumptions] = ["good", "matched the expected answer after ignoring case and spacing"];
   else if (pending.type === "short" && differentNumbers(answer, pending.answer)) [grade, assumptions] = ["again", "both answers are plain numbers, and they differ"];
   else {
@@ -297,13 +301,16 @@ export async function markBankAnswer(eng: Engine, pending: Question, task: BankT
       assumptions = sym.assumptions;
     } else {
       // Not something code can mark: one small grading call. If it fails, the error is
-      // shown with a retry and nothing is recorded: the answer stays ungraded.
-      const g = await eng.grade(pending, answer);
+      // shown with a retry and nothing is recorded: the answer stays ungraded. An explanation that
+      // is a part of a task goes to the assessor (the compile model, at the hard effort), which sees
+      // the question, the model answer and the rubric only: never the other parts or a test run.
+      const assessed = !!pending.part && pending.type === "open";
+      const g = await eng.grade(pending, answer, assessed, assessed);
       grade = g.grade;
       note = g.feedback;
       usage = g.usage;
       grading = "model";
-      assumptions = "one model judgement against the model answer, not independently checked";
+      assumptions = assessed ? "one assessor judgement against the rubric, apart from the other parts and any test run, not independently checked" : "one model judgement against the model answer, not independently checked";
       reasoning = g.reasoning;
       // Where both answers end in an expression, SymPy compares the final results. That settles
       // the result and nothing else: the method and the assumptions stay the grader's judgement.
@@ -360,7 +367,10 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
   const last = chat.messages[chat.messages.length - 1];
   // A question, or a request for a diagram or simulation, goes to the tutor as help with the open
   // question. A block of code sent for a code question is an answer, whatever its last line says.
-  const asksTutor = (t: string) => (looksLikeQuestion(t) || !!readPresentationRequest(t)) && !givesUp(t) && !(pending?.code && sentAsCode(t));
+  // An explanation that is a part of a task may well start "When…" or "Why…": only a short message
+  // ending in a question mark is taken as a question there.
+  const asks = (t: string) => (pending?.part && pending.type === "open" ? /\?\s*$/.test(t) && t.length <= 200 : looksLikeQuestion(t));
+  const asksTutor = (t: string) => (asks(t) || !!readPresentationRequest(t)) && !givesUp(t) && !(pending?.code && sentAsCode(t));
   const tools: ToolResult[] = [];
   // A bank quiz may need SymPy for the next typed answer; load it while the learner reads.
   if (questions.some((q) => q.type === "short")) eng.warmMaths();
@@ -420,7 +430,12 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
       // If the state was saved and the chat was not (an interrupted turn), this is the same
       // attempt arriving again: the record is replaced, and the counters are left alone.
       const repeat = state.attempts.some((a) => a.id === id);
-      attempt = eng.bankAttempt({ id, chat, state, q: pending, answer, result, activity: opts.adaptive ? (sessionFor(chat, state, mode).action === "retrieval" ? "retrieval" : "independent-practice") : "quiz", mode, grading, assumptions, note: result === "correct" ? "" : note, now, errorType: result === "correct" ? "" : mistake, help: taskHelp(task) });
+      // Once a part's solution has been shown (a wrong or skipped answer), the later parts of the task
+      // are answered with it in view, so they count as helped.
+      const shownBefore = !!pending.part && pending.part.n > 1 && fmStr(chat.fm, "part_shown") === pending.part.task;
+      const help = taskHelp(task) || (shownBefore ? "the solution to an earlier part of this task was shown before this part was answered" : undefined);
+      attempt = eng.bankAttempt({ id, chat, state, q: pending, answer, result, activity: opts.adaptive ? (sessionFor(chat, state, mode).action === "retrieval" ? "retrieval" : "independent-practice") : "quiz", mode, grading, assumptions, note: result === "correct" ? "" : note, now, errorType: result === "correct" ? "" : mistake, help });
+      if (pending.part) chat.fm.part_shown = shownBefore || result !== "correct" ? pending.part.task : "";
       if (reasoning) {
         // A run's breakdown is its result alone, and reasoning.ts has no way to say a run decided
         // it, so it is not kept as a grader's judgement: the run record says what ran instead.
@@ -429,7 +444,15 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
       }
       if (codeRun) attempt.code = codeRun;
       state.attempts = recordAttempt(state.attempts, attempt);
-      if (!repeat && scheduled) {
+      // A part of a task has no card of its own: it is never asked as a flashcard.
+      if (!repeat && scheduled && pending.part) {
+        if (pending.subskill in state.names) {
+          const b = state.bank[pending.subskill] ?? (state.bank[pending.subskill] = { right: 0, total: 0 });
+          b.total += 1;
+          if (result === "correct") b.right += 1;
+        }
+        for (const line of applyAttempt(state, attempt)) changes.push(line);
+      } else if (!repeat && scheduled) {
         // New numbers for a question are the same card: its schedule is the question's. Helped work
         // (a repair, a faded example, a pair) does not move it: the solution was in view, so only an
         // unaided answer on new numbers can push the card out. Known mistakes have cards of their own.
@@ -463,14 +486,16 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
   let next: Question | null = null;
   // After a known mistake comes a repair task, and after a repair a fresh check (bankvariants.ts).
   // A mistake whose check is due comes next when there is no repair to set (bankvariants.ts).
-  const follow = (task && attempt && verdict ? followUp(task, attempt, state, asked) : null) ?? (tutorSchedules(s) ? dueMistake(questions, state, today, asked) : null);
+  // A task in several parts goes on to its next part, whatever the mark: each part is its own evidence.
+  const part = verdict && pending ? nextPart(questions, pending) : null;
+  const follow = part ? null : (task && attempt && verdict ? followUp(task, attempt, state, asked) : null) ?? (tutorSchedules(s) ? dueMistake(questions, state, today, asked) : null);
   // Which idea of the subskill the last answer was on, and whether the next question builds on it
   // (the same idea from another angle) or moves to an idea not yet asked (coverage.ts).
   const topic = await eng.store.loadTopic(dir);
   const cover = new Map<number, IdeaStatus[]>();
   const coverage = (n: number): IdeaStatus[] => cover.get(n) ?? cover.set(n, coverageOf(topic, questions, state, n)).get(n)!;
   const ideaOfBank = (q: Question | undefined): IdeaStatus | null => (q ? coverage(q.subskill).find((i) => i.id === ideaOfQuestion(coverage(q.subskill), q)) ?? null : null);
-  const lastIdea = !follow && task && attempt && verdict ? ideaOfBank(task.base) : null;
+  const lastIdea = !follow && !part && task && attempt && verdict ? ideaOfBank(task.base) : null;
   // Probe timings are a ruler, not a lever: they never set what counts as a slow answer.
   const typical = secondsPerItem(state.attempts.filter((a) => !a.probe));
   const [builtIdea, builtCount] = fmStr(chat.fm, "built").split(":");
@@ -487,7 +512,8 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
     }
     return pickQuizQuestion(questions, state, asked, today, { purpose, only, rank });
   };
-  if (follow) next = follow.question;
+  if (part) next = part;
+  else if (follow) next = follow.question;
   else if (opts.adaptive) {
     if (!decision || verdict) decision = await eng.planFrom(dir, chat, state, mode, attempt && attempt.result === "correct" && attempt.skill ? attempt.skill : null);
     // Families kept for assessment stay fresh: practice does not use them up.
@@ -506,7 +532,7 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
     } else if (decision.local === "bank" && focus !== null) next = pick(purpose, (q) => q.subskill === focus && q.type !== "open");
   } else next = pick(undefined);
   // A question met before comes back with new numbers when code can make them.
-  if (next && !follow && next.generator && metBefore(next, state, asked)) next = freshVariant(next, state, asked) ?? (asked.includes(next.id) ? null : next);
+  if (next && !follow && !part && next.generator && metBefore(next, state, asked)) next = freshVariant(next, state, asked) ?? (asked.includes(next.id) ? null : next);
   if (!next && !verdict) return eng.turn(dir, chatPath, message, opts);
 
   // One line in the learner's view saying how this question follows the last: code-written, no model call.
@@ -535,7 +561,10 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
   }
   chat.fm.await_continue = !next && opts.adaptive ? "yes" : "";
   chat.messages.push({ role: "tutor", text: reply });
-  const why = follow
+  // A later part keeps the action the task was started under, so its record and activity stay the same.
+  const why = part && next
+    ? { action: sessionFor(chat, state, mode).action || "quiz", reason: `Part ${next.part!.n} of ${next.part!.of} of the task in progress: each part is marked on its own.` }
+    : follow
     ? { action: follow.action, reason: follow.reason }
     : opts.adaptive && decision
       ? { action: decision.action, reason: decision.reason }

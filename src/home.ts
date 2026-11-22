@@ -7,6 +7,7 @@ import { ago, recommend, workloadForecast, workloadLine } from "./overview";
 import { ACTION_LABEL, Action } from "./policy";
 import type { Screen, TutorView } from "./view";
 import { button, chip, confirmAction, emptyState, iconButton, modeInfo, panel, progressBar, stampLabel } from "./ui";
+import { EXAMPLES } from "./examples";
 
 const MINUTES = [10, 25, 45];
 
@@ -118,6 +119,14 @@ export class HomeScreen implements Screen {
     }
   }
 
+  /** One button per bundled example course: it is saved as a topic with no model call, and opened. */
+  private exampleButtons(parent: HTMLElement): void {
+    for (const ex of EXAMPLES) {
+      const have = this.view.topics.some((t) => t.title === ex.title);
+      button(parent, { label: `${have ? "Open" : "Add"} example: ${ex.title}`, icon: "book-open", tone: "ghost", title: ex.blurb, onClick: () => void this.view.plugin.addExample(ex.id) });
+    }
+  }
+
   private render(): void {
     const el = this.el;
     if (!el) return;
@@ -128,6 +137,7 @@ export class HomeScreen implements Screen {
     if (!v.topics.length) {
       const box = emptyState(page, { icon: "graduation-cap", title: "Start with a topic", text: "A topic is compiled once from your notes, a syllabus, or just a subject name. Study Tutor then teaches, quizzes and tracks what you can actually do, one concept at a time. Or just ask: a question or a goal gets an answer straight away." });
       button(box, { label: "New topic", icon: "plus", tone: "primary", onClick: () => v.plugin.openNewTopic() });
+      this.exampleButtons(box);
       this.askBox(box);
       void this.recentQuestions(box);
       return;
@@ -215,6 +225,7 @@ export class HomeScreen implements Screen {
     const search = topics.tools.createEl("input", { type: "search", cls: "st-search", attr: { placeholder: "Search topics", "aria-label": "Search topics" } });
     search.value = this.filter;
     button(topics.tools, { label: "New topic", icon: "plus", onClick: () => v.plugin.openNewTopic() });
+    this.exampleButtons(topics.tools);
     const list = topics.body.createDiv({ cls: "st-list", attr: { role: "list" } });
     const draw = () => {
       list.empty();

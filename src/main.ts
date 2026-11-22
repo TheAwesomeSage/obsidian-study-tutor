@@ -20,6 +20,7 @@ import { existsSync, promises as fsp, readFileSync } from "fs";
 import { createHash } from "crypto";
 import * as visualRegistry from "./visuals/registry";
 import { adaptRegistry } from "./visualcontract";
+import { EXAMPLES, installExample } from "./examples";
 import { DEFAULT_RETENTION, RETENTION_RANGE, ScheduleOwner, SchedulerChoice, SchedulerId, clampRetention, scheduleOwner, schedulerFor, schedulerLabel, schedulerRef } from "./scheduler";
 
 export interface TutorSettings extends EngineSettings {
@@ -372,6 +373,26 @@ export default class StudyTutorPlugin extends Plugin {
     }
     await workspace.revealLeaf(leaf);
     return leaf.view instanceof TutorView ? leaf.view : null;
+  }
+
+  /**
+   * Saves a bundled example course as a topic (no model call) and opens it. One already in the
+   * vault is opened as it is, so a learner's progress on it is never replaced.
+   */
+  async addExample(id: string): Promise<string | null> {
+    try {
+      const { dir, added } = await installExample(this.store, id, this.opts.targetLevel);
+      new Notice(added ? "Study Tutor: example course added. It was written by hand, so no model was called." : "Study Tutor: the example course is already in your vault, so it was opened as it is.");
+      this.data.activeTopic = dir;
+      await this.save();
+      const view = await this.activateView();
+      await view?.reload();
+      view?.go("topic");
+      return dir;
+    } catch (e) {
+      new Notice(`Study Tutor: ${(e as Error).message}`);
+      return null;
+    }
   }
 
   /** Opens the New topic dialog. A seed (from a free chat) fills in the title and goal and links the course back to that chat. */

@@ -445,3 +445,14 @@ test("C++ concurrent tasks are race-checked only with ThreadSanitizer", { timeou
     console.log(`# no ThreadSanitizer with ${r.backend}`);
   }
 });
+
+test("C++ example course: the queue task's reference solution passes all its tests when compiled for real", { timeout: 180000 }, async (ctx) => {
+  const skip = await compilerSkip("cpp");
+  if (skip) return ctx.skip(skip);
+  const { EXAMPLES } = await import("../src/examples");
+  const { parseQuestions } = await import("../src/formats");
+  const q = parseQuestions(EXAMPLES[0].questionsBody).find((x) => x.part?.task === "spsc-queue" && x.code)!;
+  const r = await native().run(q.code!, q.answer);
+  assert.equal(r.status, "ran", r.message);
+  assert.deepEqual([r.passed, r.total], [4, 4], JSON.stringify(r.tests));
+});

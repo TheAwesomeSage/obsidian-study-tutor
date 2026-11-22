@@ -1508,3 +1508,107 @@ test("diagnose then teach: reteaching and modelling a strategy load the full les
   assert.equal(lessonDepth({ mode: "tutor", action: null, move: check([{ when: "", move: "reteach", reason: "REPEATED_FAILURE" }]), said: "", intent: "attempt" as any }).level, "lesson");
   assert.equal(lessonDepth({ mode: "tutor", action: null, move: check([{ when: "", move: "probe", reason: "FIND_FAILED_STEP" }]), said: "", intent: "attempt" as any }).level, "card");
 });
+
+test("multi-part tasks: a part is read from its line, traces compare step by step, and a later part is never picked or placed alone", () => {
+  assert.deepEqual(F.parsePart("SPSC-queue 2/3"), { task: "spsc-queue", n: 2, of: 3 });
+  for (const bad of ["queue 0/3", "queue 4/3", "queue 1/1", "queue 1/9", "queue", "../x 1/2"]) assert.equal(F.parsePart(bad), null, bad);
+  assert.ok(F.sameSequence("Push1 -> full → pop1;push2", "push1, full, pop1, push2"), "separators, case and spacing are ignored");
+  assert.ok(!F.sameSequence("push1, pop1, full, push2", "push1, full, pop1, push2"), "the order is not");
+  assert.ok(!F.sameSequence("push1, full, pop1", "push1, full, pop1, push2"), "nor a missing step");
+  assert.ok(!F.sameSequence("", "a"));
+  assert.ok(F.sameSequence("push 1, full, pop 1", "push1, full, pop1"), "spacing inside a step is ignored");
+  assert.ok(F.sameSequence("P1 C1 P2", "P1, C1, P2"), "an answer with no separator is split at spaces");
+  const qs = F.parseQuestions(`### Q1\nsubskill: 1\ntype: short\npart: t 1/2\ntask: prediction\nquestion: Trace it.\nanswer: a, b\n\n### Q2\nsubskill: 1\ntype: open\npart: t 2/2\nquestion: Why?\nanswer: Because.\n\n### Q3\nsubskill: 2\ntype: short\npart: nonsense\nquestion: Plain.\nanswer: 1\n`);
+  assert.deepEqual(qs.map((q) => q.part?.n ?? null), [1, 2, null], "a bad part line leaves a plain question");
+  assert.equal(F.nextPart(qs, qs[0])?.id, "Q2");
+  assert.equal(F.nextPart(qs, qs[1]), null);
+  const st = F.newState(F.parseTopic(CARD(NAMES)), 4);
+  assert.ok(!F.placementQuestions(qs, st).some((q) => q.part), "no part of a task is a placement question, not even part 1");
+  assert.equal(F.placementQuestions(qs, st)[0]?.id, "Q3");
+  assert.deepEqual(F.reviewQueue(qs, st, "2026-11-15", 20).map((q) => q.id), ["Q3"], "nor a flashcard");
+  assert.equal(F.parseQuestions(`### Q1\nsubskill: 1\ntype: short\npart: t 1/2\nquestion: Q?\nanswer: 1\ngenerator: {"params":{}}\n`)[0].generator, undefined, "a part gets no new numbers");
+});
+
+test("multi-part tasks: the C++ concurrency example installs once, asks trace, implement and defend in order, and records each part apart", async () => {
+  const t = await setup();
+  const { installExample } = await import("../src/examples");
+  const { TESTS_ESTABLISH } = await import("../src/codequestions");
+  const first = await installExample(t.store, "cpp-concurrency", 4);
+  assert.equal(first.added, true);
+  const again = await installExample(t.store, "cpp-concurrency", 4);
+  assert.deepEqual(again, { dir: first.dir, added: false }, "a second add opens the same course, so progress is never replaced");
+  assert.equal(t.calls.length, 0, "installing calls no model");
+  const dir = first.dir;
+  const topic = await t.store.loadTopic(dir);
+  assert.deepEqual([topic.title, topic.subskills.map((s) => s.name), topic.fm.example], ["C++ concurrency", ["Threads and data races", "Mutexes and condition variables", "Atomics and memory ordering"], "cpp-concurrency"]);
+  assert.match(topic.outcome, /Done well when:[\s\S]*passing tests do and do not establish/);
+  const qs = await t.store.loadQuestions(dir);
+  const parts = qs.filter((q) => q.part?.task === "spsc-queue").sort((a, b) => a.part!.n - b.part!.n);
+  assert.deepEqual(parts.map((q) => [q.part!.n, q.type, q.task]), [[1, "short", "prediction"], [2, "open", "application"], [3, "open", "explanation"]]);
+  const code = parts[1].code!;
+  assert.deepEqual([code.language, code.concurrent, code.tests.length, code.tests.filter((x) => x.hidden).length], ["cpp", true, 4, 1]);
+  assert.match(code.starter ?? "", /std::size_t head_ = 0;/, "the starter has the race");
+  assert.match(parts[1].answer, /memory_order_release[\s\S]*std::atomic<std::size_t> tail_\{0\};/, "the reference solution is decoded");
+  assert.ok(qs.every((q) => q.rubric || q.type !== "open" || q.code), "every open question but the code one has a rubric");
+  assert.equal(parts[1].rubric, undefined, "the run decides part 2; its method is defended in part 3");
+
+  const state = await t.store.loadState(dir, 4);
+  assert.ok(!F.placementQuestions(qs, state).some((q) => q.part && q.part.n > 1));
+  const chat = await t.store.newChat(dir, "C++ concurrency", "quiz", new Date(2026, 10, 15, 10, 0));
+  const runner = new FakeRunner((task) => ran(task, ["pass", "pass", "pass", "pass"], { backend: "clang++ 17 -std=c++20 -fsanitize=thread", sanitizer: "clean" }));
+  t.engine.codeRunner = runner;
+  const c = await t.store.loadChat(chat);
+  c.fm.card = parts[0].id;
+  await t.store.saveChat(chat, c);
+
+  // Part 1, the trace: marked by code, step by step, and part 2 follows whatever the mark.
+  let r = await t.engine.quizTurn(dir, chat, "push1 -> full -> pop1 -> push2 -> pop2 -> empty -> push3 -> pop3");
+  let a = r.attempt!;
+  assert.deepEqual([a.result, a.grading, a.taskType, a.questionId], ["correct", "deterministic", "prediction", parts[0].id]);
+  assert.match(a.assumptions, /traced order was compared step by step/);
+  assert.match(r.reply, /part 2 of 3/);
+  assert.equal((await t.store.loadChat(chat)).fm.card, parts[1].id);
+
+  // Part 2, implement: the run decides it, and the record states what the tests establish.
+  r = await t.engine.quizTurn(dir, chat, `\`\`\`cpp\n${parts[1].answer}\n\`\`\``);
+  a = r.attempt!;
+  assert.deepEqual([a.result, a.grading, a.taskType, a.code?.passed], ["correct", "executed", "application", 4]);
+  assert.ok(a.assumptions.includes(TESTS_ESTABLISH.toLowerCase().replace(/\.$/, "")), a.assumptions);
+  assert.ok(r.reply.includes(TESTS_ESTABLISH), "and the learner is told");
+  assert.match(r.reply, /part 3 of 3/);
+  assert.equal(t.calls.length, 0, "no model call for the trace or the run");
+
+  // Part 3, defend: one assessor call on the compile model, which never sees the run.
+  t.settings.compileModel = "opus";
+  t.replies.push(JSON.stringify({ grade: "hard", feedback: "Names the synchronisation; misses slot reuse.", reasoning: { result: "partial", method: "sound", certainty: "complete" } }));
+  r = await t.engine.quizTurn(dir, chat, "The acquire load reads the release store, so the slot write happens-before the read. With relaxed the consumer could read a stale slot, and x86 would hide it, so the tests cannot establish thread safety.");
+  assert.equal(t.calls.length, 1);
+  assert.deepEqual([t.calls[0].model, t.calls[0].effort], ["opus", "high"], "the assessor is the compile model at the hard effort");
+  assert.ok(!/tests passed|clang\+\+|five items/.test(t.calls[0].input), "the assessor sees no test run");
+  a = r.attempt!;
+  assert.deepEqual([a.taskType, a.grading, a.questionId], ["explanation", "model", parts[2].id]);
+  assert.match(a.assumptions, /assessor judgement against the rubric, apart from the other parts and any test run/);
+  const st = await t.store.loadState(dir, 4);
+  assert.deepEqual(st.attempts.map((x) => x.questionId), parts.map((q) => q.id), "three parts, three records");
+
+  assert.ok(!st.attempts.some((x) => x.assisted), "every part was answered without help");
+  assert.ok(!parts.some((q) => st.cards[q.id]), "a part gets no flashcard");
+  assert.ok(!(await t.fs.read(await t.store.exportFlashcards(dir))).includes("Trace"), "nor a card in the flashcard note");
+
+  // A wrong trace is recorded as wrong, the task still goes on to part 2, and with the trace's answer
+  // now shown, part 2 counts as helped.
+  const c2 = await t.store.loadChat(chat);
+  c2.fm.card = parts[0].id;
+  await t.store.saveChat(chat, c2);
+  r = await t.engine.quizTurn(dir, chat, "push1, pop1, push2, pop2, push3, pop3, empty, full");
+  assert.deepEqual([r.attempt?.result, r.attempt?.assisted, (await t.store.loadChat(chat)).fm.card], ["incorrect", false, parts[1].id]);
+  assert.match(r.reply, /Answer: push1, full, pop1/);
+  r = await t.engine.quizTurn(dir, chat, `\`\`\`cpp\n${parts[1].answer}\n\`\`\``);
+  assert.deepEqual([r.attempt?.result, r.attempt?.assisted], ["correct", true]);
+  assert.match(r.attempt!.assistance.join(" "), /solution to an earlier part of this task was shown/);
+  // An explanation that starts like a question is still an answer to mark, not a request for help.
+  t.replies.push(JSON.stringify({ grade: "good", feedback: "", reasoning: { result: "correct", method: "sound", certainty: "complete" } }));
+  r = await t.engine.quizTurn(dir, chat, "When the acquire load reads the value of the release store, the two synchronise, so the slot write happens-before the read.");
+  assert.deepEqual([r.attempt?.questionId, r.attempt?.assisted], [parts[2].id, true]);
+  assert.equal((await t.store.loadChat(chat)).fm.part_shown, "spsc-queue");
+});

@@ -1099,7 +1099,7 @@ export class Store {
     const tag = topic.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "topic";
     const p = this.flashcardPath(dir);
     const existing = (await this.fs.exists(p)) ? await this.fs.read(p) : "";
-    const next = buildSrNote(qs, tag, existing);
+    const next = buildSrNote(qs.filter((q) => !q.part), tag, existing);
     if (next !== existing.replace(/\r\n/g, "\n")) await this.writeFile(p, next);
     return p;
   }

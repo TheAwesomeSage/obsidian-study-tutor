@@ -1323,3 +1323,38 @@ test("outcome check: the topic page offers it under the outcome, the check has n
   assert.match(root.textContent, /Last outcome check \d{4}-\d{2}-\d{2}: 1 of 1 met\./);
   await view.onClose();
 });
+
+test("example course: Home adds the C++ concurrency course with no model call, opens it, and a second add keeps the same course", async () => {
+  const fs = new MemFS();
+  const leaves: any[] = [];
+  let plugin: any = null;
+  const app = makeApp(fs, leaves, [], () => plugin);
+  plugin = new (StudyTutorPlugin as any)(app, { id: "study-tutor" }) as StudyTutorPlugin;
+  await plugin.onload();
+  await tick();
+  let calls = 0;
+  plugin.engine.call = async () => {
+    calls++;
+    throw new Error("no model");
+  };
+  const view: any = await plugin.activateView();
+  const root = view.contentEl;
+  assert.match(root.textContent, /Start with a topic/);
+  const add = button(root, "Add example: C++ concurrency");
+  assert.match(add.getAttribute("aria-label") ?? "", /three-part lock-free queue task/);
+  add.click();
+  await tick(80);
+  assert.equal(calls, 0, "no model call");
+  const topics = await plugin.store.listTopics();
+  assert.deepEqual(topics.map((t: any) => t.title), ["C++ concurrency"]);
+  assert.equal(plugin.data.activeTopic, topics[0].dir);
+  assert.match(notices.at(-1) ?? "", /example course added/);
+  assert.equal(root.getAttribute("data-screen"), "topic", "the new course is opened");
+  // With the course in the vault, Home offers to open it, and that opens the same course.
+  view.go("home");
+  await tick();
+  button(root, "Open example: C++ concurrency").click();
+  await tick(80);
+  assert.equal((await plugin.store.listTopics()).length, 1);
+  assert.match(notices.at(-1) ?? "", /already in your vault/);
+});

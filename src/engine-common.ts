@@ -6,7 +6,7 @@ import { Usage } from "./claude";
 import { daysBetween as dayGap } from "./dates";
 import type { ModelProviderSettings } from "./model-provider";
 import { Attempt, Grading, TASK_TYPES, TaskType } from "./evidence";
-import { Chat, Frontmatter, LearnerState, Mode, Question, SourceMode, Topic, fmStr, mastery, setLevel, words } from "./formats";
+import { Chat, Frontmatter, LearnerState, Mode, Question, SourceMode, Topic, fmStr, laterPart, mastery, setLevel, words } from "./formats";
 import { ACTION_LABEL, Action, Decision, PolicyWeights, PrereqCheck } from "./policy";
 import { ActivityRecord } from "./configure";
 import { type CompileMetrics, type ExpansionRequest as CompileExpansionRequest } from "./compiler";
@@ -276,7 +276,8 @@ export function pickQuizQuestion(questions: Question[], s: LearnerState, asked: 
   }
   const seenToday = new Set(s.attempts.filter((a) => a.timestamp.slice(0, 10) === today).map((a) => baseQuestionId(a.questionId)));
   const times = (q: Question) => asked.filter((id) => baseQuestionId(id) === q.id).length;
-  const left = questions.filter((q) => times(q) < (q.generator ? 3 : 1) && (!opts.only || opts.only(q)) && (purpose !== "practice" || !kept.has(q.id)));
+  // A later part of a task is asked only straight after the part before it.
+  const left = questions.filter((q) => !laterPart(q) && times(q) < (q.generator ? 3 : 1) && (!opts.only || opts.only(q)) && (purpose !== "practice" || !kept.has(q.id)));
   if (!left.length) return null;
   const level = (q: Question) => s.levels[q.subskill] ?? 0;
   const fresh = (q: Question) => (purpose === "transfer" ? (unmet.has(q.id) ? (kept.has(q.id) ? 0 : 1) : 2) : kept.has(q.id) ? 1 : 0);

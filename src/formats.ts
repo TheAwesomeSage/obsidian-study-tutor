@@ -315,9 +315,59 @@ export interface Question {
   code?: CodeTask;
   /** Stable concept id; set only on sealed questions. */
   concept?: string;
+  /**
+   * One part of a task in several parts ("part: spsc-queue 2/4"): the parts are asked in order, each
+   * marked on its own by its own route and recorded as its own attempt. Only part 1 is ever picked.
+   */
+  part?: TaskPart;
 }
 
-const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation", "family", "task", "difficulty", "rubric", "generator", "code", "concept"] as const;
+/** Where a question sits in a task of several parts. */
+export interface TaskPart {
+  /** The task the parts belong to, a slug. */
+  task: string;
+  /** This part, from 1. */
+  n: number;
+  /** How many parts the task has, 2 to 8. */
+  of: number;
+}
+
+/** Reads "spsc-queue 2/4"; null when it is not a valid part. */
+export function parsePart(raw: string): TaskPart | null {
+  const m = /^([a-z0-9][a-z0-9-]{0,59})\s+(\d)\s*\/\s*(\d)$/i.exec(raw.trim());
+  if (!m) return null;
+  const [n, of] = [Number(m[2]), Number(m[3])];
+  return n >= 1 && of >= 2 && of <= 8 && n <= of ? { task: m[1].toLowerCase(), n, of } : null;
+}
+
+/** The part after `q` in its task, when the bank has it. */
+export function nextPart(questions: Question[], q: Question): Question | null {
+  const p = q.part;
+  if (!p || p.n >= p.of) return null;
+  return questions.find((x) => x.part?.task === p.task && x.part.n === p.n + 1) ?? null;
+}
+
+/** A question that only follows the part before it: never picked or placed on its own. */
+export const laterPart = (q: Question): boolean => !!q.part && q.part.n > 1;
+
+/**
+ * A traced order ("P1, C1, P2" or "P1 -> C1 -> P2") compared step by step with the expected one:
+ * case, spacing and the separator are ignored, the order and every step are not.
+ */
+export function sameSequence(given: string, expected: string): boolean {
+  // Steps are split at commas, semicolons, arrows, bars or new lines; only an answer with none of
+  // those is split at spaces. Spacing inside a step ("push 1") is ignored.
+  const steps = (s: string) => {
+    const t = s.toLowerCase().replace(/\$/g, "");
+    const marked = /,|;|->|→|=>|\||\n/.test(t);
+    return t.split(marked ? /,|;|->|→|=>|\||\n/ : /\s+/).map((x) => x.replace(/\s+/g, "").replace(/[.]+$/, "")).filter(Boolean);
+  };
+  const a = steps(given);
+  const b = steps(expected);
+  return a.length > 0 && a.length === b.length && a.every((x, i) => x === b[i]);
+}
+
+const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation", "family", "task", "difficulty", "rubric", "generator", "code", "concept", "part"] as const;
 const Q_TASKS = ["recall", "application", "transfer", "prediction", "explanation", "error-finding", "teach-back", "edge-case", "probe"];
 
 const OPTION_LABEL = /^\(?[A-Za-z][.):]\s+/;
@@ -391,8 +441,11 @@ export function parseQuestions(md: string): Question[] {
     if (Number.isInteger(difficulty) && difficulty >= 1 && difficulty <= 5) q.difficulty = difficulty;
     if (get("concept")) q.concept = get("concept").slice(0, 80);
     if (get("rubric")) q.rubric = get("rubric").slice(0, 800);
-    // A spec that fails its checks is dropped: the question stays, with its own numbers only.
-    const generator = type === "short" && get("generator") ? parseFamilySpec(get("generator")) : null;
+    const part = get("part") ? parsePart(get("part")) : null;
+    if (part) q.part = part;
+    // A spec that fails its checks is dropped: the question stays, with its own numbers only. A part
+    // of a task keeps its own numbers too, so no variant, faded example or pair ever asks it alone.
+    const generator = type === "short" && !part && get("generator") ? parseFamilySpec(get("generator")) : null;
     if (generator && "spec" in generator) q.generator = generator.spec;
     // "code:" is a one-line JSON task. One that fails its checks is dropped, and the question
     // stays an open one for the grader, with no tests to run.
@@ -748,17 +801,19 @@ export function schedule(prev: CardSched | undefined, grade: Grade, today: strin
 
 /** Due cards first, then unseen cards up to today's remaining allowance. Families kept for assessment are never new cards. */
 export function reviewQueue(questions: Question[], s: LearnerState, today: string, newPerDay: number): Question[] {
-  const due = questions.filter((q) => s.cards[q.id] && s.cards[q.id].due <= today);
+  // A part of a task is never a flashcard: it makes sense only after the part before it.
+  const cards = questions.filter((q) => !q.part);
+  const due = cards.filter((q) => s.cards[q.id] && s.cards[q.id].due <= today);
   const used = s.newDate === today ? s.newCount : 0;
   const kept = reservedQuestions(questions);
-  const fresh = questions.filter((q) => !s.cards[q.id] && !kept.has(q.id)).slice(0, Math.max(0, newPerDay - used));
+  const fresh = cards.filter((q) => !s.cards[q.id] && !kept.has(q.id)).slice(0, Math.max(0, newPerDay - used));
   return [...due, ...fresh];
 }
 
 // ---------- quiz from the question bank, marked by plain code ----------
 
 export function formatQuizQuestion(q: Question, s: LearnerState): string {
-  const head = `**${s.names[q.subskill] ?? "Question"}**\n\n${q.question}`;
+  const head = `**${s.names[q.subskill] ?? "Question"}**${q.part ? ` · part ${q.part.n} of ${q.part.of}` : ""}\n\n${q.question}`;
   if (q.type === "mcq") return `${head}\n\n${q.options.map((o) => `- ${o}`).join("\n")}\n\n*Reply with a letter.*`;
   // A code question shows its visible tests and starting code; hidden tests only after marking.
   if (q.code) return `${head}\n\n${renderCodeTask(q.code)}`;
@@ -789,7 +844,8 @@ export function placementQuestions(questions: Question[], s: LearnerState): Ques
   const kept = reservedQuestions(questions);
   const pick = (qs: Question[]) => qs.find((x) => x.type === "mcq") ?? qs.find((x) => x.type === "short");
   for (const n of Object.keys(s.names).map(Number).sort((a, b) => a - b)) {
-    const mine = questions.filter((q) => q.subskill === n);
+    // A part of a task is asked only inside its task, and marked by its own route.
+    const mine = questions.filter((q) => q.subskill === n && !q.part);
     const q = pick(mine.filter((x) => !kept.has(x.id))) ?? pick(mine);
     if (q) out.push(q);
   }
