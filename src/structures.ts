@@ -47,6 +47,8 @@ export interface StructureTwin {
   topic: string;
   dir: string;
   level: number | null;
+  /** The recorded level is backed, with an independent success and no pending lapse/revision. */
+  demonstrated: boolean;
   /** The twin's card section, for the marker. */
   section: string;
 }
@@ -77,13 +79,14 @@ export function bridgeMarking(newName: string, newSection: string, twin: Structu
  * Attempts and days from the first attempt on a subskill to its first independent success, and
  * whether a bridge was answered on it. Null until there is an independent success. Probes are left out.
  */
-export function timeToIndependence(attempts: Attempt[], skill: number, firstIndependentDay: string | null): { attempts: number; days: number; bridgedFrom: string } | null {
+export function timeToIndependence(attempts: Attempt[], skill: number, firstIndependentSuccess: string | null): { attempts: number; days: number; bridgedFrom: string } | null {
   const mine = attempts.filter((a) => a.skill === skill && !a.probe).sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
-  if (!firstIndependentDay || !mine.length) return null;
-  const upTo = mine.filter((a) => a.timestamp.slice(0, 10) <= firstIndependentDay);
+  if (!firstIndependentSuccess || !mine.length) return null;
+  const upTo = mine.filter((a) => a.timestamp <= firstIndependentSuccess);
+  if (!upTo.length) return null;
   const firstDay = mine[0].timestamp.slice(0, 10);
-  const days = Math.round((Date.parse(firstIndependentDay) - Date.parse(firstDay)) / 86400000);
-  return { attempts: upTo.length, days, bridgedFrom: mine.find((a) => a.transferFrom)?.transferFrom ?? "" };
+  const days = Math.round((Date.parse(firstIndependentSuccess.slice(0, 10)) - Date.parse(firstDay)) / 86400000);
+  return { attempts: upTo.length, days, bridgedFrom: upTo.find((a) => a.transferFrom && a.result !== "skipped" && a.result !== "ungraded" && a.verification !== "disputed")?.transferFrom ?? "" };
 }
 
 /**

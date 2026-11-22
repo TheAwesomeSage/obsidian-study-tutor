@@ -80,7 +80,7 @@ type: short
 part: rc-step 1/4
 task: prediction
 question: **Predict** · An RC low-pass filter with R = 1 kΩ and C = 1 mF starts uncharged, and a 1 V step is applied at t = 0. Before working anything out, predict three values of the output voltage: just after the step, after a very long time, and at t = 1 s, the last to two decimal places. Give them in that order, separated by commas.
-answer: 0, 1, 0.63
+answer: 0 V, 1 V, 0.63 V
 family: rc-step-predict
 difficulty: 2
 explanation: The capacitor's voltage cannot jump, so it starts at 0. It settles at the input, 1 V. τ = RC = 1 s, and 1 − e^{−1} ≈ 0.63.

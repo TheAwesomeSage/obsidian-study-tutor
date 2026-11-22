@@ -21,6 +21,7 @@ import { createHash } from "crypto";
 import * as visualRegistry from "./visuals/registry";
 import { adaptRegistry } from "./visualcontract";
 import { EXAMPLES, installExample } from "./examples";
+import type {GraphLayoutStyle, Positions} from "./graphlayout";
 import { DEFAULT_RETENTION, RETENTION_RANGE, ScheduleOwner, SchedulerChoice, SchedulerId, clampRetention, scheduleOwner, schedulerFor, schedulerLabel, schedulerRef } from "./scheduler";
 
 export interface TutorSettings extends EngineSettings {
@@ -72,6 +73,9 @@ interface PluginData {
   drafts: Record<string, string>;
   /** Where each concept sits on the knowledge graph, so the map stays familiar. */
   graphLayout: Record<string, [number, number]>;
+  /** Each layout keeps its own saved coordinates; the previous map survives tree adoption. */
+  graphLayoutMode?: GraphLayoutStyle;
+  graphLayouts?: Partial<Record<GraphLayoutStyle,Positions>>;
 }
 
 const DEFAULTS: TutorSettings = {

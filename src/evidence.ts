@@ -261,6 +261,8 @@ export interface SkillEvidence {
   lastIndependentSuccess: string | null;
   /** Day of the first independent success, or null. A transfer counts only on a later day. */
   firstIndependentDay: string | null;
+  /** Timestamp of that first qualifying success, for counts that stop at the actual answer. */
+  firstIndependentSuccess: string | null;
   /** Day the next delayed independent check on this concept falls due, or null before any independent success. */
   nextCheck: string | null;
   /** Distinct days in a row (since the last independent failure) with an independent success. */
@@ -312,7 +314,7 @@ export const PREDICTION_TARGET = "the next unassisted first answer on this conce
  */
 export function skillEvidence(attempts: Attempt[], skill: number, revision?: { at: string; why: string; refs?: string[] }): SkillEvidence {
   const mine = attempts.filter((a) => a.skill === skill && !a.probe).sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
-  const e: SkillEvidence = { graded: 0, correctAny: 0, partialAny: 0, independent: 0, independentCorrect: 0, independentDays: 0, delayedTransfer: false, recentFailures: 0, lapse: false, delayedLapse: false, estimate: null, brier: null, rated: 0, calibrationGap: null, last: null, lastResult: null, errors: {}, assistedCount: 0, exposedCount: 0, selfCount: 0, ungraded: 0, disputed: 0, inconclusive: 0, lastIndependent: null, lastIndependentSuccess: null, firstIndependentDay: null, nextCheck: null, streakDays: 0, teachBack: false, edgeCase: false, untyped: 0, families: 0, recheck: null };
+  const e: SkillEvidence = { graded: 0, correctAny: 0, partialAny: 0, independent: 0, independentCorrect: 0, independentDays: 0, delayedTransfer: false, recentFailures: 0, lapse: false, delayedLapse: false, estimate: null, brier: null, rated: 0, calibrationGap: null, last: null, lastResult: null, errors: {}, assistedCount: 0, exposedCount: 0, selfCount: 0, ungraded: 0, disputed: 0, inconclusive: 0, lastIndependent: null, lastIndependentSuccess: null, firstIndependentDay: null, firstIndependentSuccess: null, nextCheck: null, streakDays: 0, teachBack: false, edgeCase: false, untyped: 0, families: 0, recheck: null };
   const exposedOn = new Map<string, string>();
   const correctQs = new Set<string>();
   const partialQs = new Set<string>();
@@ -398,6 +400,7 @@ export function skillEvidence(attempts: Attempt[], skill: number, revision?: { a
   e.lastIndependent = lastPoint?.at ?? null;
   e.lastIndependentSuccess = [...points].reverse().find((p) => p.ok)?.at ?? null;
   e.firstIndependentDay = firstOk?.day ?? null;
+  e.firstIndependentSuccess = firstOk?.at ?? null;
   if (e.lastIndependentSuccess) {
     // Separate success days since the last independent failure set the next interval.
     const days: string[] = [];

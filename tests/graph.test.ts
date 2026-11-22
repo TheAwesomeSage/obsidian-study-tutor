@@ -3,10 +3,82 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as F from "../src/formats";
-import { joinCourse, neighbourhood, syncTopicGraph } from "../src/course";
+import { joinCourse, neighbourhood, syncTopicGraph, effectivePrereqs, wouldCycle, Course } from "../src/course";
 import { LayoutEdge, LayoutNode, bounds, depths, layoutGraph } from "../src/graphlayout";
 import { ago, recommend, topicInfo } from "../src/overview";
-import { topicColorSlot } from "../src/graphcanvas";
+import { GraphCanvas, GNode, topicColorSlot, curveArrow } from "../src/graphcanvas";
+
+test("prerequisite trees retain multiple parents and cross-topic edges, without making other relations prerequisites",()=>{
+  const nodes=[{id:"a",group:"one"},{id:"b",group:"one"},{id:"c",group:"two"},{id:"d",group:"two"},{id:"e",group:"three"}];
+  const edges=[{from:"b",to:"a",orders:true},{from:"c",to:"a",orders:true},{from:"d",to:"b",orders:true},{from:"d",to:"c",orders:true},{from:"e",to:"d",orders:false}];
+  const before=JSON.stringify({nodes,edges}),pos=layoutGraph(nodes,edges,{},"tree");
+  assert.deepEqual(layoutGraph(nodes,edges,{},"tree"),pos);
+  for(const e of edges.filter(e=>e.orders))assert.ok(pos[e.from][1]>pos[e.to][1],"every prerequisite is above what depends on it");
+  assert.equal(pos.b[1],pos.c[1],"siblings in different topics retain the same prerequisite depth");
+  assert.equal(JSON.stringify({nodes,edges}),before,"layout never rewrites the graph");
+  const added=layoutGraph([...nodes,{id:"f",group:"two"}],[...edges,{from:"f",to:"d",orders:true}],pos,"tree");
+  for(const n of nodes)assert.deepEqual(added[n.id],pos[n.id],"existing saved tree positions stay fixed");
+  assert.ok(added.f[1]>pos.d[1]);
+});
+
+test("dense prerequisite forests stay finite and responsive, including malformed cycles",()=>{
+  const {nodes,edges}=course(12,160),start=performance.now();
+  const pos=layoutGraph(nodes,edges,{},"tree");
+  assert.ok(performance.now()-start<4000);
+  assert.equal(Object.keys(pos).length,nodes.length);
+  assert.ok(Object.values(pos).every(p=>p.every(Number.isFinite)));
+  const loop=layoutGraph([{id:"a",group:"g"},{id:"b",group:"g"}],[{from:"a",to:"b",orders:true},{from:"b",to:"a",orders:true}],{},"tree");
+  assert.ok(Object.values(loop).every(p=>p.every(Number.isFinite)));
+});
+
+test("direction markers point at the target and stay outside large circles", () => {
+  for (const [a, b] of [[[0,0],[100,0]], [[100,0],[0,0]], [[0,0],[0,100]], [[0,100],[0,0]]] as [[number,number],[number,number]][]) {
+    const mx=(a[0]+b[0])/2+(b[1]-a[1])*0.12, my=(a[1]+b[1])/2-(b[0]-a[0])*0.12;
+    const arrow=curveArrow(a,[mx,my],b,4,30,7)!;
+    assert.ok(arrow);
+    assert.ok(Math.hypot(arrow.x-b[0],arrow.y-b[1])>=32.5, "head must not be hidden under the target");
+    assert.ok(Math.cos(arrow.angle)*(b[0]-a[0])+Math.sin(arrow.angle)*(b[1]-a[1])>0, "marker points from dependent to prerequisite, including reversed edges");
+  }
+  assert.equal(curveArrow([0,0],[10,0],[20,0],12,12,5),null,"overlapping dots have no legible room for a marker");
+});
+
+test("rejected links affect neither prerequisite traversal nor neighbourhood focus", () => {
+  const ids=["a","b","c","d"];
+  const graph={version:1 as const,concepts:ids.map((id,i)=>({id,n:i+1,name:id,sources:[]})),edges:[
+    {from:"b",to:"a",type:"requires" as const,status:"reviewed" as const,source:"topic card"},
+    {from:"c",to:"b",type:"requires" as const,status:"inferred" as const,source:"topic card"},
+    {from:"a",to:"c",type:"requires" as const,status:"rejected" as const,source:"topic card"},
+    {from:"b",to:"d",type:"synoptic" as const,status:"rejected" as const,source:"learner"},
+  ]};
+  const course:Course=joinCourse([{dir:"t",title:"T",graph}]);
+  const hood=neighbourhood(course,"b");
+  assert.deepEqual([...hood.ancestors],["a"]);
+  assert.deepEqual([...hood.descendants],["c"]);
+  assert.deepEqual(hood.related,[]);
+  assert.deepEqual(effectivePrereqs(graph),{1:[],2:[1],3:[2],4:[]});
+  assert.equal(wouldCycle(graph.edges,"a","c"),true,"restoring the rejected prerequisite would close a loop");
+  const canvas = new GraphCanvas({getContext:()=>null,addEventListener:()=>{}} as unknown as HTMLCanvasElement,{select:()=>{},hover:()=>{}});
+  canvas.selected="b";
+  canvas.setData(ids.map((id,i)=>({id,label:id,group:"t",x:i*50,y:0,degree:0,color:"#fff",hollow:false,weak:false})),graph.edges,[]);
+  assert.deepEqual([...((canvas as unknown as {near:Set<string>}).near)].sort(),["a","c"],"a rejected connection must not light up an unrelated concept");
+  canvas.destroy();
+});
+
+test("node sizes distinguish hubs beyond thirteen links and keep the same scale when filtered", () => {
+  const canvas = new GraphCanvas({ getContext: () => null, addEventListener: () => {} } as unknown as HTMLCanvasElement, {select: () => {}, hover: () => {}});
+  const degrees = [0, 1, 4, 12, 13, 24, 50, 100];
+  const nodes: GNode[] = degrees.map((degree, i) => ({id: String(i), label: "", group: "g", x: i * 50, y: 0, degree, color: "#fff", hollow: false, weak: false}));
+  canvas.setData(nodes, [], []);
+  const radius = (n: GNode) => (canvas as unknown as {radius(n: GNode): number}).radius(n);
+  const sizes = nodes.map(radius);
+  for (let i = 1; i < sizes.length; i++) assert.ok(sizes[i] > sizes[i - 1], `${degrees[i]} links must be larger than ${degrees[i - 1]}`);
+  assert.ok(sizes[7] <= 18 && sizes[7] > sizes[1] * 2, "hubs are visibly larger, but bounded");
+  canvas.visible = new Set([nodes[2].id, nodes[4].id]);
+  assert.deepEqual(nodes.map(radius), sizes, "filters do not redefine what a circle size means");
+  canvas.setData(nodes.slice(0, 6), [], []);
+  assert.ok(radius(nodes[5]) > radius(nodes[4]), "reloading a smaller graph recalculates the range");
+  canvas.destroy();
+});
 
 test("topic colours are stable by identity rather than topic ordering or count", () => {
   const topics = ["Tutor/Algebra", "Tutor/Physics", "Tutor/Biology", "Tutor/中文"];

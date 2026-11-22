@@ -90,7 +90,7 @@ export function summariseMetrics(input: MetricsInput): MetricsSummary {
   for (const list of Object.values(input.attempts)) {
     for (const n of new Set(list.filter((a) => !a.probe).map((a) => a.skill).filter((n) => n > 0))) {
       concepts++;
-      rows.push(timeToIndependence(list, n, skillEvidence(list, n).firstIndependentDay));
+      rows.push(timeToIndependence(list, n, skillEvidence(list, n).firstIndependentSuccess));
     }
   }
   const bridges = graded.filter((a) => a.transferFrom);

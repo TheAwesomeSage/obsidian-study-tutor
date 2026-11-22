@@ -22,6 +22,8 @@ import { askCourse, askCourseSeed } from "./engine-ask";
 import { coverageOf, coverageSummary } from "./coverage";
 import { codeRunSummary, codeTestRows } from "./codequestions";
 import { expansionLine } from "./expansion";
+import { ConfidencePicker, confidenceLabel } from "./confidence";
+export { CONFIDENCE_LEVELS, confidenceLabel } from "./confidence";
 import type { Screen, TutorView } from "./view";
 import { MODE_INFO, button, chip, confirmAction, iconButton, modeInfo } from "./ui";
 
@@ -29,22 +31,6 @@ const ROUTE_NOTE: Record<string, string> = { simple: "utility model", standard: 
 const k = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 /** A trailing status line the engine appends to a reply when SymPy computed or checked something. */
 const SYMPY_LINE = /\n\n(\*SymPy [^\n]*\*|\*\*SymPy disagrees\*\*[^\n]*)\s*$/;
-
-/**
- * The confidence points offered with an answer, as the probability the answer is right. They are
- * evenly spaced so calibration (compared with your results, never with your level) stays simple.
- */
-export const CONFIDENCE_LEVELS: [string, number][] = [
-  ["None", 0],
-  ["Low", 0.25],
-  ["Medium", 0.5],
-  ["High", 0.75],
-  ["Very high", 1],
-];
-
-/** A stored confidence in words: the matching point, or a percentage for values saved by older versions. */
-export const confidenceLabel = (c: number): string => CONFIDENCE_LEVELS.find(([, v]) => Math.abs(v - c) < 1e-9)?.[0] ?? `${Math.round(c * 100)}%`;
-
 
 export class StudyScreen implements Screen {
   busy = false;
@@ -72,7 +58,7 @@ export class StudyScreen implements Screen {
   private quickEl!: HTMLElement;
   private input!: HTMLTextAreaElement;
   private confEl!: HTMLElement;
-  private confBtns: HTMLButtonElement[] = [];
+  private confPicker!: ConfidencePicker;
   private attachBtn!: HTMLButtonElement;
   private sendBtn!: HTMLButtonElement;
   private diagEl!: HTMLElement;
@@ -113,30 +99,8 @@ export class StudyScreen implements Screen {
     };
     const foot = main.createDiv({ cls: "st-composer-foot" });
 
-    // Confidence: five points, unset until one is chosen. Choosing the same point again clears it.
-    this.confEl = foot.createDiv({ cls: "st-conf", attr: { role: "radiogroup", "aria-label": "How confident are you in this answer? Choose before you see the feedback." } });
-    this.confEl.createSpan({ cls: "st-conf-label", text: "Confidence" });
-    this.confBtns = CONFIDENCE_LEVELS.map(([label, value], i) => {
-      const b = this.confEl.createEl("button", { cls: "st-conf-opt", text: label, attr: { role: "radio", "aria-checked": "false", "aria-label": `Confidence: ${label}`, "data-value": String(value) } });
-      b.onclick = () => {
-        this.confidence = this.confidence === value ? null : value;
-        this.syncConfidence();
-      };
-      b.onkeydown = (e) => {
-        const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
-        if (step) {
-          e.preventDefault();
-          const next = this.confBtns[(i + step + CONFIDENCE_LEVELS.length) % CONFIDENCE_LEVELS.length];
-          next.focus();
-          next.click();
-        } else if ((e.key === "Backspace" || e.key === "Delete") && this.confidence !== null) {
-          e.preventDefault();
-          this.confidence = null;
-          this.syncConfidence();
-        }
-      };
-      return b;
-    });
+    this.confPicker = new ConfidencePicker(foot, value => { this.confidence = value; });
+    this.confEl = this.confPicker.el;
 
     this.attachBtn = foot.createEl("button", { cls: "st-btn is-ghost st-attach", attr: { "aria-pressed": "false" } });
     setIcon(this.attachBtn.createSpan({ cls: "st-btn-icon" }), "paperclip");
@@ -650,19 +614,6 @@ export class StudyScreen implements Screen {
     }
   }
 
-  private syncConfidence(): void {
-    const set = this.confidence !== null;
-    this.confEl.toggleClass("is-set", set);
-    // One point is focusable at a time (the chosen one, or the first), as in any radio group.
-    const chosen = this.confBtns.findIndex((b) => set && Math.abs(Number(b.dataset.value) - this.confidence!) < 1e-9);
-    this.confBtns.forEach((b, i) => {
-      const on = i === chosen;
-      b.toggleClass("is-on", on);
-      b.setAttribute("aria-checked", String(on));
-      b.tabIndex = i === (chosen < 0 ? 0 : chosen) ? 0 : -1;
-    });
-  }
-
   private syncComposer(): void {
     const v = this.view;
     const question = v.free ? "" : this.openQuestionText();
@@ -706,8 +657,7 @@ export class StudyScreen implements Screen {
     // Confidence goes with an answer. It can be chosen at any time (it is sent with your next
     // message and counts only if that message is marked), and is not offered in Ask mode.
     this.confEl.toggleClass("is-hidden", asking);
-    for (const b of this.confBtns) b.disabled = this.busy;
-    this.syncConfidence();
+    this.confPicker.set(this.confidence, this.busy);
 
     this.sendBtn.empty();
     setIcon(this.sendBtn.createSpan({ cls: "st-btn-icon" }), this.busy ? "square" : "send");

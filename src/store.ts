@@ -6,7 +6,7 @@ import { Course, CourseEdge, EdgeStatus, Relation, TopicGraph, effectivePrereqs,
 import { Attempt, LevelChange, normaliseAttempt } from "./evidence";
 import { SrStats, buildSrNote, srStats } from "./formats";
 import { parseMistakeCard } from "./families";
-import { Chat, Frontmatter, LearnerState, Mode, Prereqs, Question, Topic, fmNum, fmStr, newState, parseChat, parseQuestions, parseState, parseTopic, serializeChat, serializeState, textHash, withFrontmatter, ymd } from "./formats";
+import { Chat, Frontmatter, LearnerState, Mode, Prereqs, Question, Topic, fmNum, fmStr, mastery, newState, parseChat, parseQuestions, parseState, parseTopic, serializeChat, serializeState, textHash, withFrontmatter, ymd } from "./formats";
 import type { PolicyCase } from "./policy";
 import { SEAL_SIMILARITY, splitSealed, type SealedSection } from "./sealed";
 import { SessionRecord, sessionMarkdown } from "./session";
@@ -400,7 +400,8 @@ export class Store {
       const state = await this.loadState(ref.dir, target);
       for (const k of mine) for (const t of theirs) {
         if (t.structure !== k.structure || !state.concepts[t.n]) continue;
-        out.push({ skill: k.n, structure: k.structure!, id: state.concepts[t.n], name: t.name, topic: other.title, dir: ref.dir, level: state.levels[t.n] ?? null, section: t.section });
+        const m = mastery(state, t.n);
+        out.push({ skill: k.n, structure: k.structure!, id: state.concepts[t.n], name: t.name, topic: other.title, dir: ref.dir, level: m.level, demonstrated: m.backed && m.evidence.independentCorrect > 0 && !m.evidence.lapse && !m.evidence.recheck, section: t.section });
       }
     }
     return out;

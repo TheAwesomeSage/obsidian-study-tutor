@@ -7,7 +7,7 @@ import { zeroUsage, type Usage } from "./claude";
 import { recordAttempt, type Outcome } from "./evidence";
 import { Question, fmStr, givesUp } from "./formats";
 import { normaliseMark, outcomeOfGrade, withNote } from "./grading";
-import { bridgeMarking, bridgeQuestion, structureOf, type StructureTwin } from "./structures";
+import { BRIDGE_FROM_LEVEL, bridgeMarking, bridgeQuestion, structureOf, type StructureTwin } from "./structures";
 import { applyAttempt, type TurnOpts, type TurnResult } from "./engine-common";
 import { grade } from "./engine-marks";
 import type { Decision } from "./policy";
@@ -40,7 +40,7 @@ function bridgeAsQuestion(skill: number, newName: string, newSection: string, tw
 export async function askBridge(eng: Engine, dir: string, chatPath: string, decision: Decision): Promise<TurnResult> {
   const state = await eng.store.loadState(dir, eng.settings().targetLevel);
   const chat = await eng.store.loadChat(chatPath);
-  const twin = (await eng.store.structureTwins(dir, state.target)).find((t) => t.id === decision.bridgeFrom && t.skill === decision.focus);
+  const twin = (await eng.store.structureTwins(dir, state.target)).find((t) => t.id === decision.bridgeFrom && t.skill === decision.focus && t.demonstrated && (t.level ?? 0) >= BRIDGE_FROM_LEVEL);
   const n = decision.focus ?? 0;
   const reply = twin ? bridgeQuestion(state.names[n] ?? "", twin) : "";
   if (twin) {
@@ -77,8 +77,13 @@ export async function bridgeTurn(eng: Engine, dir: string, chatPath: string, mes
   const answer = text || (last?.role === "you" ? last.text : "");
   const q = bridgeAsQuestion(sk.n, sk.name, sk.section, twin);
   if (!answer) return say(q.question);
-  if (text) chat.messages.push({ role: "you", text });
+  if (text) {
+    chat.messages.push({ role: "you", text });
+    chat.fm.pending_confidence = typeof opts.confidence === "number" ? opts.confidence : "";
+  }
   if (!givesUp(answer) && (/\?$/.test(answer) || (answer.length < 60 && HELP_WORDS.test(answer)))) return say(BRIDGE_NO_HELP);
+  // A failed assessor call must leave the same answer and stated confidence for Retry.
+  await eng.store.saveChat(chatPath, chat);
 
   let usage: Usage = zeroUsage();
   let result: Outcome = "skipped";

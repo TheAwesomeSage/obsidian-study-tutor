@@ -403,13 +403,18 @@ export function sameSequence(given: string, expected: string): boolean {
   };
   const a = steps(given);
   const b = steps(expected);
-  // A number may carry a unit ("0.63v") and more digits than asked ("0.632" for "0.63").
-  const value = (x: string): number | null => (/^[+-]?(\d+\.?\d*|\.\d+)[a-zµΩ°%]*$/i.test(x) ? parseFloat(x) : null);
+  // Bare numbers are allowed when the question states the unit; a supplied unit must
+  // match the key. Integer endpoints are exact, not rounded to a ±0.5 interval.
+  const value = (x: string): {n: number; unit: string} | null => {
+    const m = /^([+-]?(?:\d+\.?\d*|\.\d+))([a-zµΩ°%]*)$/i.exec(x);
+    return m ? {n: Number(m[1]), unit: m[2]} : null;
+  };
   const same = (x: string, y: string): boolean => {
     const [u, w] = [value(x), value(y)];
     if (u === null || w === null) return x === y;
+    if (u.unit && u.unit !== w.unit) return false;
     const places = (/\.(\d+)/.exec(y)?.[1].length ?? 0);
-    return Math.abs(u - w) <= 0.5 * 10 ** -places + 1e-12;
+    return places === 0 ? u.n === w.n : Math.round(u.n * 10 ** places) === Math.round(w.n * 10 ** places);
   };
   return a.length > 0 && a.length === b.length && a.every((x, i) => same(x, b[i]));
 }

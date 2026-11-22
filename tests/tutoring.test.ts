@@ -1522,7 +1522,9 @@ test("multi-part tasks: a part is read from its line, traces compare step by ste
   assert.ok(!F.sameSequence("", "a"));
   assert.ok(F.sameSequence("push 1, full, pop 1", "push1, full, pop1"), "spacing inside a step is ignored");
   assert.ok(F.sameSequence("P1 C1 P2", "P1, C1, P2"), "an answer with no separator is split at spaces");
-  assert.ok(F.sameSequence("0 V, 1 V, 0.632 V", "0, 1, 0.63"), "numbers to the precision asked, units ignored");
+  assert.ok(F.sameSequence("0 V, 1 V, 0.632 V", "0 V, 1 V, 0.63 V"), "numbers to the precision asked, matching units");
+  assert.ok(!F.sameSequence("0.4, 1.4, 0.63", "0, 1, 0.63"), "integer endpoints are exact");
+  assert.ok(!F.sameSequence("0 A, 1 A, 0.63 A", "0 V, 1 V, 0.63 V"), "wrong supplied units cannot be verified");
   assert.ok(F.sameSequence("0, 1, .63", "0, 1, 0.63"));
   assert.ok(!F.sameSequence("0, 1, 0.64", "0, 1, 0.63"), "but not a different value");
   assert.ok(!F.sameSequence("0, 1, 0.37", "0, 1, 0.63"));
@@ -1725,6 +1727,10 @@ async function twoTopics(twinLevel: number | null, structure = "first-order-deca
   const circuits = await t.store.saveCompiled({ title: "Circuits", fm: { subject: "none" }, topicBody: STRUCT_CARD("Circuits", "RC charging", structure), questionsBody: "", target: 4 });
   const ns = await t.store.loadState(nuclear, 4);
   ns.levels = { 1: twinLevel };
+  if (twinLevel !== null && twinLevel >= 3) ns.attempts = [
+    attempt({id:"known-1",skill:1,concept:ns.concepts[1],result:"correct",timestamp:"2026-11-08T10:00:00.000Z"}),
+    attempt({id:"known-2",skill:1,concept:ns.concepts[1],result:"correct",transfer:true,timestamp:"2026-11-10T10:00:00.000Z"}),
+  ];
   await t.store.saveState(nuclear, ns);
   return { ...t, nuclear, circuits, twinId: ns.concepts[1] };
 }
@@ -1757,8 +1763,9 @@ test("bridge: a new concept whose twin elsewhere is held is bridged from it firs
   assert.equal(t.calls.length, 0);
   t.settings.compileModel = "assessor-model";
   t.replies.push(JSON.stringify({ grade: "good", feedback: "The charge plays the role of the undecayed nuclei.", reasoning: { result: "correct", method: "sound", certainty: "complete" } }));
-  r = await t.engine.study(t.circuits, chat, "The capacitor's missing charge is like the undecayed nuclei: both fall by the same fraction each time constant. RC is the mean life. It breaks if the source voltage changes.");
+  r = await t.engine.study(t.circuits, chat, "The capacitor's missing charge is like the undecayed nuclei: both fall by the same fraction each time constant. RC is the mean life. It breaks if the source voltage changes.", {confidence:0.75});
   const a = r.attempt!;
+  assert.equal(a.confidence,0.75,"a bridge records the stated confidence");
   assert.deepEqual([a.result, a.taskType, a.transferFrom, a.assisted, a.questionId, a.activity], ["correct", "transfer", t.twinId, false, `bridge:${t.twinId}`, "bridge"]);
   assert.equal(t.calls.at(-1).model, "assessor-model", "the compile model, as the separate assessor");
   assert.equal(t.calls.at(-1).effort, "high");
@@ -1793,11 +1800,42 @@ test("time to independence: attempts and days to the first unaided success, spli
   const at = (id: string, day: string, over: Partial<Attempt> = {}) => attempt({ id, skill: 1, timestamp: `${day}T10:00:00.000Z`, ...over });
   const bridged = [at("b", "2026-11-01", { transferFrom: "nuclear/decay", result: "partial" }), at("c", "2026-11-02", { result: "correct" }), at("d", "2026-11-05", { result: "correct" })];
   const plain = [at("e", "2026-11-01"), at("f", "2026-11-03"), at("g", "2026-11-04"), at("h", "2026-11-06", { result: "correct" })];
-  const a = timeToIndependence(bridged, 1, "2026-11-02");
-  const b = timeToIndependence(plain, 1, "2026-11-06");
+  const a = timeToIndependence(bridged, 1, "2026-11-02T10:00:00.000Z");
+  const b = timeToIndependence(plain, 1, "2026-11-06T10:00:00.000Z");
   assert.deepEqual(a, { attempts: 2, days: 1, bridgedFrom: "nuclear/decay" });
   assert.deepEqual(b, { attempts: 4, days: 5, bridgedFrom: "" });
   assert.equal(timeToIndependence(plain, 1, null), null, "nothing to measure before an unaided success");
   assert.deepEqual(bridgeComparison([a, b, null]), { bridged: { n: 1, attempts: 2, days: 1 }, unbridged: { n: 1, attempts: 4, days: 5 } });
   assert.equal(normaliseAttempt({ ...bridged[0] } as any)!.transferFrom, "nuclear/decay");
+});
+
+test("bridge: helped-only familiarity is not a demonstrated source, and failed grading retries the saved answer",async()=>{
+  const t=await twoTopics(3),ns=await t.store.loadState(t.nuclear,4);
+  ns.attempts=ns.attempts.map(a=>({...a,assisted:true,assistance:["hint"]}));
+  await t.store.saveState(t.nuclear,ns);
+  const chat=await t.store.newChat(t.circuits,"Circuits","auto");
+  assert.notEqual((await t.engine.plan(t.circuits,await t.store.loadChat(chat),"auto","")).action,"bridge");
+  ns.attempts=ns.attempts.map(a=>({...a,assisted:false,assistance:[]}));
+  await t.store.saveState(t.nuclear,ns);
+  await t.engine.study(t.circuits,chat,"");
+  const answer="The missing charge decays like the undecayed nuclei; RC is the mean lifetime. A changing input breaks the comparison.";
+  const savedCall=t.engine.call.bind(t.engine);
+  t.engine.call=async()=>{throw new Error("temporary failure");};
+  await assert.rejects(t.engine.study(t.circuits,chat,answer,{confidence:1}),/temporary failure/);
+  const saved=await t.store.loadChat(chat);
+  assert.equal(saved.messages.at(-1)?.text,answer);
+  assert.equal(saved.fm.pending_confidence,1);
+  t.engine.call=savedCall;
+  t.replies.push(JSON.stringify({grade:"good",feedback:"Correct.",reasoning:{result:"correct",method:"sound",certainty:"complete"}}));
+  const retry=await t.engine.study(t.circuits,chat,"");
+  assert.equal(retry.attempt?.answer,answer);
+  assert.equal(retry.attempt?.confidence,1);
+});
+
+test("independence metrics stop at the first qualifying answer, not the end of its day",async()=>{
+  const {timeToIndependence}=await import("../src/structures");
+  const xs=[attempt({id:"first",skill:1,result:"correct",timestamp:"2026-11-10T08:00:00.000Z"}),attempt({id:"later",skill:1,result:"correct",timestamp:"2026-11-10T09:00:00.000Z",transferFrom:"later/bridge"})];
+  const e=skillEvidence(xs,1);
+  assert.equal(e.firstIndependentSuccess,xs[0].timestamp);
+  assert.deepEqual(timeToIndependence(xs,1,e.firstIndependentSuccess),{attempts:1,days:0,bridgedFrom:""});
 });

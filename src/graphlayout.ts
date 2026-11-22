@@ -9,6 +9,9 @@
 //     through a grid instead of comparing every pair.
 // Topics form clusters, and within a cluster foundations sit low and what builds on them rises.
 
+import {treePositions} from "./graphtree";
+
+export type GraphLayoutStyle = "tree" | "clusters" | "connected";
 export interface LayoutNode {
   id: string;
   /** Cluster key: the topic the concept belongs to. */
@@ -61,12 +64,13 @@ export function depths(nodes: LayoutNode[], edges: LayoutEdge[]): Record<string,
  * pinned where they were, and everything else is placed around them. With nothing saved, the
  * whole graph is laid out from scratch.
  */
-export function layoutGraph(nodes: LayoutNode[], edges: LayoutEdge[], saved: Positions = {}, style: "clusters" | "connected" = "clusters"): Positions {
+export function layoutGraph(nodes: LayoutNode[], edges: LayoutEdge[], saved: Positions = {}, style: GraphLayoutStyle = "clusters"): Positions {
   const connected = style === "connected";
   const n = nodes.length;
   if (!n) return {};
   const index = new Map(nodes.map((node, i) => [node.id, i]));
   const depth = depths(nodes, edges);
+  if(style === "tree") return treePositions(nodes,edges,depth,saved);
   const x = new Float64Array(n);
   const y = new Float64Array(n);
   const pinned = new Uint8Array(n);

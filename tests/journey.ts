@@ -146,15 +146,17 @@ export async function runJourney(engine: Engine, store: Store, provider: Provide
   let decay = "";
   await step("8", "Bridge from another topic with the same structure", "engine.study (Adaptive) ×2", async () => {
     decay = await store.saveCompiled({ title: "Radioactive decay", fm: { subject: "none" }, topicBody: DECAY_TOPIC, questionsBody: "", target });
-    // The time constant is set as held, as if the learner had reached it earlier: a bridge builds only from that.
-    const st = await store.loadState(dir, target);
-    st.levels[3] = 3;
-    await store.saveState(dir, st);
+    // Re-establish the familiar source with an unaided, code-marked answer after the
+    // deliberately wrong answer above; a recorded level alone cannot enable a bridge.
+    const familiar=await store.newChat(dir,"Signals and systems","quiz");
+    const sourceChat=await store.loadChat(familiar);sourceChat.fm.card="Q6";
+    await store.saveChat(familiar,sourceChat);
+    await engine.study(dir,familiar,"1000");
     const chat = await store.newChat(decay, "Radioactive decay", "auto");
     const ask = await engine.study(decay, chat, "");
     if (ask.decision?.action !== "bridge") return { ok: false, detail: `no bridge was set (${ask.decision?.action ?? "no decision"})` };
     const r = await engine.study(decay, chat, ANSWERS.bridge);
-    return { ok: !!r.attempt?.transferFrom && r.attempt.taskType === "transfer" && !r.attempt.assisted, detail: `asked by code; marked ${r.attempt?.result} by the assessor; from ${r.attempt?.transferFrom}; time constant seeded at level 3` };
+    return { ok: !!r.attempt?.transferFrom && r.attempt.taskType === "transfer" && !r.attempt.assisted, detail: `asked by code; marked ${r.attempt?.result} by the assessor; from ${r.attempt?.transferFrom}; familiar source independently checked with Q6` };
   });
 
   // 4. The outcome check, marked by the assessor, logged apart.

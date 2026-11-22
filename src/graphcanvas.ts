@@ -60,6 +60,27 @@ export function topicColorSlot(topic: string): number {
   return (hash >>> 0) % 6 + 1;
 }
 
+/** A direction marker outside both dots, even when a hub has a large radius. */
+export function curveArrow(a: [number, number], control: [number, number], b: [number, number], fromRadius: number, toRadius: number, desiredSize: number): {x: number; y: number; angle: number; size: number} | null {
+  const gap = Math.hypot(b[0] - a[0], b[1] - a[1]) - fromRadius - toRadius - 5;
+  const size = Math.min(desiredSize, gap * 0.65);
+  if (size < 1.8) return null; // Overlapping dots leave no legible space for a direction marker.
+  const point = (t: number): [number, number] => {
+    const u = 1 - t;
+    return [u * u * a[0] + 2 * u * t * control[0] + t * t * b[0], u * u * a[1] + 2 * u * t * control[1] + t * t * b[1]];
+  };
+  // Find the point just outside the target's outline, rather than a fixed 82% along
+  // the curve, which can put the head underneath a large target circle.
+  let lo = 0, hi = 1;
+  for (let i = 0; i < 12; i++) {
+    const t = (lo + hi) / 2, p = point(t);
+    if (Math.hypot(p[0] - b[0], p[1] - b[1]) > toRadius + 2.5) lo = t;
+    else hi = t;
+  }
+  const t = lo, u = 1 - t, [x, y] = point(t);
+  return {x, y, size, angle: Math.atan2(2 * u * (control[1] - a[1]) + 2 * t * (b[1] - control[1]), 2 * u * (control[0] - a[0]) + 2 * t * (b[0] - control[0]))};
+}
+
 export class GraphCanvas {
   /** Null where there is no canvas support (a test environment): everything but drawing still works. */
   private ctx: CanvasRenderingContext2D | null;
@@ -67,6 +88,7 @@ export class GraphCanvas {
   private byId = new Map<string, GNode>();
   private edges: GEdge[] = [];
   private groups: GGroup[] = [];
+  private degreeScale = 1;
   private colors: GraphColors = { text: "#ddd", muted: "#aaa", faint: "#666", surface: "#1e1e1e", edge: "#888", accent: "#8a5cf5", pre: "#3987e5", dep: "#d95926", font: "sans-serif" };
   /** World point at the centre of the canvas, and pixels per world unit. */
   cam = { x: 0, y: 0, k: 1 };
@@ -113,8 +135,12 @@ export class GraphCanvas {
 
   setData(nodes: GNode[], edges: GEdge[], groups: GGroup[]): void {
     this.nodes = nodes;
+    // Area grows with link count. Scale the whole range for unusually large hubs, rather
+    // than clipping individual nodes and making every well-connected concept the same size.
+    const maxDegree = nodes.reduce((max, n) => Math.max(max, n.degree), 0);
+    this.degreeScale = Math.min(1, (18 * 18 - 9) / Math.max(1, 6 * maxDegree));
     this.byId = new Map(nodes.map((n) => [n.id, n]));
-    this.edges = edges.filter((e) => this.byId.has(e.from) && this.byId.has(e.to));
+    this.edges = edges.filter((e) => e.status !== "rejected" && this.byId.has(e.from) && this.byId.has(e.to));
     this.groups = groups;
     if (this.selected && !this.byId.has(this.selected)) this.selected = null;
     this.setHighlight();
@@ -171,6 +197,9 @@ export class GraphCanvas {
       x1 = Math.max(x1, n.x);
       y1 = Math.max(y1, n.y);
     }
+    // Include topic titles in a whole-view fit so the top row of a tree is not
+    // labelled underneath the floating controls.
+    if(!ids)for(const g of this.groups)y0=Math.min(y0,g.y-12);
     const pad = 56;
     const k = Math.min((this.w - 2 * pad) / Math.max(1, x1 - x0), (this.h - 2 * pad) / Math.max(1, y1 - y0));
     this.cam = { x: (x0 + x1) / 2, y: (y0 + y1) / 2, k: Math.max(0.08, Math.min(2.4, k)) };
@@ -200,7 +229,7 @@ export class GraphCanvas {
   // ---------- input ----------
 
   private radius(n: GNode): number {
-    return (3.6 + Math.min(3.2, Math.sqrt(n.degree) * 0.9)) * Math.max(this.nodes.length > 300 ? 0.32 : 0.65, Math.min(1.9, Math.pow(this.cam.k, 0.65)));
+    return Math.sqrt(9 + 6 * Math.max(0, n.degree) * this.degreeScale) * Math.max(this.nodes.length > 300 ? 0.32 : 0.65, Math.min(1.9, Math.pow(this.cam.k, 0.65)));
   }
 
   private pick(px: number, py: number): GNode | null {
@@ -380,14 +409,17 @@ export class GraphCanvas {
         ctx.quadraticCurveTo(mx, my, bx, by);
         ctx.stroke();
         // Requires points from dependent to prerequisite; symmetric relations have no arrow.
-        if ((ordering || e.type === "supports" || e.type === "applies_to" || e.type === "derived_from") && (k >= 0.6 || lit)) {
-          const t = 0.82, u = 1 - t;
-          const x = u*u*ax + 2*u*t*mx + t*t*bx, y = u*u*ay + 2*u*t*my + t*t*by;
-          const angle = Math.atan2(2*u*(my-ay)+2*t*(by-my), 2*u*(mx-ax)+2*t*(bx-mx));
-          const size = lit ? 7 : 5;
-          ctx.setLineDash([]); ctx.beginPath();
-          ctx.moveTo(x-size*Math.cos(angle-0.48),y-size*Math.sin(angle-0.48));ctx.lineTo(x,y);
-          ctx.lineTo(x-size*Math.cos(angle+0.48),y-size*Math.sin(angle+0.48));ctx.stroke();
+        if (ordering || e.type === "supports" || e.type === "applies_to" || e.type === "derived_from") {
+          const arrow = curveArrow([ax, ay], [mx, my], [bx, by], this.radius(a), this.radius(b), lit ? 7 : 5);
+          if (arrow) {
+            const {x, y, angle, size} = arrow;
+            // Keep direction legible at overview zoom while the connecting line stays quiet.
+            if (!sel) ctx.globalAlpha = e.status === "inferred" ? 0.42 : 0.5;
+            ctx.lineWidth = Math.max(0.9, ctx.lineWidth);
+            ctx.setLineDash([]); ctx.beginPath();
+            ctx.moveTo(x-size*Math.cos(angle-0.48),y-size*Math.sin(angle-0.48));ctx.lineTo(x,y);
+            ctx.lineTo(x-size*Math.cos(angle+0.48),y-size*Math.sin(angle+0.48));ctx.stroke();
+          }
         }
       }
     }

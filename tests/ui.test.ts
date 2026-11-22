@@ -179,7 +179,10 @@ test("home, study, review, topic page and graph work together from the normal en
   const confPick = (label: string) => conf().find((b: any) => b.textContent === label).click();
   assert.deepEqual(conf().map((b: any) => b.textContent), ["None", "Low", "Medium", "High", "Very high"], "confidence is five discrete points");
   assert.deepEqual(confOn(), [], "confidence is unset until one is chosen");
-  assert.equal($(root, ".st-conf").getAttribute("role"), "radiogroup");
+  assert.equal($(root, ".st-conf-points").getAttribute("role"), "radiogroup");
+  const confSlider = () => $(root, ".st-conf-slider");
+  assert.equal(confSlider().type, "range");
+  assert.match(confSlider().getAttribute("aria-valuetext"), /Not set/);
   button(root, "Start session").click();
   await tick(80);
   assert.match($(root, ".st-messages").textContent, /Is \$f\(x\)=x\+1\$ linear\?/);
@@ -204,7 +207,11 @@ test("home, study, review, topic page and graph work together from the normal en
 
   // Confidence: choosing a point sets it, choosing it again or Delete clears it, arrows move it.
   assert.equal(conf()[0].disabled, false);
+  confSlider().value = "1";
+  fire(confSlider(), "input");
+  assert.deepEqual(confOn(), ["Low"], "dragging the slider selects a confidence stop");
   confPick("High");
+  assert.equal(confSlider().value, "3", "clicking a label also moves the slider");
   assert.deepEqual(confOn(), ["High"]);
   assert.ok($(root, ".st-conf").classList.contains("is-set"));
   confPick("High");
@@ -215,7 +222,8 @@ test("home, study, review, topic page and graph work together from the normal en
   conf()[3].dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
   assert.deepEqual(confOn(), []);
   assert.ok(!$(root, ".st-conf").classList.contains("is-set"));
-  confPick("Very high");
+  confSlider().value = "4";
+  fire(confSlider(), "input");
 
   // A draft survives leaving the screen and coming back; so does the confidence.
   const input = () => $(root, ".st-composer textarea");
@@ -231,6 +239,7 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal(root.getAttribute("data-screen"), "study");
   assert.equal(input().value, "Yes, it is li");
   assert.deepEqual(confOn(), ["Very high"]);
+  assert.equal(confSlider().value, "4", "the dragged value survives leaving and resuming chat");
   assert.equal($$(root, ".st-msg").length, 1);
 
   // A failed send keeps the message, the confidence and the open question.
@@ -260,6 +269,7 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.match($(root, ".st-feedback").textContent, /Marked incorrectgraded by the model, unverified · your confidence: very high/);
   assert.match($(root, ".st-feedback-more").textContent, /How this was checkedBasis: one model judgement, not independently checked\.This counts as unaided evidence\.thinks translation is linear/);
   assert.deepEqual(confOn(), [], "confidence resets for the next answer");
+  assert.match(confSlider().getAttribute("aria-valuetext"), /Not set/, "the slider also resets after marking");
   const state1 = parseState(await fs.read(`${dir}/state.md`));
   assert.equal(state1.levels[1], 1, "a first wrong answer places the concept at 1; the model's proposed level 4 is ignored");
   assert.deepEqual(state1.misconceptions, ["thinks translation is linear"]);

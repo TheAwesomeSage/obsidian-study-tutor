@@ -195,7 +195,7 @@ export class Engine {
     // A twin the learner can do on their own is a bridge, until a bridge has been answered on this concept.
     const bridgeFor = (n: number): { bridge?: { id: string; name: string; topic: string } } => {
       if (state.attempts.some((a) => a.skill === n && a.transferFrom)) return {};
-      const t = (p.twins ?? []).find((x) => x.skill === n && (x.level ?? 0) >= BRIDGE_FROM_LEVEL);
+      const t = (p.twins ?? []).find((x) => x.skill === n && x.demonstrated && (x.level ?? 0) >= BRIDGE_FROM_LEVEL);
       return t ? { bridge: { id: t.id, name: t.name, topic: t.topic } } : {};
     };
     const skills = Object.keys(state.names).map(Number).sort((a, b) => a - b).map((n) => {
