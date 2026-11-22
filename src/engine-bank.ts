@@ -19,6 +19,7 @@ import { baseQuestionId } from "./families";
 import { CodeRunRecord, codeGradingQuestion, codeRunMarkdown, codeRunRecord, codeSource, looksLikeCode, markCodeRun, notRun, sentAsCode, solutionMarkdown } from "./codequestions";
 import type { CodeRunReport, CodeTask } from "./codetask";
 import type { Engine } from "./engine";
+import { partActivity } from "./engine-activities";
 
 /**
  * Places a new learner with plain code: one multiple-choice or short question per subskill
@@ -214,6 +215,9 @@ async function runCode(eng: Engine, task: CodeTask, source: string, opts: TurnOp
   }
 }
 
+/** What a final expression that SymPy confirmed establishes, recorded and shown with it. */
+export const SYMPY_ESTABLISHES = "SymPy verified the final expression only: not the derivation, or what it means physically.";
+
 /** What marking a bank answer gave: a re-prompt when the reply cannot be marked, or the mark with what produced it. */
 export type BankMark =
   | { kind: "reply"; reply: string }
@@ -322,6 +326,11 @@ export async function markBankAnswer(eng: Engine, pending: Question, task: BankT
         if (sym && sym.equal !== null) {
           reasoning = withCheck(reasoning, { evaluated: `the final result ${given} against the expected ${expected}`, kind: sym.grading === "numeric" ? "numeric" : "symbolic", outcome: sym.equal, assumptions: sym.assumptions || "compared as expressions" });
           assumptions += "; SymPy checked the final result only, not the method";
+          // A verified expression is not a sound derivation: the learner is told which was checked.
+          if (sym.equal) {
+            assumptions += `; ${SYMPY_ESTABLISHES.toLowerCase().replace(/\.$/, "")}`;
+            note = [note, SYMPY_ESTABLISHES].filter(Boolean).join(" ");
+          }
         }
       }
     }
@@ -560,6 +569,9 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
     }
   }
   chat.fm.await_continue = !next && opts.adaptive ? "yes" : "";
+  // A part that names an activity opens it, as saved and with no model call; a typed answer still counts.
+  const presentation = next?.part && next.activity ? await partActivity(eng, dir, topic, state, next) : null;
+  if (presentation) reply += `\n\n*The ${presentation.decision.kind} opens for this part. Answer in it, where its own code marks the answer, or type your answer here. Either way it counts as helped, since the ${presentation.decision.kind} responds as you work.*`;
   chat.messages.push({ role: "tutor", text: reply });
   // A later part keeps the action the task was started under, so its record and activity stay the same.
   const why = part && next
@@ -570,9 +582,11 @@ export async function quizTurn(eng: Engine, dir: string, chatPath: string, messa
       ? { action: decision.action, reason: decision.reason }
       : { action: "quiz", reason: "Practise mode: questions from the bank, marked by the plugin where it can." };
   eng.bankSession(chat, state, mode, next, why, now);
+  if (presentation) chat.fm.card_help = "yes";
   await eng.store.saveChat(chatPath, chat);
 
   const out: TurnResult = { reply, changes, state, usage, local: usage.calls === 0, tools };
+  if (presentation) out.presentation = presentation;
   if (attempt) out.attempt = attempt;
   if (decision) out.decision = decision;
   if (!opts.adaptive && chatWords(chat) > s.maxChatWords && chat.messages.length > 4) {

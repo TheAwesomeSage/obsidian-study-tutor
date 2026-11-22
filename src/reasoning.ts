@@ -175,7 +175,8 @@ export function finalExpression(answer: string): string {
   const lines = answer.trim().split(/\n/).map((l) => l.trim()).filter(Boolean);
   const withEq = [...lines].reverse().find((l) => /=/.test(l));
   const raw = withEq ? withEq.slice(withEq.lastIndexOf("=") + 1) : lines.length === 1 ? lines[0] : "";
-  return raw.replace(/^[\s$]+|[\s$.;,]+$/g, "").replace(/\s*\(.*\)\s*$/, "").trim();
+  // A trailing remark in brackets ("1/4 (dividing by 16)") is cut; "exp(-t)" or "2 (x + 1)" is maths and is kept.
+  return raw.replace(/^[\s$]+|[\s$.;,]+$/g, "").replace(/\s+\((?=[^()]*[A-Za-z]{3,}\s+[A-Za-z])[^()]*\)\s*$/, "").trim();
 }
 
 const VERDICT_TEXT: Record<ResultVerdict | MethodVerdict | AssumptionVerdict, string> = {

@@ -466,7 +466,7 @@ export class StudyScreen implements Screen {
         button(row, { label: "Reopen activity", icon: "play", onClick: () => this.openActivity(out, activity.dir, activity.chatPath) });
         // Fresh numbers come from module code with a new seed; the saved configuration is reused, no model is called.
         const saved = out.activity;
-        if (saved && saved.status === "ready") button(row, { label: "New numbers", icon: "shuffle", tone: "ghost", title: "New numbers: the same activity with different values, made by the module itself. Uses no model.", onClick: async () => {
+        if (saved && saved.status === "ready" && !saved.bankQuestion) button(row, { label: "New numbers", icon: "shuffle", tone: "ghost", title: "New numbers: the same activity with different values, made by the module itself. Uses no model.", onClick: async () => {
           try {
             const next = await v.plugin.engine.openActivity(activity.dir, saved.id, { chatPath: activity.chatPath, variantSeed: Math.floor(Math.random() * 1_000_000) });
             if (JSON.stringify(next.lesson?.settings) === JSON.stringify(saved.lesson?.settings)) new Notice("This activity has no numeric variants; it opens as saved.");
@@ -524,7 +524,19 @@ export class StudyScreen implements Screen {
       recording = recording.then(async () => {
         // The lesson actually played is passed, so an answer in a numeric variant is checked against that variant.
         const marked = await v.plugin.engine.recordActivityResult(dir, activityId, event.response, { chatPath, hintUsed, lesson: outcome.lesson });
-        if (v.dir === dir) { this.marked = marked.attempt; this.changes = marked.changes; await v.loadState(); await v.stateChanged(); this.sync(); }
+        if (v.dir === dir) {
+          this.marked = marked.attempt;
+          this.changes = marked.changes;
+          // A part of a task answered in its activity moves the chat on to the next part.
+          if (marked.advanced) {
+            this.activity = marked.presentation ? { outcome: marked.presentation, dir, chatPath } : null;
+            if (v.chatPath === chatPath) await v.openChat(chatPath);
+            if (marked.presentation && this.el && v.screen === "study") this.openActivity(marked.presentation, dir, chatPath);
+          } else if (marked.notPart) new Notice(marked.notPart, 8000);
+          await v.loadState();
+          await v.stateChanged();
+          this.sync();
+        }
       }).catch(error => { new Notice(`The practice result could not be saved: ${(error as Error).message}`); });
     });
   }

@@ -1340,6 +1340,7 @@ test("example course: Home adds the C++ concurrency course with no model call, o
   const view: any = await plugin.activateView();
   const root = view.contentEl;
   assert.match(root.textContent, /Start with a topic/);
+  button(root, "Add example: Signals and systems");
   const add = button(root, "Add example: C++ concurrency");
   assert.match(add.getAttribute("aria-label") ?? "", /three-part lock-free queue task/);
   add.click();

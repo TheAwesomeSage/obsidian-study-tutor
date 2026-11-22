@@ -8,8 +8,8 @@ const num = (minimum: number, maximum: number) => ({ type: "number", minimum, ma
 const pair = (minimum: number, maximum: number) => ({ type: "array", items: num(minimum, maximum), minItems: 2, maxItems: 2 });
 const schema = (properties: JsonObject): JsonObject => ({ type: "object", additionalProperties: false, required: Object.keys(properties), properties });
 const descriptors: ModuleDescriptor[] = [
-  { id: "function-plotter", version: "1.0.0", supportedObjectives: ["Polynomial (degree 0–5) and elementary function values, translations, scaling, derivatives and undefined slopes"], assessmentIds: ["slope-at-point"], assetTags: [], settingsSchema: schema({
-    family: { enum: ["polynomial", "sin", "cos", "exp", "log", "sqrt", "reciprocal", "abs"] },
+  { id: "function-plotter", version: "1.0.0", supportedObjectives: ["Polynomial (degree 0–5) and elementary function values (including exponential decay), translations, scaling, derivatives and undefined slopes"], assessmentIds: ["slope-at-point"], assetTags: [], settingsSchema: schema({
+    family: { enum: ["polynomial", "sin", "cos", "exp", "decay", "log", "sqrt", "reciprocal", "abs"] },
     coefficients: { type: "array", items: num(-100, 100), minItems: 1, maxItems: 6 }, scale: num(-10, 10), shiftX: num(-10, 10), shiftY: num(-10, 10), domain: pair(-50, 50),
     viewport: { type: "array", items: num(-1000, 1000), minItems: 4, maxItems: 4 }, pointX: num(-50, 50),
   }) },

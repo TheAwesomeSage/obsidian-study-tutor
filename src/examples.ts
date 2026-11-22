@@ -4,6 +4,8 @@
 
 import cppTopic from "../assets/examples/cpp-concurrency/topic.md";
 import cppQuestions from "../assets/examples/cpp-concurrency/questions.md";
+import signalsTopic from "../assets/examples/signals-systems/topic.md";
+import signalsQuestions from "../assets/examples/signals-systems/questions.md";
 import type { Store } from "./store";
 
 export interface ExampleCourse {
@@ -25,6 +27,14 @@ export const EXAMPLES: ExampleCourse[] = [
     topicBody: cppTopic,
     questionsBody: cppQuestions,
     subject: "code-software-systems",
+  },
+  {
+    id: "signals-systems",
+    title: "Signals and systems",
+    blurb: "LTI systems, Laplace transforms and the RC low-pass filter, with a four-part task: predict, plot, derive, then explain a measured discrepancy.",
+    topicBody: signalsTopic,
+    questionsBody: signalsQuestions,
+    subject: "none",
   },
 ];
 

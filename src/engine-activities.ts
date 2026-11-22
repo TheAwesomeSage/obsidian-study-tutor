@@ -4,7 +4,7 @@
 
 import { addUsage, zeroUsage, type Usage } from "./claude";
 import { Attempt, Outcome, recordAttempt } from "./evidence";
-import { Chat, LearnerState, Mode, Topic, evidenceOf, objectiveStamp, contentHash, fmStr, words } from "./formats";
+import { Chat, LearnerState, Mode, Question, Topic, answerText, evidenceOf, objectiveStamp, contentHash, fmList, fmNum, fmStr, formatQuizQuestion, nextPart, words } from "./formats";
 import { Decision } from "./policy";
 import { ActivityRecord, CONFIG_PROMPT_VERSION, LESSON_SCHEMA_VERSION, activityKey, configureActivity, providerModel, toResult } from "./configure";
 import { compileStrategyFor, modelFor, modelIdentity } from "./model-provider";
@@ -52,7 +52,8 @@ const sameRefs = (saved: SourceRef[], refs: SourceRef[]): boolean => saved.lengt
  * checks stays valid when the model alias moves on, and a failed plan never blocks the local model.
  */
 async function savedFor(eng: Engine, dir: string, conceptId: string, refs: SourceRef[], modelName: string, catalog: string, descriptors: ModuleDescriptor[]): Promise<ActivityRecord[]> {
-  return (await eng.store.loadActivities(dir)).filter((a) => a.conceptId === conceptId && a.schemaVersion === LESSON_SCHEMA_VERSION && a.promptVersion === CONFIG_PROMPT_VERSION && (a.provider === "main" ? a.status === "ready" : a.model === modelName) && a.catalogVersion === catalog && sameRefs(a.sourceRefs, refs) && (!a.moduleId || descriptors.some((d) => d.id === a.moduleId && d.version === a.moduleVersion)));
+  // An activity a part of a task names belongs to that task: it is never offered on its own.
+  return (await eng.store.loadActivities(dir)).filter((a) => !a.bankQuestion && a.conceptId === conceptId && a.schemaVersion === LESSON_SCHEMA_VERSION && a.promptVersion === CONFIG_PROMPT_VERSION && (a.provider === "main" ? a.status === "ready" : a.model === modelName) && a.catalogVersion === catalog && sameRefs(a.sourceRefs, refs) && (!a.moduleId || descriptors.some((d) => d.id === a.moduleId && d.version === a.moduleVersion)));
 }
 
 /** The compiled worked lesson for a concept: the simpler explanation offered when an interactive is not available. */
@@ -249,7 +250,7 @@ export async function openActivity(eng: Engine, dir: string, activityId: string,
  * openActivity with a seed). It is assessed against that variant, which must validate and must
  * be the same activity: module, version, assessment, objective and sources unchanged.
  */
-export async function recordActivityResult(eng: Engine, dir: string, activityId: string, response: unknown, o: { hintUsed?: boolean; chatPath?: string; confidence?: number | null; lesson?: unknown } = {}): Promise<{ assessment: AssessmentResult; attempt: Attempt | null; changes: string[] }> {
+export async function recordActivityResult(eng: Engine, dir: string, activityId: string, response: unknown, o: { hintUsed?: boolean; chatPath?: string; confidence?: number | null; lesson?: unknown } = {}): Promise<{ assessment: AssessmentResult; attempt: Attempt | null; changes: string[]; advanced?: boolean; presentation?: PresentationOutcome; notPart?: string }> {
   const s = eng.settings();
   if (!eng.visuals) throw new Error("No visual modules are installed.");
   const rec = (await eng.store.loadActivities(dir)).find((a) => a.id === activityId);
@@ -262,6 +263,12 @@ export async function recordActivityResult(eng: Engine, dir: string, activityId:
     played = v.lesson;
   }
   const assessment = eng.visuals.assessLesson(played, response);
+  // The answer is the part's only while the part is the chat's open question, in the saved activity
+  // (not a variant), at the setting the part asks about. Otherwise it is practice in the activity.
+  const moved = !!response && typeof response === "object" && !Array.isArray(response) && (response as Record<string, unknown>).settings !== undefined && JSON.stringify(sortedKeys((response as Record<string, unknown>).settings)) !== JSON.stringify(sortedKeys(rec.lesson.settings));
+  const open = !!rec.bankQuestion && !!o.chatPath && fmStr((await eng.store.loadChat(o.chatPath)).fm, "card") === rec.bankQuestion;
+  const asPart = open && !moved && JSON.stringify(played.settings) === JSON.stringify(rec.lesson.settings);
+  const notPart = open && !asPart ? "That answer was given with the controls moved, so it counts as practice in the activity and not as this part's answer. Put them back where they started (Reset) to answer the part." : "";
   // The contract's response carries its own hintsUsed flag; either source marks the hint.
   o = { ...o, hintUsed: !!o.hintUsed || (!!response && typeof response === "object" && (response as Record<string, unknown>).hintsUsed === true) };
   const now = new Date().toISOString();
@@ -276,7 +283,7 @@ export async function recordActivityResult(eng: Engine, dir: string, activityId:
       v: 2,
       skill: n,
       concept: rec.conceptId,
-      questionId: `${activityId}:${rec.lesson.assessmentId}`,
+      questionId: asPart ? rec.bankQuestion! : `${activityId}:${rec.lesson.assessmentId}`,
       question: played.predictionQuestion,
       answer: JSON.stringify(response ?? null).slice(0, 400),
       activity: "interactive",
@@ -304,7 +311,85 @@ export async function recordActivityResult(eng: Engine, dir: string, activityId:
     await eng.store.saveState(dir, state);
   }
   await eng.store.logActivity(dir, { t: now, activityId, conceptId: rec.conceptId, event: "assessed", trigger: rec.trigger, reason: rec.selectionReason, correct: assessment.correct, hintUsed: !!o.hintUsed, ...(attempt ? { attemptId: attempt.id } : {}), ...(o.chatPath ? { chatPath: o.chatPath } : {}) });
-  return { assessment, attempt, changes };
+  const moved_on = asPart && rec.bankQuestion && attempt && o.chatPath ? await advancePart(eng, dir, o.chatPath, rec.bankQuestion, attempt, assessment, response) : null;
+  return { assessment, attempt, changes, ...(rec.bankQuestion ? { advanced: !!moved_on, ...(moved_on?.presentation ? { presentation: moved_on.presentation } : {}), ...(notPart ? { notPart } : {}) } : {}) };
+}
+
+/** A settings object with its keys in order, so two settings compare by value. */
+function sortedKeys(v: unknown): unknown {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return v;
+  return Object.fromEntries(Object.keys(v as Record<string, unknown>).sort().map((k) => [k, (v as Record<string, unknown>)[k]]));
+}
+
+/**
+ * The activity a part of a task names, completed into a lesson for the part's concept and checked by
+ * the module: saved once (its id follows its content) and opened as it is, with no model call. Null
+ * when there are no modules here, or the module refuses it; the part is then answered by typing.
+ */
+export async function partActivity(eng: Engine, dir: string, topic: Topic, state: LearnerState, q: Question): Promise<PresentationOutcome | null> {
+  const a = q.activity;
+  const sk = topic.subskills.find((k) => k.n === q.subskill);
+  const d = a && eng.visuals?.listModuleDescriptors().find((x) => x.id === a.moduleId);
+  if (!a || !sk || !d || !eng.visuals) return null;
+  const sourceRefs = await sourceRefsFor(eng, dir, topic, q.subskill, q.question);
+  const v = eng.visuals.validateLesson({ schemaVersion: LESSON_SCHEMA_VERSION, moduleId: a.moduleId, moduleVersion: d.version, objective: conceptObjective(sk), sourceRefs, settings: a.settings, assetIds: [], assessmentId: a.assessmentId, predictionQuestion: a.predictionQuestion, hint: a.hint });
+  if (!v.ok) return null;
+  const lesson = v.lesson;
+  const id = `part-${contentHash(`${q.id}\n${JSON.stringify(lesson)}`).slice(0, 16)}`;
+  const kind: PresentationKind = d.kinds?.includes("simulation") ? "simulation" : d.kinds?.[0] ?? "simulation";
+  const reason = `Part ${q.part?.n ?? 1} of ${q.part?.of ?? 1}: answer in the ${kind}. Its own code marks the answer.`;
+  let rec = (await eng.store.loadActivities(dir)).find((r) => r.id === id);
+  if (!rec) {
+    rec = { id, v: 1, status: "ready", conceptId: state.concepts[q.subskill] ?? "", objective: lesson.objective, kind, moduleId: d.id, moduleVersion: d.version, catalogVersion: eng.visuals.catalogVersion(), schemaVersion: LESSON_SCHEMA_VERSION, model: "", promptVersion: CONFIG_PROMPT_VERSION, sourceRefs, lesson, reason, missingCapability: null, validationErrors: [], createdAt: new Date().toISOString(), timing: { wallMs: 0, localMs: 0, loadMs: 0, promptTokens: 0, evalTokens: 0 }, localCalls: 0, repairs: 0, claudeCalls: 0, firstPassValid: null, trigger: "part", selectionReason: reason, bankQuestion: q.id };
+    await eng.store.saveActivity(dir, rec);
+  }
+  const decision: PresentationDecision = { kind, trigger: "explicit", status: "cached", reason, moduleId: d.id, activityId: id, candidates: [d.id] };
+  return { decision, request: null, activity: rec, lesson, result: { status: "ready", lesson }, fallback: "", cacheHit: true, calls: { local: 0, claude: 0 }, concept: q.subskill };
+}
+
+/**
+ * After the module marked a part's activity: the verdict and the next part go into the chat, as a
+ * typed answer would. Only while that part is still the chat's open question; returns whether it moved on.
+ */
+async function advancePart(eng: Engine, dir: string, chatPath: string, qid: string, attempt: Attempt, assessment: AssessmentResult, response: unknown): Promise<{ presentation: PresentationOutcome | null } | null> {
+  const chat = await eng.store.loadChat(chatPath);
+  if (fmStr(chat.fm, "card") !== qid) return null;
+  const questions = await eng.store.loadQuestions(dir);
+  const q = questions.find((x) => x.id === qid);
+  if (!q?.part) return null;
+  const state = await eng.store.loadState(dir, eng.settings().targetLevel);
+  if (q.subskill in state.names) {
+    const b = state.bank[q.subskill] ?? (state.bank[q.subskill] = { right: 0, total: 0 });
+    b.total += 1;
+    if (attempt.result === "correct") b.right += 1;
+    await eng.store.saveState(dir, state);
+  }
+  const mode = (fmStr(chat.fm, "mode", "quiz") as Mode) || "quiz";
+  const now = new Date().toISOString();
+  const given = response && typeof response === "object" && "answer" in response ? JSON.stringify((response as Record<string, unknown>).answer) : "";
+  chat.messages.push({ role: "you", text: `*Answered in the ${q.activity ? "activity" : "chat"}:* ${given || "(no answer)"}` });
+  const head = attempt.result === "correct" ? "**Correct.**" : attempt.result === "partial" ? "**Partly right.**" : "**Incorrect.**";
+  const verdict = [`${head} ${assessment.feedback} *Marked by the activity's own code. Work in an interactive counts as helped.*`, ...(attempt.result === "correct" ? [] : [`Answer: ${answerText(q)}${q.explanation ? `\n\n${q.explanation}` : ""}`])].join("\n\n");
+  // The answer is shown after a miss, so the later parts of the task count as helped.
+  chat.fm.part_shown = attempt.result !== "correct" || fmStr(chat.fm, "part_shown") === q.part.task ? q.part.task : "";
+  chat.fm.right = fmNum(chat.fm, "right", 0) + (attempt.result === "correct" ? 1 : 0);
+  chat.fm.total = fmNum(chat.fm, "total", 0) + 1;
+  const next = nextPart(questions, q);
+  const action = sessionFor(chat, state, mode).action || "quiz";
+  chat.fm.card = next?.id ?? "";
+  if (next) chat.fm.asked = [...fmList(chat.fm, "asked"), next.id];
+  chat.fm.pending_confidence = "";
+  chat.fm.built = "";
+  // With the task done, the learner chooses what comes next, as after the last question of a run.
+  chat.fm.await_continue = next ? "" : "yes";
+  const presentation = next?.activity ? await partActivity(eng, dir, await eng.store.loadTopic(dir), state, next) : null;
+  const opens = presentation ? `\n\n*The ${presentation.decision.kind} opens for this part. Answer in it, or type your answer here. Either way it counts as helped.*` : "";
+  const reply = next ? `${verdict}\n\n---\n\n${formatQuizQuestion(next, state)}${opens}` : `${verdict}\n\n---\n\n*That was the last part of this task. Press **Continue** for what comes next.*`;
+  chat.messages.push({ role: "tutor", text: reply });
+  eng.bankSession(chat, state, mode, next, { action, reason: next?.part ? `Part ${next.part.n} of ${next.part.of} of the task in progress: each part is marked on its own.` : "The task is finished." }, now);
+  if (presentation) chat.fm.card_help = "yes";
+  await eng.store.saveChat(chatPath, chat);
+  return { presentation };
 }
 
 /** The most blueprints one compile plans. Each is one main-provider call, or two with a repair. */

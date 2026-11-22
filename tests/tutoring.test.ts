@@ -503,6 +503,10 @@ test("reasoning: a rubric maps to result, method and assumptions, the same way e
   assert.equal(finalExpression("16/64 = 1/4 (divide numerator and denominator by 16)"), "1/4");
   assert.equal(finalExpression("it is about speed, I think"), "it is about speed, I think");
   assert.equal(finalExpression("first line\nsecond line"), "");
+  // A function's argument is maths, not a remark: it is never cut.
+  assert.equal(finalExpression("so\nv(t) = 1 - exp(-t)"), "1 - exp(-t)");
+  assert.equal(finalExpression("y = 2 (x + 1)"), "2 (x + 1)");
+  assert.equal(finalExpression("y = sin(x) (by the chain rule)"), "sin(x)");
 });
 
 test("reasoning: SymPy settles only the result it compared, and a disagreement with the grader is kept visible", () => {
@@ -619,7 +623,7 @@ test("grading: an inconclusive mark is history, not a data point, and survives a
   let r = await t.engine.quizTurn(t.dir, chat, "16/64 = 1/4");
   let a = r.attempt!;
   assert.deepEqual([a.result, a.reasoning?.result.by, a.mark?.proposed, a.mark?.conclusive], ["partial", "symbolic", "correct", false]);
-  assert.match(r.reply, /^\*\*Partly right\.\*\* Correct\. The final result is right, but the method the question asks for could not be judged/);
+  assert.match(r.reply, /^\*\*Partly right\.\*\* Correct\. SymPy verified the final expression only: not the derivation, or what it means physically\. The final result is right, but the method the question asks for could not be judged/);
   let st = await t.store.loadState(t.dir, 4);
   assert.deepEqual(st.attempts.find((x) => x.id === a.id)?.mark, a.mark, "the basis is stored and read back");
   let e = skillEvidence(st.attempts, 1);
@@ -1518,6 +1522,10 @@ test("multi-part tasks: a part is read from its line, traces compare step by ste
   assert.ok(!F.sameSequence("", "a"));
   assert.ok(F.sameSequence("push 1, full, pop 1", "push1, full, pop1"), "spacing inside a step is ignored");
   assert.ok(F.sameSequence("P1 C1 P2", "P1, C1, P2"), "an answer with no separator is split at spaces");
+  assert.ok(F.sameSequence("0 V, 1 V, 0.632 V", "0, 1, 0.63"), "numbers to the precision asked, units ignored");
+  assert.ok(F.sameSequence("0, 1, .63", "0, 1, 0.63"));
+  assert.ok(!F.sameSequence("0, 1, 0.64", "0, 1, 0.63"), "but not a different value");
+  assert.ok(!F.sameSequence("0, 1, 0.37", "0, 1, 0.63"));
   const qs = F.parseQuestions(`### Q1\nsubskill: 1\ntype: short\npart: t 1/2\ntask: prediction\nquestion: Trace it.\nanswer: a, b\n\n### Q2\nsubskill: 1\ntype: open\npart: t 2/2\nquestion: Why?\nanswer: Because.\n\n### Q3\nsubskill: 2\ntype: short\npart: nonsense\nquestion: Plain.\nanswer: 1\n`);
   assert.deepEqual(qs.map((q) => q.part?.n ?? null), [1, 2, null], "a bad part line leaves a plain question");
   assert.equal(F.nextPart(qs, qs[0])?.id, "Q2");
@@ -1611,4 +1619,98 @@ test("multi-part tasks: the C++ concurrency example installs once, asks trace, i
   r = await t.engine.quizTurn(dir, chat, "When the acquire load reads the value of the release store, the two synchronise, so the slot write happens-before the read.");
   assert.deepEqual([r.attempt?.questionId, r.attempt?.assisted], [parts[2].id, true]);
   assert.equal((await t.store.loadChat(chat)).fm.part_shown, "spsc-queue");
+});
+
+test("signals example: predict, plot, derive and explain are asked in order; the plot is the module's own activity and its mark is the part's answer", async () => {
+  const t = await setup({ maths: true });
+  const { adaptRegistry } = await import("../src/visualcontract");
+  const registry = await import("../src/visuals/registry");
+  const { installExample } = await import("../src/examples");
+  const { SYMPY_ESTABLISHES } = await import("../src/engine-bank");
+  t.engine.visuals = adaptRegistry(registry as any);
+  const { dir } = await installExample(t.store, "signals-systems", 4);
+  const topic = await t.store.loadTopic(dir);
+  assert.deepEqual(topic.subskills.map((s) => [s.n, s.name, s.prerequisites]), [[1, "LTI systems and their responses", []], [2, "Laplace transforms and transfer functions", [1]], [3, "First-order systems and the time constant", [1, 2]]]);
+  const qs = await t.store.loadQuestions(dir);
+  const parts = qs.filter((q) => q.part?.task === "rc-step").sort((a, b) => a.part!.n - b.part!.n);
+  assert.deepEqual(parts.map((q) => [q.part!.n, q.type, q.task, !!q.activity]), [[1, "short", "prediction", false], [2, "short", "application", true], [3, "open", "application", false], [4, "open", "explanation", false]]);
+  assert.equal(F.parsePartActivity('{"moduleId":"x"}'), null, "an activity line missing a field is dropped");
+
+  // The decaying exponential: 1 − e^(−t) has slope 1 at t = 0.
+  const { evaluate } = await import("../src/visuals/models");
+  const s = parts[1].activity!.settings as any;
+  assert.deepEqual([evaluate(s, 0).y, evaluate(s, 0).slope], [0, 1]);
+  assert.ok(Math.abs((evaluate(s, 1).y ?? 0) - (1 - Math.exp(-1))) < 1e-12);
+
+  const chat = await t.store.newChat(dir, "Signals and systems", "quiz", new Date(2026, 10, 15, 11, 0));
+  const c = await t.store.loadChat(chat);
+  c.fm.card = parts[0].id;
+  await t.store.saveChat(chat, c);
+
+  // 1. Predict, by code.
+  let r = await t.engine.quizTurn(dir, chat, "0, 1, 0.63");
+  assert.deepEqual([r.attempt?.result, r.attempt?.grading], ["correct", "deterministic"]);
+  // 2. The plot opens as the part's activity: saved once, checked by the module, never offered alone.
+  assert.ok(r.presentation?.lesson, "the plotter opens for part 2");
+  assert.deepEqual([r.presentation!.lesson!.moduleId, r.presentation!.decision.status, r.presentation!.activity?.bankQuestion], ["function-plotter", "cached", parts[1].id]);
+  assert.match(r.reply, /part 2 of 4[\s\S]*The simulation opens for this part/);
+  assert.equal((await t.store.loadChat(chat)).fm.card_help, "yes", "an answer typed with the plot open counts as helped");
+  const saved = await t.store.loadActivities(dir);
+  assert.equal(saved.length, 1);
+  assert.equal(t.calls.length, 0, "no model call to set up the plot");
+  // The learner moves P to t = 1 and enters the slope there: marked there, as practice in the plot; the part stays open.
+  let m = await t.engine.recordActivityResult(dir, saved[0].id, { answer: Math.exp(-1), settings: { ...saved[0].lesson!.settings, pointX: 1 } }, { chatPath: chat });
+  assert.deepEqual([m.attempt?.result, m.advanced, m.attempt?.questionId], ["correct", false, `${saved[0].id}:slope-at-point`]);
+  assert.match(m.notPart ?? "", /controls moved/);
+  assert.equal((await t.store.loadChat(chat)).fm.card, parts[1].id, "the part is still the open question");
+  // At t = 0, where the part asks, a wrong slope is the part's answer.
+  const bankBefore = (await t.store.loadState(dir, 4)).bank[3] ?? { right: 0, total: 0 };
+  m = await t.engine.recordActivityResult(dir, saved[0].id, { answer: 0.5, settings: { ...saved[0].lesson!.settings } }, { chatPath: chat });
+  assert.deepEqual([m.attempt?.result, m.advanced], ["incorrect", true]);
+  assert.deepEqual([m.attempt?.questionId, m.attempt?.assisted, m.attempt?.taskType], [parts[1].id, true, "interactive"]);
+  assert.equal((await t.store.loadState(dir, 4)).bank[3].total, bankBefore.total + 1, "the subskill's bank count moves, as a typed answer's would");
+  let ch = await t.store.loadChat(chat);
+  assert.equal(ch.fm.card, parts[2].id, "the chat moves on to part 3");
+  assert.match(ch.messages.at(-1)!.text, /\*\*Incorrect\.\*\*[\s\S]*Marked by the activity's own code[\s\S]*Answer: 1[\s\S]*part 3 of 4/);
+  assert.equal(ch.fm.part_shown, "rc-step", "the answer was shown, so the rest of the task counts as helped");
+  m = await t.engine.recordActivityResult(dir, saved[0].id, { answer: 1 }, { chatPath: chat });
+  assert.equal(m.advanced, false, "a second answer in the plot does not move the chat again");
+
+  // 3. Derive: the grader judges the working and SymPy the final line, and the learner is told which.
+  t.replies.push(JSON.stringify({ grade: "good", feedback: "Clear partial fractions.", reasoning: { result: "correct", method: "sound", certainty: "complete" } }));
+  r = await t.engine.quizTurn(dir, chat, "V_in = 1/s and H = 1/(1+s), so V(s) = 1/(s(s+1)) = 1/s - 1/(s+1).\nv(t) = 1 - exp(-t)");
+  let a = r.attempt!;
+  assert.equal(a.reasoning?.result.by, "symbolic", "the result was decided by SymPy");
+  assert.match(a.assumptions, /SymPy checked the final result only, not the method; sympy verified the final expression only: not the derivation, or what it means physically/);
+  assert.ok(r.reply.includes(SYMPY_ESTABLISHES));
+  assert.equal(a.assisted, true);
+  // 4. Explain: the assessor on the compile model.
+  t.replies.push(JSON.stringify({ grade: "good", feedback: "", reasoning: { result: "correct", method: "sound", certainty: "complete" } }));
+  r = await t.engine.quizTurn(dir, chat, "Electrolytic capacitors are often 20% high, and the source resistance adds to R. Measure C with a meter. SymPy only verified the ideal expression.");
+  assert.deepEqual([r.attempt?.questionId, r.attempt?.taskType], [parts[3].id, "explanation"]);
+  assert.equal(t.calls.at(-1).effort, "high");
+  const st = await t.store.loadState(dir, 4);
+  assert.deepEqual(st.attempts.map((x) => x.questionId).filter((id) => !id.startsWith("part-")), parts.map((q) => q.id), "four parts, four records; a later answer in the plot is practice in it");
+
+  // A verified final line from a wrong derivation is still only a verified line.
+  assert.ok(!SYMPY_ESTABLISHES.includes("correct"), SYMPY_ESTABLISHES);
+});
+
+test("signals example: with no visual modules the plot part is typed and marked by code, with no activity saved", async () => {
+  const t = await setup();
+  const { installExample } = await import("../src/examples");
+  const { dir } = await installExample(t.store, "signals-systems", 4);
+  const qs = await t.store.loadQuestions(dir);
+  const p1 = qs.find((q) => q.part?.task === "rc-step" && q.part.n === 1)!;
+  const chat = await t.store.newChat(dir, "Signals and systems", "quiz", new Date(2026, 10, 15, 11, 0));
+  const c = await t.store.loadChat(chat);
+  c.fm.card = p1.id;
+  await t.store.saveChat(chat, c);
+  let r = await t.engine.quizTurn(dir, chat, "0, 1, 0.37");
+  assert.equal(r.attempt?.result, "incorrect");
+  assert.equal(r.presentation, undefined);
+  assert.equal((await t.store.loadActivities(dir)).length, 0);
+  r = await t.engine.quizTurn(dir, chat, "1");
+  assert.deepEqual([r.attempt?.result, r.attempt?.grading, r.attempt?.assisted], ["correct", "deterministic", true]);
+  assert.match(r.attempt!.assistance.join(" "), /solution to an earlier part/);
 });

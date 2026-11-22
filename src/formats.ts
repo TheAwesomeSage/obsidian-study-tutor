@@ -320,6 +320,37 @@ export interface Question {
    * marked on its own by its own route and recorded as its own attempt. Only part 1 is ever picked.
    */
   part?: TaskPart;
+  /**
+   * For a part of a task: an existing module to open for it ("activity:" as one line of JSON). Code
+   * completes it into a lesson for the concept, checks it with the module, and records the module's
+   * own assessment of the answer as this part's answer. A typed answer is marked against `answer`.
+   */
+  activity?: PartActivity;
+}
+
+/** The module, settings and wording of a part's activity; the rest of the lesson is filled in by code. */
+export interface PartActivity {
+  moduleId: string;
+  assessmentId: string;
+  settings: Record<string, unknown>;
+  predictionQuestion: string;
+  hint: string;
+}
+
+/** Reads a part's activity line; null when it is not an object with every field. Validation is the module's. */
+export function parsePartActivity(raw: string): PartActivity | null {
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const o = v as Record<string, unknown>;
+  const str = (k: string) => (typeof o[k] === "string" && (o[k] as string).trim() ? (o[k] as string).trim() : "");
+  const settings = o.settings && typeof o.settings === "object" && !Array.isArray(o.settings) ? (o.settings as Record<string, unknown>) : null;
+  if (!str("moduleId") || !str("assessmentId") || !settings || !str("predictionQuestion") || !str("hint")) return null;
+  return { moduleId: str("moduleId"), assessmentId: str("assessmentId"), settings, predictionQuestion: str("predictionQuestion"), hint: str("hint") };
 }
 
 /** Where a question sits in a task of several parts. */
@@ -364,10 +395,18 @@ export function sameSequence(given: string, expected: string): boolean {
   };
   const a = steps(given);
   const b = steps(expected);
-  return a.length > 0 && a.length === b.length && a.every((x, i) => x === b[i]);
+  // A number may carry a unit ("0.63v") and more digits than asked ("0.632" for "0.63").
+  const value = (x: string): number | null => (/^[+-]?(\d+\.?\d*|\.\d+)[a-zµΩ°%]*$/i.test(x) ? parseFloat(x) : null);
+  const same = (x: string, y: string): boolean => {
+    const [u, w] = [value(x), value(y)];
+    if (u === null || w === null) return x === y;
+    const places = (/\.(\d+)/.exec(y)?.[1].length ?? 0);
+    return Math.abs(u - w) <= 0.5 * 10 ** -places + 1e-12;
+  };
+  return a.length > 0 && a.length === b.length && a.every((x, i) => same(x, b[i]));
 }
 
-const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation", "family", "task", "difficulty", "rubric", "generator", "code", "concept", "part"] as const;
+const Q_KEYS = ["subskill", "type", "question", "options", "answer", "explanation", "family", "task", "difficulty", "rubric", "generator", "code", "concept", "part", "activity"] as const;
 const Q_TASKS = ["recall", "application", "transfer", "prediction", "explanation", "error-finding", "teach-back", "edge-case", "probe"];
 
 const OPTION_LABEL = /^\(?[A-Za-z][.):]\s+/;
@@ -443,6 +482,8 @@ export function parseQuestions(md: string): Question[] {
     if (get("rubric")) q.rubric = get("rubric").slice(0, 800);
     const part = get("part") ? parsePart(get("part")) : null;
     if (part) q.part = part;
+    const activity = part && get("activity") ? parsePartActivity(get("activity")) : null;
+    if (activity) q.activity = activity;
     // A spec that fails its checks is dropped: the question stays, with its own numbers only. A part
     // of a task keeps its own numbers too, so no variant, faded example or pair ever asks it alone.
     const generator = type === "short" && !part && get("generator") ? parseFamilySpec(get("generator")) : null;
