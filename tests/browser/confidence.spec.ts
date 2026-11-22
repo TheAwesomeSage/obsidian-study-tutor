@@ -9,10 +9,14 @@ for (const theme of ["light", "dark"]) test(`chat confidence drags through five 
   const errors: string[] = [];
   page.on("pageerror", e => errors.push(e.message));
   await page.goto(`/?module=confidence&theme=${theme}`);
+  // Reproduce Obsidian's ordinary-slider offset, including its active state.
+  // The custom slider must remain centred in the app, not just bare Chromium.
+  await page.addStyleTag({content:"input[type=range]::-webkit-slider-thumb{position:relative;top:-6px}input[type=range]::-webkit-slider-thumb:active{top:-6px}"});
   const slider = page.getByRole("slider", {name: "Confidence", exact: true});
-  const clear = page.getByRole("button", {name: "Clear confidence"});
+  await expect(page.getByRole("button", {name: "Clear confidence"})).toHaveCount(0);
   await expect(page.getByRole("radio")).toHaveCount(0);
-  expect((await page.locator(".st-composer").boundingBox())!.height).toBeLessThanOrEqual(130);
+  expect((await page.locator(".st-composer").boundingBox())!.height).toBeLessThanOrEqual(95);
+  await expect(page.getByRole("textbox",{name:"Your answer or message"})).toHaveAttribute("rows","1");
   await expect(slider).toHaveAttribute("aria-valuetext", /Not set/);
   expect(await page.evaluate(() => window.confidenceHarness.value)).toBeNull();
   // Clicking the untouched middle position must explicitly select it even if the native
@@ -20,7 +24,7 @@ for (const theme of ["light", "dark"]) test(`chat confidence drags through five 
   await slider.click();
   await expect(slider).toHaveAttribute("aria-valuetext", "Medium");
   expect(await page.evaluate(() => window.confidenceHarness.value)).toBe(0.5);
-  await clear.click();
+  await slider.focus();await slider.press("Delete");
   await expect(slider).toHaveAttribute("aria-valuetext", /Not set/);
 
   const box = (await slider.boundingBox())!;
@@ -53,6 +57,5 @@ for (const theme of ["light", "dark"]) test(`chat confidence drags through five 
   await page.screenshot({path: `tests/out/confidence-narrow-${theme}.png`, fullPage: true});
   await page.evaluate(() => {const h=window.confidenceHarness;h.picker.set(h.value,true);});
   await expect(slider).toBeDisabled();
-  await expect(clear).toBeDisabled();
   expect(errors).toEqual([]);
 });

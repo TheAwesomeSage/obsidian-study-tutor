@@ -10,7 +10,6 @@ export class ConfidencePicker {
   readonly el: HTMLDivElement;
   readonly slider: HTMLInputElement;
   private status: HTMLSpanElement;
-  private clear: HTMLButtonElement;
 
   constructor(parent: HTMLElement, private onChange: (value: number | null) => void) {
     const doc = parent.ownerDocument;
@@ -25,13 +24,6 @@ export class ConfidencePicker {
     this.status = this.el.appendChild(doc.createElement("span"));
     this.status.className = "st-conf-value st-sr-only";
     this.status.setAttribute("aria-live", "polite");
-    this.clear = doc.createElement("button");
-    this.clear.type = "button";
-    this.clear.className = "st-conf-clear";
-    this.clear.textContent = "×";
-    this.clear.setAttribute("aria-label", "Clear confidence");
-    this.clear.title = "Clear confidence";
-    this.clear.onclick = () => this.choose(null);
 
     const track=this.el.appendChild(doc.createElement("div"));
     track.className="st-conf-track";
@@ -62,7 +54,6 @@ export class ConfidencePicker {
       }
     };
 
-    this.el.append(this.clear);
     this.set(null);
   }
 
@@ -72,10 +63,9 @@ export class ConfidencePicker {
     this.slider.disabled = disabled;
     this.slider.value = String(chosen < 0 ? 2 : chosen);
     this.slider.setAttribute("aria-valuetext", value === null ? "Not set. Move the slider to choose confidence." : confidenceLabel(value));
-    this.slider.title=value===null?"Confidence: not set. Drag to choose one of five levels.":`Confidence: ${confidenceLabel(value)}`;
+    this.slider.title=value===null?"Confidence: not set. Drag to choose one of five levels.":`Confidence: ${confidenceLabel(value)}. Press Delete to clear.`;
     this.el.style.setProperty("--st-conf-fill",`${chosen<0?0:chosen*25}%`);
     this.status.textContent = value === null ? "Not set" : confidenceLabel(value);
-    this.clear.disabled = disabled || value === null;
   }
 
   private choose(value: number | null): void {

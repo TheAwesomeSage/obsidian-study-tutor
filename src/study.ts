@@ -89,7 +89,7 @@ export class StudyScreen implements Screen {
     this.quickEl = composer.createDiv({ cls: "st-quick st-side", attr: { role: "group", "aria-label": "Help with the open question" } });
     const main = composer.createDiv({ cls: "st-composer-main" });
     const right = composer.createDiv({ cls: "st-side is-right" });
-    this.input = main.createEl("textarea", { cls: "st-input", attr: { rows: "2", "aria-label": "Your answer or message" } });
+    this.input = main.createEl("textarea", { cls: "st-input", attr: { rows: "1", "aria-label": "Your answer or message" } });
     this.input.oninput = () => this.keepDraft();
     this.input.onkeydown = (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {

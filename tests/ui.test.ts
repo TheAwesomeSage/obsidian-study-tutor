@@ -226,8 +226,8 @@ test("home, study, review, topic page and graph work together from the normal en
   assert.equal(confSlider().value, "3", "clicking a label also moves the slider");
   assert.deepEqual(confOn(), ["High"]);
   assert.ok($(root, ".st-conf").classList.contains("is-set"));
-  labelled(root,"Clear confidence").click();
-  assert.deepEqual(confOn(), [], "Clear unsets the value");
+  confSlider().dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown",{key:"Delete",bubbles:true}));
+  assert.deepEqual(confOn(), [], "Delete unsets the value without a separate button");
   confPick("Medium");
   confSlider().dispatchEvent(new (globalThis as any).window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
   assert.deepEqual(confOn(), ["High"], "arrow keys move between points");

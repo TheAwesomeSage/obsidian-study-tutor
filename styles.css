@@ -1355,6 +1355,9 @@
   box-shadow: none;
   outline: none;
 }
+.study-tutor .st-composer textarea.st-input {
+  min-height: calc(1.55em + 2 * var(--st-1));
+}
 .study-tutor .st-composer-foot {
   grid-area: foot;
   display: flex;
@@ -1397,15 +1400,6 @@
   display: flex;
   align-items: center;
 }
-.study-tutor .st-conf-clear {
-  height: 24px;
-  width: 20px;
-  padding: 0;
-  font-size: 16px;
-  background: transparent;
-  box-shadow: none;
-  color: var(--text-muted);
-}
 .study-tutor input.st-conf-slider {
   appearance: none;
   -webkit-appearance: none;
@@ -1438,10 +1432,18 @@
   width: 24px;
   height: 24px;
   margin-top: -2px;
+  /* Obsidian positions ordinary thumbs with --slider-thumb-y. This custom
+     24px thumb is already centred on its 20px track by the margin above. */
+  top: 0;
+  transform: none;
   border: 1px solid #dce1e8;
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 1px 4px #0003;
+}
+.study-tutor input.st-conf-slider::-webkit-slider-thumb:active {
+  top: 0;
+  transform: none;
 }
 .study-tutor input.st-conf-slider::-moz-range-track {
   height: 20px;
@@ -1459,8 +1461,7 @@
 .study-tutor .st-conf-slider:disabled {
   cursor: default;
 }
-.study-tutor .st-conf-slider:focus-visible,
-.study-tutor .st-conf-clear:focus-visible {
+.study-tutor .st-conf-slider:focus-visible {
   outline: 2px solid var(--interactive-accent);
   outline-offset: 2px;
 }
