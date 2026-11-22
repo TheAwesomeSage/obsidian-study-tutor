@@ -5,6 +5,7 @@
 
 import { Attempt, normaliseAttempt, skillEvidence } from "./evidence";
 import { BrierComparison, bktAll, brierComparison } from "./bkt";
+import { bridgeComparison, timeToIndependence } from "./structures";
 
 /** Said with every summary: a count of calls is not a saving. */
 export const CALL_COUNT_CAVEAT = "Call counts are not savings. Fewer model calls says nothing about cost, time or learning until tokens, cost, time and outcomes are measured on matched work, with the same learners, material and model.";
@@ -32,6 +33,8 @@ export interface MetricsInput {
   activities?: Record<string, unknown>[];
   /** Logged policy decisions (_logs/decisions.md). */
   decisions?: { decision?: { version?: number; local?: string | null } }[];
+  /** Outcome checks (assessments.md records); only the criteria verdicts are read. */
+  assessments?: { criteria?: { verdict?: unknown }[] }[];
 }
 
 export interface MetricsSummary {
@@ -39,6 +42,14 @@ export interface MetricsSummary {
   attempts: { total: number; byGrading: Record<string, number>; markedByCode: number; markedByModel: number; selfRated: number; ungraded: number; disputed: number; assisted: number; answerSeen: number; independent: number; probes: number; probeCorrect: number; seconds: Stat };
   activities: { records: number; byStatus: Record<string, number>; localCalls: number; repairs: number; claudeCalls: number; firstPassValid: number; firstPassKnown: number; wallMs: Stat; localMs: Stat; loadMs: Stat; promptTokens: number; evalTokens: number };
   decisions: { total: number; bank: number; placement: number; model: number; byVersion: Record<string, number> };
+  /**
+   * Time to independent performance: for each concept with answers, the attempts and days from its first
+   * answer to its first unaided success, split by whether a bridge from another topic was answered on it.
+   * The plugin's own measure; the base-model comparison (docs/BASE-MODEL-COMPARISON.md) uses unseen tests instead.
+   */
+  independence: { concepts: number; reached: number; bridged: { n: number; attempts: number; days: number }; unbridged: { n: number; attempts: number; days: number } };
+  /** Answers by kind of task, bridge answers, and outcome checks with their criteria verdicts. */
+  kinds: { byTaskType: Record<string, number>; bridges: number; bridgesCorrect: number; outcomeChecks: number; criteria: Record<string, number> };
   /** BKT (shadow) against the existing estimate, over every unaided answer. */
   shadow: BrierComparison;
   notRecorded: string[];
@@ -72,6 +83,18 @@ export function summariseMetrics(input: MetricsInput): MetricsSummary {
   const graded = kept.filter((a) => a.result !== "ungraded");
   let independent = 0;
   for (const list of Object.values(input.attempts)) for (const n of new Set(list.map((a) => a.skill).filter((n) => n > 0))) independent += skillEvidence(list, n).independent;
+
+  // Each concept's first unaided success, from the same evidence rules the plugin uses.
+  const rows: ReturnType<typeof timeToIndependence>[] = [];
+  let concepts = 0;
+  for (const list of Object.values(input.attempts)) {
+    for (const n of new Set(list.filter((a) => !a.probe).map((a) => a.skill).filter((n) => n > 0))) {
+      concepts++;
+      rows.push(timeToIndependence(list, n, skillEvidence(list, n).firstIndependentDay));
+    }
+  }
+  const bridges = graded.filter((a) => a.transferFrom);
+  const checks = input.assessments ?? [];
 
   const acts = input.activities ?? [];
   const field = (pick: (a: (typeof acts)[number]) => unknown, k: string): number[] => acts.map((a) => numberAt(pick(a), k));
@@ -115,6 +138,14 @@ export function summariseMetrics(input: MetricsInput): MetricsSummary {
       placement: decisions.filter((d) => d.decision?.local === "placement").length,
       model: decisions.filter((d) => !d.decision?.local).length,
       byVersion: count(decisions.map((d) => String(d.decision?.version ?? "unknown"))),
+    },
+    independence: { concepts, reached: rows.filter((r) => r).length, ...bridgeComparison(rows) },
+    kinds: {
+      byTaskType: count(graded.map((a) => a.taskType || "unlabelled")),
+      bridges: bridges.length,
+      bridgesCorrect: bridges.filter((a) => a.result === "correct").length,
+      outcomeChecks: checks.length,
+      criteria: count(checks.flatMap((c) => (Array.isArray(c.criteria) ? c.criteria : []).map((x) => (typeof x?.verdict === "string" ? x.verdict : "unknown")))),
     },
     shadow: brierComparison(Object.values(input.attempts).flatMap((list) => bktAll(list))),
     notRecorded: NOT_RECORDED,
@@ -176,6 +207,17 @@ export function metricsReport(s: MetricsSummary): string {
     `- With help: ${a.assisted}; after seeing the answer: ${a.answerSeen}; unaided data points: ${a.independent}.`,
     `- Cold probes: ${a.probes} answers, ${a.probeCorrect} correct.`,
     `- Seconds from question to answer: ${a.seconds.n ? `median ${a.seconds.median}, 90th percentile ${a.seconds.p90} (n = ${a.seconds.n})` : "none recorded"}.`,
+    "",
+    "## Time to independent performance",
+    `- Concepts with answers: ${s.independence.concepts}; reached a first unaided success: ${s.independence.reached}.`,
+    `- With a bridge from another topic: ${s.independence.bridged.n ? `${s.independence.bridged.n} concepts, mean ${s.independence.bridged.attempts} attempts and ${s.independence.bridged.days} days` : "none"}.`,
+    `- Without one: ${s.independence.unbridged.n ? `${s.independence.unbridged.n} concepts, mean ${s.independence.unbridged.attempts} attempts and ${s.independence.unbridged.days} days` : "none"}.`,
+    "- These are the plugin's own records, on questions it set. They are not a comparison: concepts differ, and only unseen tests taken outside the plugin can compare (docs/BASE-MODEL-COMPARISON.md).",
+    "",
+    "## Kinds of evidence",
+    `- Marked answers by task: ${Object.entries(s.kinds.byTaskType).map(([k, v]) => `${k} ${v}`).join(", ") || "none"}.`,
+    `- Bridge answers: ${s.kinds.bridges}, ${s.kinds.bridgesCorrect} correct.`,
+    `- Outcome checks: ${s.kinds.outcomeChecks}. Criteria: ${Object.entries(s.kinds.criteria).map(([k, v]) => `${k} ${v}`).join(", ") || "none"}.`,
     "",
     "## Activity configurations (local model)",
     `- Records: ${act.records} (${Object.entries(act.byStatus).map(([k, v]) => `${k} ${v}`).join(", ") || "none"}).`,

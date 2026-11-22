@@ -1,5 +1,7 @@
 # Pilot protocol: does the improved workflow help people learn?
 
+[BASE-MODEL-COMPARISON.md](BASE-MODEL-COMPARISON.md) narrows this to one question, time to independent performance against the same model in its plain chat, and [VERIFICATION.md](VERIFICATION.md) lists what has been checked and how.
+
 This is a protocol for a human-learning pilot, written before any data exist. Nothing in it has been run. Its job is to say in advance what would count as evidence that Study Tutor's improved workflow helps people learn, so that a result cannot be read into the data afterwards. The second half lists exactly what the code already measures, and what it does not.
 
 ## Question
